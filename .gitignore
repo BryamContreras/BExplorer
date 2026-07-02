@@ -1,0 +1,11 @@
+/target/
+/dist/
+/.agents/
+
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.zip
+*.sha256.txt

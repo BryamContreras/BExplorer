@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=BExplorer
+Comment=Native Rust file explorer
+Exec=bexplorer
+Icon=bexplorer
+Terminal=false
+Categories=Utility;FileManager;
+StartupNotify=true
