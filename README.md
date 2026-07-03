@@ -10,6 +10,8 @@ BExplorer is a Windows-first desktop file explorer written in Rust with
 archive handling, preview support, and a modern compact interface without
 turning into a heavy system shell replacement.
 
+Spanish documentation is available in [docs/es/README.md](docs/es/README.md).
+
 The project is designed so platform-specific code stays isolated. Windows is
 currently the primary target, while Linux and macOS support are kept behind
 separate platform modules for future work.
