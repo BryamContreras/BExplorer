@@ -4529,6 +4529,7 @@ pub(crate) fn shortcut_binding_from_input(ctx: &egui::Context) -> Option<Shortcu
             if *key == egui::Key::Escape {
                 return None;
             }
+            let modifiers = merge_shortcut_modifiers(*modifiers, input.modifiers);
             Some(ShortcutBinding {
                 key: shortcut_key_name(*key)?.into(),
                 ctrl: modifiers.ctrl || modifiers.command,
@@ -4551,7 +4552,11 @@ fn shortcut_pressed(input: &egui::InputState, binding: &ShortcutBinding) -> bool
                 pressed: true,
                 modifiers,
                 ..
-            } if *event_key == key && shortcut_modifiers_match(*modifiers, binding)
+            } if *event_key == key
+                && shortcut_modifiers_match(
+                    merge_shortcut_modifiers(*modifiers, input.modifiers),
+                    binding,
+                )
         )
     })
 }
@@ -4568,9 +4573,26 @@ fn shortcut_pressed_allow_extend(input: &egui::InputState, binding: &ShortcutBin
                 pressed: true,
                 modifiers,
                 ..
-            } if *event_key == key && shortcut_modifiers_match_allow_extra_shift(*modifiers, binding)
+            } if *event_key == key
+                && shortcut_modifiers_match_allow_extra_shift(
+                    merge_shortcut_modifiers(*modifiers, input.modifiers),
+                    binding,
+                )
         )
     })
+}
+
+fn merge_shortcut_modifiers(
+    event_modifiers: egui::Modifiers,
+    current_modifiers: egui::Modifiers,
+) -> egui::Modifiers {
+    egui::Modifiers {
+        alt: event_modifiers.alt || current_modifiers.alt,
+        ctrl: event_modifiers.ctrl || current_modifiers.ctrl,
+        shift: event_modifiers.shift || current_modifiers.shift,
+        mac_cmd: event_modifiers.mac_cmd || current_modifiers.mac_cmd,
+        command: event_modifiers.command || current_modifiers.command,
+    }
 }
 
 fn shortcut_modifiers_match(modifiers: egui::Modifiers, binding: &ShortcutBinding) -> bool {
@@ -4894,6 +4916,74 @@ mod shortcut_tests {
 
         assert!(shortcuts.arrow_down);
         assert!(shortcuts.extend_selection);
+    }
+
+    #[test]
+    fn shift_delete_triggers_permanent_delete() {
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let shortcuts = shortcuts_for(
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: Some(egui::Key::Delete),
+                pressed: true,
+                repeat: false,
+                modifiers: shift,
+            }],
+            shift,
+        );
+
+        assert!(shortcuts.permanent_delete);
+        assert!(!shortcuts.delete);
+    }
+
+    #[test]
+    fn shift_delete_uses_global_modifiers_when_event_omits_shift() {
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let shortcuts = shortcuts_for(
+            vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: Some(egui::Key::Delete),
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            shift,
+        );
+
+        assert!(shortcuts.permanent_delete);
+        assert!(!shortcuts.delete);
+    }
+
+    #[test]
+    fn shortcut_capture_uses_global_shift_when_event_omits_shift() {
+        let shift = egui::Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Delete,
+                physical_key: Some(egui::Key::Delete),
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+            modifiers: shift,
+            ..Default::default()
+        });
+
+        let binding = shortcut_binding_from_input(&ctx).expect("capture shortcut");
+        assert_eq!(binding.key, "Delete");
+        assert!(binding.shift);
+        assert!(!binding.ctrl);
+        assert!(!binding.alt);
     }
 
     #[test]
