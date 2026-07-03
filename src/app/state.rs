@@ -3840,6 +3840,7 @@ impl BExplorerApp {
                 .events
                 .iter()
                 .any(|event| matches!(event, egui::Event::Cut));
+            let native_shift_delete = native_cut && !command;
             let native_paste = input
                 .events
                 .iter()
@@ -3863,8 +3864,8 @@ impl BExplorerApp {
                 enter: shortcut(ShortcutAction::Open),
                 properties: shortcut(ShortcutAction::Properties),
                 rename: shortcut(ShortcutAction::Rename),
-                delete: shortcut(ShortcutAction::Delete) || (!command && native_cut && default_cut),
-                permanent_delete: shortcut(ShortcutAction::PermanentDelete),
+                delete: shortcut(ShortcutAction::Delete),
+                permanent_delete: shortcut(ShortcutAction::PermanentDelete) || native_shift_delete,
                 up: shortcut(ShortcutAction::GoUp),
                 arrow_up: shortcut_pressed_allow_extend(
                     input,
@@ -4516,6 +4517,10 @@ pub(crate) fn shortcut_binding_label(binding: &ShortcutBinding) -> String {
 pub(crate) fn shortcut_binding_from_input(ctx: &egui::Context) -> Option<ShortcutBinding> {
     ctx.input(|input| {
         input.events.iter().find_map(|event| {
+            if let Some(binding) = shortcut_binding_from_native_event(event, input.modifiers) {
+                return Some(binding);
+            }
+
             let egui::Event::Key {
                 key,
                 pressed: true,
@@ -4526,18 +4531,60 @@ pub(crate) fn shortcut_binding_from_input(ctx: &egui::Context) -> Option<Shortcu
             else {
                 return None;
             };
-            if *key == egui::Key::Escape {
-                return None;
-            }
-            let modifiers = merge_shortcut_modifiers(*modifiers, input.modifiers);
-            Some(ShortcutBinding {
-                key: shortcut_key_name(*key)?.into(),
-                ctrl: modifiers.ctrl || modifiers.command,
-                alt: modifiers.alt,
-                shift: modifiers.shift,
-            })
+            shortcut_binding_from_key_event(*key, *modifiers, input.modifiers)
         })
     })
+}
+
+fn shortcut_binding_from_key_event(
+    key: egui::Key,
+    event_modifiers: egui::Modifiers,
+    current_modifiers: egui::Modifiers,
+) -> Option<ShortcutBinding> {
+    if key == egui::Key::Escape {
+        return None;
+    }
+    let modifiers = merge_shortcut_modifiers(event_modifiers, current_modifiers);
+    Some(ShortcutBinding {
+        key: shortcut_key_name(key)?.into(),
+        ctrl: modifiers.ctrl || modifiers.command,
+        alt: modifiers.alt,
+        shift: modifiers.shift,
+    })
+}
+
+fn shortcut_binding_from_native_event(
+    event: &egui::Event,
+    modifiers: egui::Modifiers,
+) -> Option<ShortcutBinding> {
+    let command = modifiers.ctrl || modifiers.command;
+    match event {
+        egui::Event::Copy if command => Some(ShortcutBinding {
+            key: "C".into(),
+            ctrl: true,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+        }),
+        egui::Event::Cut if command => Some(ShortcutBinding {
+            key: "X".into(),
+            ctrl: true,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+        }),
+        egui::Event::Cut => Some(ShortcutBinding {
+            key: "Delete".into(),
+            ctrl: false,
+            alt: modifiers.alt,
+            shift: true,
+        }),
+        egui::Event::Paste(_) if command => Some(ShortcutBinding {
+            key: "V".into(),
+            ctrl: true,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+        }),
+        _ => None,
+    }
 }
 
 fn shortcut_pressed(input: &egui::InputState, binding: &ShortcutBinding) -> bool {
@@ -4983,6 +5030,51 @@ mod shortcut_tests {
         assert_eq!(binding.key, "Delete");
         assert!(binding.shift);
         assert!(!binding.ctrl);
+        assert!(!binding.alt);
+    }
+
+    #[test]
+    fn native_cut_without_command_is_treated_as_shift_delete() {
+        let shortcuts = shortcuts_for(vec![egui::Event::Cut], Default::default());
+
+        assert!(shortcuts.permanent_delete);
+        assert!(!shortcuts.delete);
+        assert!(!shortcuts.cut_event);
+    }
+
+    #[test]
+    fn shortcut_capture_maps_native_shift_delete_cut_event() {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            events: vec![egui::Event::Cut],
+            modifiers: Default::default(),
+            ..Default::default()
+        });
+
+        let binding = shortcut_binding_from_input(&ctx).expect("capture native shift delete");
+        assert_eq!(binding.key, "Delete");
+        assert!(binding.shift);
+        assert!(!binding.ctrl);
+        assert!(!binding.alt);
+    }
+
+    #[test]
+    fn shortcut_capture_keeps_native_ctrl_cut_as_cut() {
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput {
+            events: vec![egui::Event::Cut],
+            modifiers: ctrl,
+            ..Default::default()
+        });
+
+        let binding = shortcut_binding_from_input(&ctx).expect("capture native ctrl cut");
+        assert_eq!(binding.key, "X");
+        assert!(binding.ctrl);
+        assert!(!binding.shift);
         assert!(!binding.alt);
     }
 
