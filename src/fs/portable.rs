@@ -48,6 +48,7 @@ pub fn path_total_bytes(path: &Path) -> u64 {
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = object;
         0
     }
 }
@@ -66,6 +67,7 @@ pub fn path_file_count(path: &Path) -> usize {
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = object;
         0
     }
 }
@@ -86,6 +88,7 @@ pub fn path_is_folder(path: &Path) -> bool {
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = object;
         false
     }
 }
@@ -104,6 +107,7 @@ where
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = object;
         let _ = (target, on_event);
         Err(BExplorerError::Operation(
             "Portable devices are only supported on Windows".into(),

@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(target_os = "windows")]
+use std::process::Stdio;
 
 use crate::utils::errors::{BExplorerError, Result};
 
@@ -190,14 +192,91 @@ pub(super) fn eject_drive(path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn mount_disk_image(path: &Path) -> Result<()> {
+    ensure_command("udisksctl")?;
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if mounted_disk_image_root(&canonical).is_ok() {
+        return Ok(());
+    }
+    for loop_device in linux_loop_devices_for_file(&canonical) {
+        if mount_linux_block_or_partition(&loop_device).is_ok()
+            && mounted_disk_image_root(&canonical).is_ok()
+        {
+            return Ok(());
+        }
+    }
+
+    let output = Command::new("udisksctl")
+        .args(["loop-setup", "--read-only", "--file"])
+        .arg(&canonical)
+        .output()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    if !output.status.success() {
+        return Err(command_error("Could not set up loop device", &output));
+    }
+
+    let block = parse_udisks_block_device(&udisks_output_text(&output))
+        .ok_or_else(|| BExplorerError::Shell("udisksctl did not report a loop device".into()))?;
+    mount_linux_block_or_partition(&block)?;
+    wait_for_mounted_disk_image_root(&canonical).map(|_| ())
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub(super) fn mount_disk_image(_path: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
         "Mounting disk images is currently available on Windows only".into(),
     ))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn mounted_disk_image_root(path: &Path) -> Result<PathBuf> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if let Some(root) = mounted_disk_image_root_once(&canonical) {
+        return Ok(root);
+    }
+
+    Err(BExplorerError::Shell(format!(
+        "Could not locate mounted disk image volume for {}",
+        path.display()
+    )))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn wait_for_mounted_disk_image_root(path: &Path) -> Result<PathBuf> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        if let Some(root) = mounted_disk_image_root_once(path) {
+            return Ok(root);
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
+    }
+
+    Err(BExplorerError::Shell(format!(
+        "Could not locate mounted disk image volume for {}",
+        path.display()
+    )))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn mounted_disk_image_root_once(canonical: &Path) -> Option<PathBuf> {
+    for loop_device in linux_loop_devices_for_file(canonical) {
+        if let Some(mount) = linux_mount_for_block_device(&loop_device) {
+            return Some(mount);
+        }
+        for partition in linux_block_partitions(&loop_device) {
+            if let Some(mount) = linux_mount_for_block_device(&partition) {
+                return Some(mount);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub(super) fn mounted_disk_image_root(_path: &Path) -> Result<PathBuf> {
     Err(BExplorerError::Shell(
         "Resolving mounted disk images is currently available on Windows only".into(),
@@ -209,9 +288,300 @@ pub(super) fn suppress_file_explorer_windows_at(_path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn eject_drive(path: &Path) -> Result<()> {
+    ensure_command("udisksctl")?;
+    let block = linux_mount_source_for_path(path).ok_or_else(|| {
+        BExplorerError::Shell(format!(
+            "Could not find mounted block device for {}",
+            path.display()
+        ))
+    })?;
+
+    let unmount = Command::new("udisksctl")
+        .args(["unmount", "--block-device"])
+        .arg(&block)
+        .output()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    if !unmount.status.success() && !udisks_error_allows_eject_continue(&unmount) {
+        return Err(command_error("Could not unmount drive", &unmount));
+    }
+
+    if let Some(loop_block) = linux_loop_base_for_block(&block) {
+        run_udisks_status(
+            Command::new("udisksctl")
+                .args(["loop-delete", "--block-device"])
+                .arg(loop_block),
+            "Could not delete loop device",
+        )
+    } else {
+        let power_block = linux_parent_block_device(&block).unwrap_or(block);
+        run_udisks_status(
+            Command::new("udisksctl")
+                .args(["power-off", "--block-device"])
+                .arg(power_block),
+            "Could not power off drive",
+        )
+    }
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub(super) fn eject_drive(_path: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
         "Ejecting drives is currently available on Windows only".into(),
     ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn mount_linux_block_or_partition(block: &Path) -> Result<()> {
+    if run_udisks_status(
+        Command::new("udisksctl")
+            .args(["mount", "--block-device"])
+            .arg(block),
+        "Could not mount disk image",
+    )
+    .is_ok()
+    {
+        return Ok(());
+    }
+
+    for partition in linux_block_partitions(block) {
+        if run_udisks_status(
+            Command::new("udisksctl")
+                .args(["mount", "--block-device"])
+                .arg(partition),
+            "Could not mount disk image partition",
+        )
+        .is_ok()
+        {
+            return Ok(());
+        }
+    }
+
+    Err(BExplorerError::Shell(format!(
+        "Could not mount disk image device {}",
+        block.display()
+    )))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn run_udisks_status(command: &mut Command, context: &str) -> Result<()> {
+    let output = command
+        .output()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_error(context, &output))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn udisks_output_text(output: &std::process::Output) -> String {
+    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.stderr.is_empty() {
+        if !text.ends_with('\n') && !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    text
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn command_error(context: &str, output: &std::process::Output) -> BExplorerError {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let detail = if !stderr.is_empty() { stderr } else { stdout };
+    if detail.is_empty() {
+        BExplorerError::Shell(context.into())
+    } else {
+        BExplorerError::Shell(format!("{context}: {detail}"))
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn udisks_error_allows_eject_continue(output: &std::process::Output) -> bool {
+    let detail = udisks_output_text(output).to_ascii_lowercase();
+    detail.contains("not mounted")
+        || detail.contains("not a mounted filesystem")
+        || detail.contains("is not mounted")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn ensure_command(program: &str) -> Result<()> {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .any(|directory| directory.join(program).is_file())
+        .then_some(())
+        .ok_or_else(|| BExplorerError::Shell(format!("{program} is required for this operation")))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn parse_udisks_block_device(text: &str) -> Option<PathBuf> {
+    text.split_whitespace()
+        .map(|token| {
+            token.trim_matches(|ch| matches!(ch, '.' | ',' | ';' | ':' | '\'' | '"' | '`'))
+        })
+        .find(|token| token.starts_with("/dev/"))
+        .map(PathBuf::from)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_loop_devices_for_file(image_path: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir("/sys/block") else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with("loop") {
+                return None;
+            }
+            let backing = std::fs::read_to_string(entry.path().join("loop/backing_file")).ok()?;
+            let backing = PathBuf::from(backing.trim());
+            let backing = backing.canonicalize().unwrap_or(backing);
+            (backing == image_path).then(|| PathBuf::from("/dev").join(name))
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_block_partitions(block: &Path) -> Vec<PathBuf> {
+    let Some(name) = block.file_name().and_then(|name| name.to_str()) else {
+        return Vec::new();
+    };
+    let sys_block = Path::new("/sys/class/block").join(name);
+    let Ok(entries) = std::fs::read_dir(sys_block) else {
+        return Vec::new();
+    };
+    let mut partitions = entries
+        .flatten()
+        .filter_map(|entry| {
+            let child = entry.file_name().to_string_lossy().to_string();
+            child
+                .starts_with(name)
+                .then(|| PathBuf::from("/dev").join(child))
+        })
+        .collect::<Vec<_>>();
+    partitions.sort();
+    partitions
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mount_for_block_device(block: &Path) -> Option<PathBuf> {
+    let block = block.display().to_string();
+    linux_mountinfo_entries()
+        .into_iter()
+        .find(|entry| entry.source == block)
+        .map(|entry| entry.mount_point)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mount_source_for_path(path: &Path) -> Option<PathBuf> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    linux_mountinfo_entries()
+        .into_iter()
+        .filter(|entry| path == entry.mount_point || path.starts_with(&entry.mount_point))
+        .max_by_key(|entry| entry.mount_point.as_os_str().len())
+        .and_then(|entry| {
+            entry
+                .source
+                .starts_with("/dev/")
+                .then(|| PathBuf::from(entry.source))
+        })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_loop_base_for_block(block: &Path) -> Option<PathBuf> {
+    let name = block.file_name()?.to_str()?;
+    if name.starts_with("loop") && !name.contains('p') {
+        return Some(block.to_path_buf());
+    }
+    let parent = linux_parent_block_device(block)?;
+    parent
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("loop"))
+        .then_some(parent)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_parent_block_device(block: &Path) -> Option<PathBuf> {
+    let name = block.file_name()?.to_str()?;
+    let canonical = std::fs::canonicalize(Path::new("/sys/class/block").join(name)).ok()?;
+    let parent_name = canonical.parent()?.file_name()?.to_str()?;
+    (parent_name != "block").then(|| PathBuf::from("/dev").join(parent_name))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Clone, Debug)]
+struct LinuxMountInfoEntry {
+    mount_point: PathBuf,
+    source: String,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mountinfo_entries() -> Vec<LinuxMountInfoEntry> {
+    let Ok(text) = std::fs::read_to_string("/proc/self/mountinfo") else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| {
+            let (before, after) = line.split_once(" - ")?;
+            let before_fields = before.split_whitespace().collect::<Vec<_>>();
+            let after_fields = after.split_whitespace().collect::<Vec<_>>();
+            Some(LinuxMountInfoEntry {
+                mount_point: PathBuf::from(decode_mountinfo_field(before_fields.get(4)?)),
+                source: decode_mountinfo_field(after_fields.get(1)?),
+            })
+        })
+        .collect()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn decode_mountinfo_field(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' && index + 3 < bytes.len() {
+            let digits = &bytes[index + 1..index + 4];
+            if digits.iter().all(|byte| matches!(byte, b'0'..=b'7')) {
+                output.push(
+                    ((digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + digits[2] - b'0') as char,
+                );
+                index += 4;
+                continue;
+            }
+        }
+        output.push(bytes[index] as char);
+        index += 1;
+    }
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn parses_udisks_loop_device_output() {
+        assert_eq!(
+            parse_udisks_block_device("Mapped file image.iso as /dev/loop7."),
+            Some(PathBuf::from("/dev/loop7"))
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn decodes_mountinfo_escape() {
+        assert_eq!(
+            decode_mountinfo_field("/media/My\\040Disk"),
+            "/media/My Disk"
+        );
+    }
 }

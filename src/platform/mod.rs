@@ -253,7 +253,12 @@ pub fn network_computers() -> Vec<NetworkComputerInfo> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_computers() -> Vec<NetworkComputerInfo> {
+    linux::network_computers()
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_computers() -> Vec<NetworkComputerInfo> {
     Vec::new()
 }
@@ -270,7 +275,12 @@ pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
+    linux::network_computers()
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
     Vec::new()
 }
@@ -287,7 +297,12 @@ pub fn network_computers_netbios_cached() -> Vec<NetworkComputerInfo> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_computers_netbios_cached() -> Vec<NetworkComputerInfo> {
+    linux::network_computers()
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_computers_netbios_cached() -> Vec<NetworkComputerInfo> {
     Vec::new()
 }
@@ -338,7 +353,12 @@ pub fn network_computers_wnet() -> Vec<NetworkComputerInfo> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_computers_wnet() -> Vec<NetworkComputerInfo> {
+    linux::network_computers()
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_computers_wnet() -> Vec<NetworkComputerInfo> {
     Vec::new()
 }
@@ -355,7 +375,12 @@ pub fn network_shell_devices() -> Vec<NetworkComputerInfo> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_shell_devices() -> Vec<NetworkComputerInfo> {
+    linux::network_computers()
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_shell_devices() -> Vec<NetworkComputerInfo> {
     Vec::new()
 }
@@ -365,7 +390,12 @@ pub fn network_netbios_neighbor_addresses() -> Vec<String> {
     windows::network_netbios_neighbor_addresses()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_netbios_neighbor_addresses() -> Vec<String> {
+    linux::network_neighbor_addresses()
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_netbios_neighbor_addresses() -> Vec<String> {
     Vec::new()
 }
@@ -379,7 +409,12 @@ pub fn network_computer_netbios_at(address: &str) -> Option<NetworkComputerInfo>
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_computer_netbios_at(address: &str) -> Option<NetworkComputerInfo> {
+    linux::network_computer_at(address)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_computer_netbios_at(_address: &str) -> Option<NetworkComputerInfo> {
     None
 }
@@ -395,7 +430,12 @@ pub fn network_shares(host: &str) -> Vec<NetworkShareInfo> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn network_shares(host: &str) -> Vec<NetworkShareInfo> {
+    linux::network_shares(host)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn network_shares(_host: &str) -> Vec<NetworkShareInfo> {
     Vec::new()
 }
@@ -419,7 +459,12 @@ pub fn native_file_icon(path: &Path, is_directory: bool, size: u32) -> Option<Na
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn native_file_icon(path: &Path, is_directory: bool, size: u32) -> Option<NativeIconImage> {
+    linux::native_file_icon(path, is_directory, size)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn native_file_icon(_path: &Path, _is_directory: bool, _size: u32) -> Option<NativeIconImage> {
     None
 }
@@ -433,8 +478,23 @@ pub fn native_file_icon_highres(path: &Path, is_directory: bool) -> Option<Nativ
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn native_file_icon_highres(path: &Path, is_directory: bool) -> Option<NativeIconImage> {
+    linux::native_file_icon_highres(path, is_directory)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn native_file_icon_highres(_path: &Path, _is_directory: bool) -> Option<NativeIconImage> {
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn cached_desktop_thumbnail(path: &Path) -> Option<NativeIconImage> {
+    linux::cached_desktop_thumbnail(path)
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+pub fn cached_desktop_thumbnail(_path: &Path) -> Option<NativeIconImage> {
     None
 }
 

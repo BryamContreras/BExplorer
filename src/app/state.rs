@@ -69,6 +69,27 @@ fn config_group_from_file(group: FileGroup) -> GroupMode {
     }
 }
 
+fn transfer_kind_label(kind: TransferKind) -> &'static str {
+    match kind {
+        TransferKind::Copy => "copy",
+        TransferKind::Move => "move",
+    }
+}
+
+fn log_path_list(paths: &[PathBuf]) -> String {
+    const MAX_PATHS: usize = 6;
+
+    let mut list = paths
+        .iter()
+        .take(MAX_PATHS)
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if paths.len() > MAX_PATHS {
+        list.push(format!("... {} more", paths.len() - MAX_PATHS));
+    }
+    list.join(", ")
+}
+
 fn default_compress_dialog_name(
     sources: &[PathBuf],
     destination_dir: &Path,
@@ -2524,6 +2545,12 @@ impl BExplorerApp {
         if let Some(conflict) =
             pending_transfer_conflict(&sources, &destination, kind, clear_clipboard_on_confirm)
         {
+            crate::utils::log::info(format!(
+                "Transfer conflict pending: {} {} source(s) into {}",
+                transfer_kind_label(kind),
+                sources.len(),
+                destination.display()
+            ));
             self.pending_transfer_conflict = Some(conflict);
             self.status_message = "File conflict needs a decision".into();
             return;
@@ -2538,6 +2565,20 @@ impl BExplorerApp {
         );
     }
 
+    fn queue_transfer_resolved(
+        &mut self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        kind: TransferKind,
+        prompt_conflicts: bool,
+    ) {
+        if prompt_conflicts {
+            self.queue_transfer_with_conflict_prompt(sources, destination, kind, false);
+        } else {
+            self.enqueue_transfer_job(sources, destination, kind, ConflictPolicy::KeepBoth, false);
+        }
+    }
+
     fn enqueue_transfer_job(
         &mut self,
         sources: Vec<PathBuf>,
@@ -2547,6 +2588,15 @@ impl BExplorerApp {
         clear_clipboard_on_confirm: bool,
     ) {
         self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        crate::utils::log::info(format!(
+            "Transfer job queued: id={} {} {} source(s) into {} policy {:?} [{}]",
+            self.next_transfer_id,
+            transfer_kind_label(kind),
+            sources.len(),
+            destination.display(),
+            conflict_policy,
+            log_path_list(&sources)
+        ));
         self.transfer_queue.push_back(TransferJob {
             id: self.next_transfer_id,
             sources,
@@ -2568,7 +2618,13 @@ impl BExplorerApp {
         self.start_next_transfers();
     }
 
-    fn queue_transfer(&mut self, sources: Vec<PathBuf>, destination: PathBuf, kind: TransferKind) {
+    fn queue_transfer_inner(
+        &mut self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        kind: TransferKind,
+        prompt_conflicts: bool,
+    ) {
         let destination_is_portable = explorer::is_portable_path(&destination);
         let portable_sources = sources
             .iter()
@@ -2606,11 +2662,11 @@ impl BExplorerApp {
                 self.status_message = "Nothing to copy".into();
                 return;
             }
-            self.queue_transfer_with_conflict_prompt(
+            self.queue_transfer_resolved(
                 sources,
                 destination,
                 TransferKind::Copy,
-                false,
+                prompt_conflicts,
             );
             return;
         }
@@ -2626,11 +2682,11 @@ impl BExplorerApp {
                 self.status_message = "Drop target is not a folder".into();
                 return;
             }
-            self.queue_transfer_with_conflict_prompt(
+            self.queue_transfer_resolved(
                 sources,
                 destination,
                 TransferKind::Copy,
-                false,
+                prompt_conflicts,
             );
             return;
         }
@@ -2658,16 +2714,46 @@ impl BExplorerApp {
                     .is_some_and(|(source_abs, dest_abs)| {
                         source_abs != dest_abs
                             && !(source_abs.is_dir() && dest_abs.starts_with(&source_abs))
-                            && source_abs.parent() != Some(dest_abs.as_path())
+                            && (kind == TransferKind::Copy
+                                || source_abs.parent() != Some(dest_abs.as_path()))
                     })
             })
             .collect();
         if sources.is_empty() {
-            self.status_message = "Nothing to move".into();
+            self.status_message = if kind == TransferKind::Move {
+                "Nothing to move".into()
+            } else {
+                "Nothing to copy".into()
+            };
+            crate::utils::log::info(format!(
+                "Transfer dropped before queueing: no valid source for {} into {}",
+                transfer_kind_label(kind),
+                destination.display()
+            ));
             return;
         }
 
-        self.queue_transfer_with_conflict_prompt(sources, destination, kind, false);
+        crate::utils::log::info(format!(
+            "Transfer queue request: {} {} source(s) into {} [{}]",
+            transfer_kind_label(kind),
+            sources.len(),
+            destination.display(),
+            log_path_list(&sources)
+        ));
+        self.queue_transfer_resolved(sources, destination, kind, prompt_conflicts);
+    }
+
+    fn queue_external_drop_transfer(
+        &mut self,
+        sources: Vec<PathBuf>,
+        destination: PathBuf,
+        kind: TransferKind,
+    ) {
+        self.queue_transfer_inner(sources, destination, kind, false);
+    }
+
+    fn queue_transfer(&mut self, sources: Vec<PathBuf>, destination: PathBuf, kind: TransferKind) {
+        self.queue_transfer_inner(sources, destination, kind, true);
     }
 
     fn extract_archive_items_to(&mut self, sources: Vec<PathBuf>, destination: PathBuf) {
@@ -3524,6 +3610,12 @@ impl BExplorerApp {
                     completed_files,
                 } => {
                     if self.active_transfers.remove(&job_id).is_some() {
+                        crate::utils::log::info(format!(
+                            "Transfer job finished: id={} {} completed_files={}",
+                            job_id,
+                            transfer_kind_label(kind),
+                            completed_files
+                        ));
                         let mut progress =
                             self.transfer_progress.remove(&job_id).unwrap_or_else(|| {
                                 TransferProgress {
@@ -3557,6 +3649,13 @@ impl BExplorerApp {
                 }
                 TransferMessage::Failed { job_id, error } => {
                     if let Some(active) = self.active_transfers.remove(&job_id) {
+                        crate::utils::log::error(format!(
+                            "Transfer job failed: id={} {} into {} error={}",
+                            job_id,
+                            transfer_kind_label(active.job.kind),
+                            active.job.destination.display(),
+                            error
+                        ));
                         let progress = self.transfer_progress.remove(&job_id);
                         if transfer_error_needs_elevation(&error, &active.job) {
                             self.pending_elevated_transfer = Some(active.job);
@@ -3574,6 +3673,7 @@ impl BExplorerApp {
                 }
                 TransferMessage::Cancelled { job_id } => {
                     if self.active_transfers.remove(&job_id).is_some() {
+                        crate::utils::log::info(format!("Transfer job cancelled: id={job_id}"));
                         if let Some(mut progress) = self.transfer_progress.remove(&job_id) {
                             progress.state = TransferState::Cancelled;
                             self.push_transfer_history(progress);
@@ -3996,6 +4096,14 @@ impl BExplorerApp {
             let worker_job = job.clone();
             let tx = self.transfer_tx.clone();
 
+            crate::utils::log::info(format!(
+                "Transfer job started: id={} {} {} source(s) into {} [{}]",
+                job.id,
+                transfer_kind_label(job.kind),
+                job.sources.len(),
+                job.destination.display(),
+                log_path_list(&job.sources)
+            ));
             self.transfer_progress
                 .insert(job.id, TransferProgress::pending(&job));
             self.status_message = if job.kind == TransferKind::Move {
@@ -4208,7 +4316,39 @@ impl BExplorerApp {
             return;
         };
 
-        self.queue_transfer(sources, destination, TransferKind::Copy);
+        self.queue_external_drop_transfer(sources, destination, TransferKind::Copy);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn handle_native_file_drop(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+        let (Ok(display), Ok(window)) = (frame.display_handle(), frame.window_handle()) else {
+            return;
+        };
+        let (drops, pending) =
+            crate::platform::linux::take_native_file_drops(display.as_raw(), window.as_raw());
+        if pending {
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+        if drops.is_empty() {
+            return;
+        }
+
+        let Some(destination) = self.external_drop_destination(ctx) else {
+            self.status_message = "Open a folder before dropping files here".into();
+            return;
+        };
+
+        for sources in drops.into_iter().filter(|sources| !sources.is_empty()) {
+            crate::utils::log::info(format!(
+                "Linux native drop queued into {} with {} source(s): {}",
+                destination.display(),
+                sources.len(),
+                log_path_list(&sources)
+            ));
+            self.queue_external_drop_transfer(sources, destination.clone(), TransferKind::Copy);
+        }
     }
 
     fn try_start_native_file_drag_outside_window(
@@ -4268,6 +4408,67 @@ impl BExplorerApp {
                 }
                 Err(error) => {
                     self.set_error(error.to_string());
+                }
+            }
+            _ctx.request_repaint();
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let Some(drag) = self.file_drag.as_ref() else {
+                return;
+            };
+            if !_ctx.input(|input| input.pointer.primary_down()) {
+                return;
+            }
+            let outside_window = _ctx.input(|input| {
+                input
+                    .pointer
+                    .hover_pos()
+                    .is_none_or(|pointer| !input.screen_rect().expand(8.0).contains(pointer))
+            });
+            if !outside_window {
+                return;
+            }
+
+            let paths = drag.paths.clone();
+            if paths.iter().any(|path| {
+                explorer::is_virtual_path(path) || archive_item_path(path) || !path.exists()
+            }) {
+                self.file_drag = None;
+                self.status_message =
+                    "Dragging this item outside BExplorer is not available yet".into();
+                return;
+            }
+
+            self.file_drag = None;
+            {
+                use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+                match (_frame.display_handle(), _frame.window_handle()) {
+                    (Ok(display), Ok(window)) => {
+                        match crate::platform::linux::start_file_drag(
+                            paths,
+                            display.as_raw(),
+                            window.as_raw(),
+                        ) {
+                            Ok(result) => {
+                                let item_count = result.paths.len();
+                                self.status_message = if result.helper == "Wayland" {
+                                    format!("Started Wayland native drag for {item_count} item(s)")
+                                } else {
+                                    format!(
+                                        "Started Linux drag helper {} for {item_count} item(s)",
+                                        result.helper
+                                    )
+                                };
+                            }
+                            Err(error) => {
+                                self.set_error(error.to_string());
+                            }
+                        }
+                    }
+                    _ => self.set_error("Linux drag-out needs a native window handle".into()),
                 }
             }
             _ctx.request_repaint();
@@ -4366,6 +4567,18 @@ impl eframe::App for BExplorerApp {
         #[cfg(target_os = "windows")]
         self.apply_vibrancy(frame);
 
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+
+            if let (Ok(display), Ok(window)) = (frame.display_handle(), frame.window_handle()) {
+                crate::platform::linux::prepare_native_file_drag(display.as_raw(), window.as_raw());
+            }
+            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+        }
+
         self.poll_global_background(ctx);
         self.refresh_storage_if_needed(ctx);
         // Poll current pane's loads.
@@ -4412,6 +4625,8 @@ impl eframe::App for BExplorerApp {
 
         self.try_start_native_file_drag_outside_window(ctx, frame);
         self.handle_external_file_drop(ctx);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.handle_native_file_drop(ctx, frame);
         self.resolve_file_drag_target(ctx);
         self.finish_file_drag_if_released(ctx);
         self.handle_shortcuts(shortcuts);

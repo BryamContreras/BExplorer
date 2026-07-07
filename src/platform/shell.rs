@@ -1,6 +1,8 @@
 use std::ffi::OsString;
+#[cfg(not(target_os = "windows"))]
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 
 use crate::utils::errors::{BExplorerError, Result};
@@ -321,23 +323,59 @@ fn clear_clipboard_platform() -> Result<()> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn copy_files_platform(paths: &[PathBuf], _cut: bool) -> Result<()> {
-    let text = paths
-        .iter()
-        .map(|path| path.display().to_string())
+fn copy_files_platform(paths: &[PathBuf], cut: bool) -> Result<()> {
+    if paths.is_empty() {
+        return Err(BExplorerError::Clipboard("No files to copy".into()));
+    }
+
+    let operation = if cut { "cut" } else { "copy" };
+    let text = std::iter::once(operation.to_string())
+        .chain(
+            paths
+                .iter()
+                .map(|path| file_uri_from_path(path).unwrap_or_else(|| path.display().to_string())),
+        )
         .collect::<Vec<_>>()
         .join("\n");
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if copy_files_linux_mime(&text).is_ok() {
+        return Ok(());
+    }
+
     copy_text(&text)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn read_files_platform() -> Result<ClipboardFiles> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    if let Ok(files) = read_files_linux_mime() {
+        return Ok(files);
+    }
+
     let text = read_text()?;
-    let paths = text
-        .lines()
-        .map(|line| line.trim().trim_matches('"'))
-        .filter(|line| !line.is_empty())
-        .map(PathBuf::from)
+    clipboard_files_from_text(&text)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_files_from_text(text: &str) -> Result<ClipboardFiles> {
+    let mut cut = false;
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let first = lines.next();
+    let remaining = match first {
+        Some("cut") => {
+            cut = true;
+            lines.collect::<Vec<_>>()
+        }
+        Some("copy") => lines.collect::<Vec<_>>(),
+        Some(line) => std::iter::once(line).chain(lines).collect::<Vec<_>>(),
+        None => Vec::new(),
+    };
+
+    let paths = remaining
+        .iter()
+        .filter(|line| !line.starts_with('#'))
+        .filter_map(|line| clipboard_line_to_path(line))
         .filter(|path| path.exists())
         .collect::<Vec<_>>();
     if paths.is_empty() {
@@ -345,7 +383,208 @@ fn read_files_platform() -> Result<ClipboardFiles> {
             "No file paths in clipboard".into(),
         ));
     }
-    Ok(ClipboardFiles { paths, cut: false })
+    Ok(ClipboardFiles { paths, cut })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn copy_files_linux_mime(gnome_files: &str) -> Result<()> {
+    let uri_list = gnome_files
+        .lines()
+        .skip(1)
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    linux_set_clipboard_mime("x-special/gnome-copied-files", gnome_files)
+        .or_else(|_| linux_set_clipboard_mime("text/uri-list", &uri_list))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn read_files_linux_mime() -> Result<ClipboardFiles> {
+    for mime in ["x-special/gnome-copied-files", "text/uri-list"] {
+        if let Ok(text) = linux_get_clipboard_mime(mime)
+            && let Ok(files) = clipboard_files_from_text(&text)
+        {
+            return Ok(files);
+        }
+    }
+    Err(BExplorerError::Clipboard(
+        "No native file paths in clipboard".into(),
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_set_clipboard_mime(mime: &str, text: &str) -> Result<()> {
+    let candidates = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        [
+            vec!["wl-copy", "--type", mime],
+            vec!["xclip", "-selection", "clipboard", "-t", mime],
+            vec!["xsel", "--clipboard", "--input", "--mime-type", mime],
+        ]
+    } else {
+        [
+            vec!["xclip", "-selection", "clipboard", "-t", mime],
+            vec!["xsel", "--clipboard", "--input", "--mime-type", mime],
+            vec!["wl-copy", "--type", mime],
+        ]
+    };
+
+    for args in candidates {
+        let Some((program, program_args)) = args.split_first() else {
+            continue;
+        };
+        if !command_exists(program) {
+            continue;
+        }
+        let mut child = Command::new(program)
+            .args(program_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+        if let Some(stdin) = child.stdin.as_mut() {
+            stdin
+                .write_all(text.as_bytes())
+                .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+        }
+        let status = child
+            .wait()
+            .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+
+    Err(BExplorerError::Clipboard(
+        "No native clipboard helper found".into(),
+    ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_get_clipboard_mime(mime: &str) -> Result<String> {
+    let candidates = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        [
+            vec!["wl-paste", "--type", mime, "--no-newline"],
+            vec!["xclip", "-selection", "clipboard", "-t", mime, "-o"],
+            vec!["xsel", "--clipboard", "--output", "--mime-type", mime],
+        ]
+    } else {
+        [
+            vec!["xclip", "-selection", "clipboard", "-t", mime, "-o"],
+            vec!["xsel", "--clipboard", "--output", "--mime-type", mime],
+            vec!["wl-paste", "--type", mime, "--no-newline"],
+        ]
+    };
+
+    for args in candidates {
+        let Some((program, program_args)) = args.split_first() else {
+            continue;
+        };
+        if !command_exists(program) {
+            continue;
+        }
+        let output = Command::new(program)
+            .args(program_args)
+            .output()
+            .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).to_string());
+        }
+    }
+
+    Err(BExplorerError::Clipboard(
+        "No native clipboard helper found".into(),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn clipboard_line_to_path(line: &str) -> Option<PathBuf> {
+    path_from_file_uri(line).or_else(|| {
+        let path = PathBuf::from(line.trim_matches('"'));
+        path.exists().then_some(path)
+    })
+}
+
+#[cfg(all(unix, not(target_os = "windows")))]
+fn file_uri_from_path(path: &Path) -> Option<String> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut uri = String::from("file://");
+    for byte in absolute.as_os_str().as_bytes() {
+        match *byte {
+            b'/' => uri.push('/'),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                uri.push(*byte as char)
+            }
+            value => uri.push_str(&format!("%{value:02X}")),
+        }
+    }
+    Some(uri)
+}
+
+#[cfg(not(unix))]
+fn file_uri_from_path(path: &Path) -> Option<String> {
+    path.to_str().map(|path| format!("file://{path}"))
+}
+
+#[cfg(all(unix, not(target_os = "windows")))]
+pub(crate) fn path_from_file_uri(uri: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let rest = uri.strip_prefix("file://")?;
+    let path = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !path.starts_with('/') {
+        return None;
+    }
+    let bytes = percent_decode(path.as_bytes())?;
+    Some(OsString::from_vec(bytes).into())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn path_from_file_uri(uri: &str) -> Option<PathBuf> {
+    let path = uri.strip_prefix("file://")?;
+    Some(PathBuf::from(path))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn percent_decode(value: &[u8]) -> Option<Vec<u8>> {
+    let mut output = Vec::with_capacity(value.len());
+    let mut index = 0;
+    while index < value.len() {
+        if value[index] == b'%' {
+            let high = *value.get(index + 1)?;
+            let low = *value.get(index + 2)?;
+            output.push((hex_value(high)? << 4) | hex_value(low)?);
+            index += 3;
+        } else {
+            output.push(value[index]);
+            index += 1;
+        }
+    }
+    Some(output)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn command_exists(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .any(|directory| directory.join(program).is_file())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -426,7 +665,31 @@ fn open_terminal_platform(directory: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_with_platform(path: &Path) -> Result<()> {
+    if command_exists("mimeopen") && Command::new("mimeopen").arg("-d").arg(path).spawn().is_ok() {
+        return Ok(());
+    }
+
+    for program in ["gio", "xdg-open"] {
+        if !command_exists(program) {
+            continue;
+        }
+        let mut command = Command::new(program);
+        if program == "gio" {
+            command.arg("open");
+        }
+        if command.arg(path).spawn().is_ok() {
+            return Ok(());
+        }
+    }
+
+    open::that(path).map(|_| ()).map_err(|error| {
+        BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
+    })
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 fn open_with_platform(_path: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
         "Open with is currently available on Windows only".into(),
@@ -443,12 +706,19 @@ fn show_properties_platform(_path: &Path) -> Result<()> {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn open_terminal_platform(directory: &Path) -> Result<()> {
     let terminals = [
+        "xdg-terminal-exec",
         "x-terminal-emulator",
         "gnome-terminal",
         "konsole",
         "xfce4-terminal",
+        "mate-terminal",
+        "lxterminal",
+        "tilix",
+        "wezterm",
+        "foot",
         "alacritty",
         "kitty",
+        "terminator",
     ];
 
     for terminal in terminals {
@@ -471,4 +741,37 @@ fn open_terminal_platform(_directory: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
         "Could not find a terminal application".into(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn roundtrips_unix_file_uri_with_spaces() {
+        let path = Path::new("/tmp/BExplorer Test/file name.txt");
+        let uri = file_uri_from_path(path).expect("uri");
+
+        assert_eq!(uri, "file:///tmp/BExplorer%20Test/file%20name.txt");
+        assert_eq!(path_from_file_uri(&uri), Some(path.to_path_buf()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_localhost_file_uri() {
+        assert_eq!(
+            path_from_file_uri("file://localhost/tmp/example.txt"),
+            Some(PathBuf::from("/tmp/example.txt"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_gnome_copied_files_clipboard_text() {
+        let files = clipboard_files_from_text("cut\nfile:///tmp\n").expect("clipboard files");
+
+        assert!(files.cut);
+        assert_eq!(files.paths, vec![PathBuf::from("/tmp")]);
+    }
 }

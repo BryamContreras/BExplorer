@@ -16,13 +16,21 @@ flate2 = "1.1"
 fs2 = "0.4"
 hayro = { version = "0.7", features = ["embed-fonts"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
+md5 = "0.7"
 open = "5"
+raw-window-handle = "0.6"
 resvg = "0.45"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 trash = "5"
 walkdir = "2.5"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+rustix = { version = "1.1", features = ["pipe"] }
+wayland-backend = { version = "0.3.15", features = ["client_system"] }
+wayland-client = "0.31.14"
+wayland-sys = "0.31.11"
 
 [build-dependencies]
 cc = "1"
@@ -56,4 +64,3 @@ windows = { version = "0.58", features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 window-vibrancy = "0.7"
-raw-window-handle = "0.6"

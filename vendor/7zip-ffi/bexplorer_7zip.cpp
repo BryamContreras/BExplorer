@@ -267,7 +267,7 @@ typedef void (*BfpListEntryCb)(
     void *userData);
 
 extern "C" int bfp_7zr_list_archive(
-    const wchar_t *archive_path,
+    CFSTR archive_path,
     BfpListEntryCb callback,
     void *userData)
 {
@@ -300,7 +300,7 @@ extern "C" int bfp_7zr_list_archive(
     COpenOptions openOptions;
     openOptions.codecs = codecs;
     openOptions.stream = inStreamRef;
-    openOptions.filePath = archive_path;
+    openOptions.filePath = fs2us(archive_path);
 
     HRESULT openResult = archiveLink.Open_Strict(openOptions, &openCallback);
 

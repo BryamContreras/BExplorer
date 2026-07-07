@@ -1767,16 +1767,7 @@ fn run_7zip_ffi(args: &[String], cancel_flag: &AtomicU32) -> Result<()> {
     }
 
     let safe_args = sanitize_7zip_args(args);
-    let description = if cfg!(windows) {
-        build_windows_command_line(&safe_args)
-    } else {
-        let mut s = String::from("bexplorer-7zr");
-        for arg in &safe_args {
-            s.push(' ');
-            s.push_str(arg);
-        }
-        s
-    };
+    let description = describe_7zip_command(&safe_args);
 
     match exit_code {
         0 => Ok(()),
@@ -1825,8 +1816,23 @@ fn cfg_run_7zip(args: &[String]) -> i32 {
     for arg in args {
         cstrs.push(CString::new(arg.as_str()).expect("CString"));
     }
-    let mut ptrs: Vec<*const c_char> = cstrs.iter().map(|s| s.as_ptr()).collect();
+    let ptrs: Vec<*const c_char> = cstrs.iter().map(|s| s.as_ptr()).collect();
     unsafe { bfp_7zr_run_argv(ptrs.len() as i32, ptrs.as_ptr()) }
+}
+
+#[cfg(windows)]
+fn describe_7zip_command(args: &[String]) -> String {
+    build_windows_command_line(args)
+}
+
+#[cfg(not(windows))]
+fn describe_7zip_command(args: &[String]) -> String {
+    let mut command = String::from("bexplorer-7zr");
+    for arg in args {
+        command.push(' ');
+        command.push_str(arg);
+    }
+    command
 }
 
 #[cfg(windows)]
@@ -1988,21 +1994,9 @@ pub fn list_zip_entries(path: &Path) -> Result<Vec<ArchiveListEntry>> {
 }
 
 pub fn list_7z_entries(path: &Path) -> Result<Vec<ArchiveListEntry>> {
-    #[cfg(not(windows))]
-    {
-        let _ = path;
-        return Err(BExplorerError::Operation(
-            "7z listing is only supported on Windows".into(),
-        ));
-    }
-
-    #[cfg(windows)]
-    {
-        list_7z_entries_via_helper(path)
-    }
+    list_7z_entries_via_helper(path)
 }
 
-#[cfg(windows)]
 fn list_7z_entries_via_helper(path: &Path) -> Result<Vec<ArchiveListEntry>> {
     let exe = std::env::current_exe()?;
     let output = {
@@ -2012,8 +2006,9 @@ fn list_7z_entries_via_helper(path: &Path) -> Result<Vec<ArchiveListEntry>> {
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .creation_flags(CREATE_NO_WINDOW);
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
         command.output()?
     };
 

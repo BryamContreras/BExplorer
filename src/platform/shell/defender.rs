@@ -1,6 +1,10 @@
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "windows")]
+use std::sync::atomic::Ordering;
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 use crate::utils::errors::{BExplorerError, Result};
@@ -20,6 +24,7 @@ pub struct WindowsDefenderScanResult {
     pub threats: Vec<WindowsDefenderThreat>,
 }
 
+#[cfg(target_os = "windows")]
 pub(super) fn scan_path_with_windows_defender(
     path: &Path,
     cancel: &AtomicBool,

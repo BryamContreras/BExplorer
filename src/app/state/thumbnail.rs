@@ -65,7 +65,7 @@ impl BExplorerApp {
         let tx = self.thumbnail_tx.clone();
         let path = entry.path.clone();
         thread::spawn(move || {
-            let image = load_thumbnail_image(&path);
+            let image = load_desktop_thumbnail_image(&path).or_else(|| load_thumbnail_image(&path));
             let _ = tx.send(ThumbnailMessage { path, image });
         });
         ctx.request_repaint_after(Duration::from_millis(80));
@@ -280,6 +280,14 @@ pub(super) fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
 pub(super) fn load_thumbnail_image(path: &Path) -> Option<ColorImage> {
     let bytes = std::fs::read(path).ok()?;
     load_thumbnail_image_from_bytes(&bytes)
+}
+
+pub(super) fn load_desktop_thumbnail_image(path: &Path) -> Option<ColorImage> {
+    let image = crate::platform::cached_desktop_thumbnail(path)?;
+    Some(ColorImage::from_rgba_unmultiplied(
+        [image.width, image.height],
+        &image.rgba,
+    ))
 }
 
 pub(super) fn load_thumbnail_image_from_bytes(bytes: &[u8]) -> Option<ColorImage> {

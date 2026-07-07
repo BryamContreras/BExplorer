@@ -2,11 +2,12 @@
 
 BExplorer es un explorador de archivos avanzado y liviano escrito en Rust. Su
 objetivo es mejorar la gestion diaria de archivos sin intentar reemplazar todo
-el shell de Windows.
+el shell del sistema.
 
-La prioridad actual es Windows, pero el proyecto esta organizado para que la
-logica especifica de cada sistema operativo quede separada. La idea es poder
-trabajar Linux y macOS mas adelante sin romper la base de la aplicacion.
+La prioridad historica ha sido Windows, pero el proyecto esta organizado para
+que la logica especifica de cada sistema operativo quede separada. Linux ya
+compila y tiene una primera base neutral para escritorio; macOS sigue como
+trabajo futuro.
 
 ## Estado
 
@@ -14,7 +15,13 @@ BExplorer esta en fase beta.
 
 La version actual ya es usable para pruebas internas en Windows, especialmente
 para gestion de archivos, comprimidos, vista dividida, red, dispositivos MTP y
-operaciones comunes como copiar, mover, eliminar y renombrar.
+operaciones comunes como copiar, mover, eliminar y renombrar. En Linux ya hay
+soporte inicial para compilar, navegar archivos locales, detectar montajes desde
+`/proc/self/mountinfo`, clasificar unidades USB/red/opticas cuando el sistema
+lo expone, usar terminales comunes y registrar la app como gestor de carpetas
+con un archivo `.desktop`. La ventana la maneja `eframe/winit`, asi que la app
+puede ejecutarse tanto en Wayland como en X11 cuando las librerias de runtime
+estan disponibles.
 
 Antes de una beta publica conviene seguir probando:
 
@@ -24,6 +31,8 @@ Antes de una beta publica conviene seguir probando:
 - carpetas que requieren permisos de administrador;
 - archivos comprimidos grandes o protegidos con contrasena;
 - escenarios de arrastrar y soltar dentro y fuera de la aplicacion.
+- distribuciones Linux con Wayland/X11, portales, montajes de red, USB y
+  diferentes implementaciones de portapapeles.
 
 ## Funciones Principales
 
@@ -33,10 +42,11 @@ Antes de una beta publica conviene seguir probando:
 - Barra de acciones y barra de marcadores opcionales.
 - Vistas de detalles, lista, iconos, iconos grandes, iconos extra grandes y
   mosaicos.
-- Soporte para unidades locales, extraibles, ISO montadas, rutas UNC, red y
-  dispositivos portatiles MTP.
+- Soporte para unidades locales, extraibles, ISO montadas, rutas UNC, red,
+  montajes Linux y dispositivos portatiles MTP en Windows.
 - Descubrimiento progresivo de red con cache.
-- Copiar, cortar y pegar compatible con el portapapeles de Windows.
+- Copiar, cortar y pegar compatible con el portapapeles de Windows; en Linux se
+  usan helpers MIME nativos cuando existen, con fallback de texto.
 - Arrastrar y soltar dentro de BExplorer y entre BExplorer y Windows.
 - Cola de transferencias con progreso, pausa, cancelacion y manejo de
   conflictos.
@@ -47,6 +57,53 @@ Antes de una beta publica conviene seguir probando:
 - Integracion con Windows Defender.
 - Personalizacion de tema, color, bordes de iconos, efectos de ventana, atajos
   y distribucion de la interfaz.
+
+## Linux
+
+El objetivo en Linux es no depender de un unico entorno de escritorio. La base
+actual usa piezas comunes del sistema:
+
+- `/proc/self/mountinfo` para listar montajes reales;
+- sysfs para detectar unidades removibles u opticas cuando esta disponible;
+- tipos de filesystem como `cifs`, `smb3`, `nfs`, `sshfs`, `iso9660` y `udf`;
+- Freedesktop Icon Theme y Shared MIME Info para iconos de archivos;
+- cache XDG de thumbnails antes de generar miniaturas propias;
+- portapapeles MIME con `wl-copy`/`wl-paste`, `xclip` o `xsel` cuando existen;
+- UDisks2 mediante `udisksctl` para montar/expulsar ISO o unidades;
+- Polkit mediante `pkexec` para reintentos elevados;
+- `gio`, Samba y Avahi como descubrimiento de red de mejor esfuerzo;
+- dispositivos MTP ya montados por GVfs/FUSE bajo `/run/user/.../gvfs`;
+- `xdg-terminal-exec` y terminales comunes como fallback;
+- `assets/linux/bexplorer.desktop` con `MimeType=inode/directory`.
+
+Limitaciones actuales en Linux:
+
+- arrastrar archivos desde BExplorer hacia otros gestores usa helpers nativos
+  compatibles con Wayland como `ripdrag`, `dragon-drag-and-drop`, `dragon` o
+  `dragon-drop` cuando estan instalados;
+- MTP sin montaje GVfs/FUSE todavia no tiene backend propio;
+- descubrimiento de red depende de las herramientas disponibles en la distro;
+- propiedades nativas siguen pendientes;
+- la busqueda de iconos se hace en proceso y todavia puede no cubrir extensiones
+  especificas de algunos temas de escritorio.
+
+Integraciones opcionales recomendadas en Linux:
+
+- `wl-clipboard`, `xclip` o `xsel`;
+- `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop`;
+- `udisks2`;
+- `polkit`;
+- `xdg-utils`, GLib/GVfs;
+- `smbclient`, `smbtree` y opcionalmente Avahi;
+- GVfs MTP/FUSE para telefonos y camaras.
+
+Comandos recomendados:
+
+```bash
+cargo check
+cargo test
+cargo run
+```
 
 ## Comprimidos
 
@@ -61,6 +118,9 @@ Flujos soportados:
 - extraer ZIP, 7z, RAR, ISO, TAR y otros formatos compatibles con 7-Zip;
 - pedir contrasena cuando el comprimido la requiere;
 - buscar dentro de comprimidos durante la busqueda completa.
+
+En Windows y Linux el motor 7-Zip se compila desde `vendor/7zip-src` y se enlaza
+con `vendor/7zip-ffi`, sin depender de un ejecutable externo `7zr`.
 
 ## Licencia
 

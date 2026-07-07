@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.BryamContreras.BExplorer</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>BExplorer</name>
+  <summary>Native Rust file explorer</summary>
+  <description>
+    <p>
+      BExplorer is a native Rust desktop file explorer focused on fast file
+      management, split-pane workflows, archive handling, previews, and a
+      compact interface.
+    </p>
+  </description>
+  <launchable type="desktop-id">bexplorer.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+    <category>FileManager</category>
+  </categories>
+  <url type="homepage">https://github.com/BryamContreras/BExplorer</url>
+</component>

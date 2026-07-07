@@ -103,9 +103,53 @@ fn wide_os_null(value: &std::ffi::OsStr) -> Vec<u16> {
     value.encode_wide().chain([0]).collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
+    use std::process::Command;
+
+    if !command_exists("pkexec") {
+        return Err(BExplorerError::Shell(
+            "pkexec is required for elevated operations on Linux".into(),
+        ));
+    }
+
+    let exe = std::env::current_exe().map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    let mut command = Command::new("pkexec");
+    if pkexec_supports_keep_cwd() {
+        command.arg("--keep-cwd");
+    }
+    let status = command
+        .arg(exe)
+        .args(args)
+        .status()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    Ok(status.code().unwrap_or(1))
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub(super) fn run_elevated_current_exe(_args: &[OsString]) -> Result<i32> {
     Err(BExplorerError::Shell(
         "Administrator elevation is currently available on Windows only".into(),
     ))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn command_exists(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+        .any(|directory| directory.join(program).is_file())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn pkexec_supports_keep_cwd() -> bool {
+    std::process::Command::new("pkexec")
+        .arg("--help")
+        .output()
+        .ok()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout).contains("--keep-cwd")
+                || String::from_utf8_lossy(&output.stderr).contains("--keep-cwd")
+        })
+        .unwrap_or(false)
 }

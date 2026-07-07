@@ -20,12 +20,32 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/OpenCallbackConsole.h");
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/ExtractCallbackConsole.h");
 
-    if env::var("CARGO_CFG_WINDOWS").is_ok() {
+    if target_is_windows() {
         compile_windows_resources();
-        build_7zip_lib("msvc");
-    } else if env::var("CARGO_CFG_UNIX").is_ok() {
+        if target_env_is("msvc") {
+            build_7zip_lib("msvc");
+        } else {
+            build_7zip_lib("mingw");
+        }
+    } else if target_is_unix() {
         build_7zip_lib("gcc");
     }
+}
+
+fn target_is_windows() -> bool {
+    env::var("CARGO_CFG_WINDOWS").is_ok()
+}
+
+fn target_is_unix() -> bool {
+    env::var("CARGO_CFG_UNIX").is_ok()
+}
+
+fn target_env_is(expected: &str) -> bool {
+    env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok(expected)
+}
+
+fn target_os_is(expected: &str) -> bool {
+    env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok(expected)
 }
 
 fn compile_windows_resources() {
@@ -116,6 +136,7 @@ fn build_7zip_lib(compiler: &str) {
 
     let mut build = cc::Build::new();
     build
+        .cargo_metadata(false)
         .cpp(true)
         .include(&cpp_dir)
         .include(&c_dir)
@@ -130,7 +151,6 @@ fn build_7zip_lib(compiler: &str) {
         .define("_REENTRANT", None)
         .define("_FILE_OFFSET_BITS", "64")
         .define("Z7_PROG_VARIANT_R", None)
-        .define("Z7_DEVICE_FILE", None)
         .define("_CONSOLE", None);
 
     match compiler {
@@ -149,20 +169,32 @@ fn build_7zip_lib(compiler: &str) {
                 .define("USE_C_CRC", "1")
                 .define("USE_C_SORT", "1")
                 .define("USE_C_LZFINDOPT", "1")
+                .define("Z7_DEVICE_FILE", None)
+                .define("_UNICODE", None)
+                .define("UNICODE", None);
+        }
+        "mingw" => {
+            build
+                .flag("-O2")
+                .flag("-Wno-unused-parameter")
+                .flag("-Wno-unused-variable")
+                .define("USE_NO_ASM", "1")
+                .define("USE_C_AES", "1")
+                .define("USE_C_SHA", "1")
+                .define("USE_C_CRC64", "1")
+                .define("USE_C_CRC", "1")
+                .define("USE_C_SORT", "1")
+                .define("USE_C_LZFINDOPT", "1")
+                .define("Z7_DEVICE_FILE", None)
                 .define("_UNICODE", None)
                 .define("UNICODE", None);
         }
         "gcc" => {
             build
-                .flag("-std=c++17")
                 .flag("-fPIC")
                 .flag("-O2")
                 .flag("-Wno-unused-parameter")
                 .flag("-Wno-unused-variable");
-            if cfg!(target_os = "macos") {
-                // macOS doesn't use ASM (asmc can't emit Mach-O)
-                // pure C fallbacks are the default when USE_ASM is not defined
-            }
         }
         _ => {}
     }
@@ -220,25 +252,30 @@ fn build_7zip_lib(compiler: &str) {
     // Synchronization is needed by Format7zF (Arc_gcc.mak MT_OBJS)
     s!(
         "Windows",
-        "DLL",
         "ErrorMsg",
         "FileDir",
         "FileFind",
         "FileIO",
         "FileLink",
         "FileName",
-        "FileSystem",
-        "MemoryLock",
         "PropVariant",
         "PropVariantConv",
         "PropVariantUtils",
-        "Registry",
-        "SecurityUtils",
         "Synchronization",
         "System",
         "SystemInfo",
         "TimeUtils",
     );
+    if target_is_windows() {
+        s!(
+            "Windows",
+            "DLL",
+            "FileSystem",
+            "MemoryLock",
+            "Registry",
+            "SecurityUtils",
+        );
+    }
 
     // CPP/7zip/Common/
     s!(
@@ -666,13 +703,46 @@ fn build_7zip_lib(compiler: &str) {
         println!("cargo:rustc-link-lib=wbemuuid");
         println!("cargo:rustc-link-lib=credui");
         println!("cargo:rustc-link-lib=comctl32");
-    } else {
+    } else if target_is_windows() {
+        let lib_path = out_dir.join("libbfp7z.a");
         println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-        // cc crate already emitted `cargo:rustc-link-lib=static=bfp7z`
+        println!("cargo:rustc-link-arg={}", lib_path.display());
         println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
-        println!("cargo:rustc-link-lib=pthread");
-        println!("cargo:rustc-link-lib=dl");
-        println!("cargo:rustc-link-lib=m");
+        println!("cargo:rustc-link-lib=oleaut32");
+        println!("cargo:rustc-link-lib=ole32");
+        println!("cargo:rustc-link-lib=user32");
+        println!("cargo:rustc-link-lib=advapi32");
+        println!("cargo:rustc-link-lib=shell32");
+        println!("cargo:rustc-link-lib=uuid");
+        println!("cargo:rustc-link-lib=crypt32");
+        println!("cargo:rustc-link-lib=version");
+        println!("cargo:rustc-link-lib=bcrypt");
+        println!("cargo:rustc-link-lib=ntdll");
+        println!("cargo:rustc-link-lib=mpr");
+        println!("cargo:rustc-link-lib=imm32");
+        println!("cargo:rustc-link-lib=wbemuuid");
+        println!("cargo:rustc-link-lib=credui");
+        println!("cargo:rustc-link-lib=comctl32");
+    } else {
+        let lib_path = out_dir.join("libbfp7z.a");
+        if target_os_is("macos") {
+            println!(
+                "cargo:rustc-link-arg=-Wl,-force_load,{}",
+                lib_path.display()
+            );
+        } else {
+            println!("cargo:rustc-link-arg=-Wl,--whole-archive");
+            println!("cargo:rustc-link-arg={}", lib_path.display());
+            println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
+        }
+        if target_os_is("macos") {
+            println!("cargo:rustc-link-arg=-lc++");
+        } else {
+            println!("cargo:rustc-link-arg=-lstdc++");
+        }
+        println!("cargo:rustc-link-arg=-lpthread");
+        println!("cargo:rustc-link-arg=-ldl");
+        println!("cargo:rustc-link-arg=-lm");
     }
 }
 
@@ -717,7 +787,7 @@ fn invalidate_cc_cache_if_headers_changed(out_dir: &std::path::Path, root: &std:
         return;
     }
 
-    let lib_name = if cfg!(windows) {
+    let lib_name = if target_env_is("msvc") {
         "bfp7z.lib"
     } else {
         "libbfp7z.a"

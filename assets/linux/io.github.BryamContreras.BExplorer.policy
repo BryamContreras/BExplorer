@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>BExplorer</vendor>
+  <vendor_url>https://github.com/BryamContreras/BExplorer</vendor_url>
+  <icon_name>bexplorer</icon_name>
+
+  <action id="io.github.BryamContreras.BExplorer.elevated-helper">
+    <description>Run privileged BExplorer file operations</description>
+    <description xml:lang="es">Ejecutar operaciones de archivos privilegiadas de BExplorer</description>
+    <message>Authentication is required to let BExplorer modify protected files.</message>
+    <message xml:lang="es">Se requiere autenticacion para que BExplorer modifique archivos protegidos.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/bin/bexplorer</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>

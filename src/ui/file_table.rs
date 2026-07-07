@@ -6,7 +6,7 @@ use crate::app::config::{AppConfig, ViewMode};
 use crate::app::session::{SplitFocus, SplitSide};
 use crate::app::state::{BExplorerApp, FileGroup, FileSort};
 use crate::fs::archive::{ArchiveFormat, ExtractMode};
-use crate::fs::explorer::{self, EntryKind, FileCategory, FileEntry};
+use crate::fs::explorer::{EntryKind, FileCategory, FileEntry};
 use crate::ui::i18n;
 use crate::ui::theme;
 
@@ -3477,7 +3477,7 @@ fn can_scan_with_windows_defender(entry: &FileEntry) -> bool {
     matches!(
         entry.kind,
         EntryKind::File | EntryKind::Folder | EntryKind::Drive
-    ) && !explorer::is_virtual_path(&entry.path)
+    ) && !crate::fs::explorer::is_virtual_path(&entry.path)
         && !crate::fs::archive_listing::is_inside_archive(&entry.path)
 }
 

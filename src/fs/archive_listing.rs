@@ -7,14 +7,14 @@ use super::archive::{list_7z_entries, list_zip_entries};
 use super::explorer::{EntryKind, FileCategory, FileEntry};
 
 const BROWSABLE_ARCHIVE_EXTENSIONS: &[&str] = &[
-    "7z", "apk", "apm", "ar", "arj", "bz2", "bzip2", "cab", "chm", "cpio", "cramfs", "deb", "gz",
-    "gzip", "ihex", "lha", "lzh", "lzma", "msi", "nsis", "rar", "rpm", "squashfs", "swm", "tar",
-    "taz", "tbz", "tbz2", "tgz", "txz", "wim", "xar", "xz", "z", "zip", "zipx", "zst",
+    "7z", "apk", "apm", "ar", "arj", "bz2", "bzip2", "cab", "chm", "cpio", "cramfs", "gz", "gzip",
+    "ihex", "lha", "lzh", "lzma", "msi", "nsis", "rar", "squashfs", "swm", "tar", "taz", "tbz",
+    "tbz2", "tgz", "txz", "wim", "xar", "xz", "z", "zip", "zipx", "zst",
 ];
 
 const EXTRACTABLE_7Z_EXTENSIONS: &[&str] = &[
-    "001", "apfs", "dmg", "esd", "fat", "hfs", "hfsx", "img", "iso", "mbr", "ntfs", "qcow",
-    "qcow2", "udf", "vdi", "vhd", "vhdx", "vmdk",
+    "001", "apfs", "deb", "dmg", "esd", "fat", "hfs", "hfsx", "img", "iso", "mbr", "ntfs", "qcow",
+    "qcow2", "rpm", "udf", "vdi", "vhd", "vhdx", "vmdk",
 ];
 
 /// Check if a path is inside a browsable archive (virtual path).
@@ -280,6 +280,20 @@ mod tests {
             assert!(
                 !has_browsable_archive_extension(Path::new(name)),
                 "{name} should not open as an archive"
+            );
+        }
+    }
+
+    #[test]
+    fn leaves_linux_packages_to_their_apps() {
+        for name in ["package.deb", "package.rpm"] {
+            assert!(
+                !has_browsable_archive_extension(Path::new(name)),
+                "{name} should open through the package installer instead of the archive browser"
+            );
+            assert!(
+                has_extractable_archive_extension(Path::new(name)),
+                "{name} should still offer extraction through 7z"
             );
         }
     }

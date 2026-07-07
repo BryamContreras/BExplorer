@@ -1,7 +1,7 @@
 # BExplorer
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
-![Platform](https://img.shields.io/badge/platform-Windows-blue)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
 ![Status](https://img.shields.io/badge/status-beta-yellow)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -13,17 +13,18 @@ turning into a heavy system shell replacement.
 Spanish documentation is available in [docs/es/README.md](docs/es/README.md).
 
 The project is designed so platform-specific code stays isolated. Windows is
-currently the primary target, while Linux and macOS support are kept behind
-separate platform modules for future work.
+currently the primary target, Linux has an initial desktop-neutral backend, and
+macOS support is kept behind separate platform modules for future work.
 
 ## Status
 
 BExplorer is in active beta development.
 
-It is already usable for day-to-day file management on Windows, but public
-distribution still needs broader testing, a signed installer, and a wider
-compatibility matrix across clean Windows installs, network environments, USB
-drives, MTP devices, and permission-restricted folders.
+It is already usable for day-to-day file management on Windows. Linux now
+builds and covers core local browsing/file operations with Freedesktop/XDG-style
+integration, but still needs broader runtime testing across distributions,
+Wayland/X11 sessions, portals, network mounts, USB drives, and desktop clipboard
+implementations.
 
 ## Highlights
 
@@ -34,9 +35,10 @@ drives, MTP devices, and permission-restricted folders.
 - Optional action bar and bookmark bar.
 - Details, list, icons, large icons, extra-large icons, and tile views.
 - Local drives, removable drives, mounted ISO images, UNC paths, network
-  locations, and Windows MTP portable devices.
+  locations, Linux mount points, and Windows MTP portable devices.
 - Progressive network discovery with cached results.
-- Windows Explorer-compatible file clipboard for regular file paths.
+- Windows Explorer-compatible file clipboard for regular file paths, plus
+  native MIME clipboard helpers and a text/URI-list fallback for Linux.
 - Internal and external drag-and-drop support.
 - Transfer queue with progress, pause, cancel, cleanup of partial files, and
   conflict handling.
@@ -85,8 +87,9 @@ Supported workflows:
 - extract selected archive entries into normal folders;
 - search inside supported archives during complete search.
 
-On Windows, the 7-Zip engine is built from `vendor/7zip-src` and linked through
-`vendor/7zip-ffi`. BExplorer does not ship or execute an external `7zr.exe`.
+On Windows and Linux, the 7-Zip engine is built from `vendor/7zip-src` and
+linked through `vendor/7zip-ffi`. BExplorer does not ship or execute an external
+`7zr.exe`.
 
 ## Preview Panel
 
@@ -106,25 +109,44 @@ blocking the UI.
 
 | Feature | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Local file browsing | Supported | Planned | Planned |
-| Tabs and split view | Supported | Planned | Planned |
-| File transfers | Supported | Planned | Planned |
-| Archive browsing/extraction | Supported | Planned | Planned |
-| Native icons/thumbnails | Supported | Planned | Planned |
-| MTP portable devices | Supported | Stub | Stub |
-| Network discovery | Supported | Planned | Planned |
-| ISO mount/eject | Supported | Planned | Planned |
+| Local file browsing | Supported | Initial | Planned |
+| Tabs and split view | Supported | Initial | Planned |
+| File transfers | Supported | Initial | Planned |
+| Archive browsing/extraction | Supported | Initial | Planned |
+| Native icons/thumbnails | Supported | Initial | Planned |
+| MTP portable devices | Supported | Mounted GVfs/FUSE devices | Stub |
+| Network discovery | Supported | Best effort | Planned |
+| ISO mount/eject | Supported | Initial via UDisks2 | Planned |
 | Acrylic/Mica/blur effects | Supported | N/A | N/A |
 | Windows Defender scan | Supported | N/A | N/A |
 
 The platform facade lives in `src/platform/mod.rs`. Windows-specific logic is
-kept under `src/platform/windows/` and related Windows shell helpers, so future
-Linux and macOS implementations can be added without mixing OS-specific logic
-into the core application state.
+kept under `src/platform/windows/` and related Windows shell helpers. Linux
+support uses `/proc/self/mountinfo`, sysfs, `xdg-terminal-exec`/common terminal
+fallbacks, and a Freedesktop `.desktop` entry without binding the application to
+one desktop environment. Linux windowing is handled by `eframe/winit`, so the
+application can run under Wayland or X11 when the required runtime libraries are
+available.
+
+On Linux, file icons are resolved through the Freedesktop icon theme layout and
+Shared MIME Info database. Image thumbnails first try the standard XDG
+thumbnail cache and then fall back to BExplorer's internal thumbnail generation.
+Disk image mount/eject uses UDisks2 through `udisksctl` when available, elevated
+retry uses Polkit through `pkexec`, and network discovery uses available
+Freedesktop/GVfs, Avahi, and Samba command-line helpers.
 
 ## Known Limitations
 
-- Linux and macOS support are not implemented yet.
+- Linux support is initial and not yet at Windows feature parity.
+- macOS support is not implemented yet.
+- Linux file clipboard interoperability uses native MIME helpers when
+  `wl-copy`/`wl-paste`, `xclip`, or `xsel` are installed, with a text fallback.
+- Linux icon theme lookup is implemented in-process and may not yet cover every
+  desktop-specific theme extension.
+- Linux drag-out uses Wayland-compatible helper applications such as `ripdrag`,
+  `dragon-drag-and-drop`, `dragon`, or `dragon-drop` when available.
+  A custom helper can be selected with `BEXPLORER_DRAG_HELPER`.
+- Linux MTP support currently covers devices already mounted by GVfs/FUSE.
 - Copying directly between two folders on the same MTP device is not supported.
 - Extracting selected archive entries directly into an MTP device is blocked;
   extract to a normal folder first.
@@ -166,6 +188,40 @@ The release executable is generated at:
 target/release/bexplorer.exe
 ```
 
+Linux requirements:
+
+- Rust stable installed with `rustup`.
+- A C/C++ toolchain usable by the `cc` crate, such as GCC, Clang, or Zig
+  wrappers for `cc`, `c++`, `ar`, and `ranlib`.
+- Usual desktop runtime libraries required by `eframe`/`egui` on your
+  distribution.
+
+Optional Linux integrations:
+
+- `wl-clipboard`, `xclip`, or `xsel` for file clipboard MIME interoperability.
+- `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` for native
+  drag-out to other applications on Wayland.
+- `udisks2` for ISO/USB mount and eject actions.
+- `polkit` with `pkexec` for elevated retry.
+- `xdg-utils` and GLib/GVfs (`gio`) for default app opening and mounted devices.
+- Samba tools such as `smbclient`/`smbtree`, and optionally Avahi, for network
+  discovery.
+- GVfs MTP/FUSE support for mounted phone/camera devices.
+
+Recommended commands:
+
+```bash
+cargo check
+cargo test
+cargo run
+```
+
+Optimized build:
+
+```bash
+cargo build --release
+```
+
 ## Packaging Notes
 
 BExplorer currently builds as a mostly self-contained executable.
@@ -194,6 +250,16 @@ Because release builds include the embedded 7-Zip engine, binary distributions
 should also include the 7-Zip license information from
 `vendor/7zip-src/DOC/License.txt`, `vendor/7zip-src/DOC/copying.txt`, and
 `vendor/7zip-src/DOC/unRarLicense.txt`, or otherwise provide equivalent
+third-party notices.
+
+Linux packages can be staged with:
+
+```bash
+tools/package_linux.sh
+```
+
+The script creates a tarball under `dist/` and, when `dpkg-deb` is installed, a
+basic `.deb` package with the desktop entry, app icon, metainfo, license, and
 third-party notices.
 
 ## Local Data
@@ -276,11 +342,13 @@ The current test suite covers:
 - duplicate filtering for USB/MTP devices;
 - basic create-folder and create-file operations;
 - transfer conflict policies;
-- clipboard and paste shortcut behavior.
+- clipboard and paste shortcut behavior;
+- Linux mountinfo parsing, MIME/file URI clipboard helpers, UDisks parsing,
+  network helper parsing, and XDG thumbnail/icon metadata.
 
 Run:
 
-```powershell
+```bash
 cargo test
 ```
 
@@ -298,7 +366,7 @@ Near-term focus:
 
 Longer-term:
 
-- Linux file-management backend;
+- Linux runtime testing, drag-out, deeper portal integration, and richer MTP;
 - macOS file-management backend;
 - platform-native preview/icon integrations outside Windows;
 - optional plugin or extension points.
