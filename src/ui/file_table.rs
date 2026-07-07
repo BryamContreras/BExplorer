@@ -28,6 +28,7 @@ use text::{draw_text, draw_text_clipped, draw_text_elided, format_bytes_opt, sna
 pub(super) const TOOLBAR_HEIGHT: f32 = 36.0;
 const HEADER_HEIGHT: f32 = 27.0;
 const ROW_HEIGHT: f32 = 23.0;
+const GROUP_HEADER_HEIGHT: f32 = 32.0;
 const ICON_SIZE: f32 = 17.0;
 pub(super) const CONTEXT_MENU_MIN_WIDTH: f32 = 206.0;
 pub(super) const CONTEXT_MENU_MAX_WIDTH: f32 = 380.0;
@@ -204,7 +205,7 @@ fn entry_name_group(name: &str) -> String {
 }
 
 fn paint_group_header(ui: &mut egui::Ui, config: &AppConfig, width: f32, label: &str) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 32.0), Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, GROUP_HEADER_HEIGHT), Sense::hover());
     let text_pos = Pos2::new(rect.left() + 12.0, rect.center().y + 2.0);
     ui.painter().text(
         text_pos,
@@ -220,6 +221,10 @@ fn paint_group_header(ui: &mut egui::Ui, config: &AppConfig, width: f32, label: 
         ],
         Stroke::new(0.7, theme::subtle_stroke(config)),
     );
+}
+
+fn rect_range_visible(top: f32, bottom: f32, viewport_top: f32, viewport_bottom: f32) -> bool {
+    bottom >= viewport_top && top <= viewport_bottom
 }
 
 const SPLIT_DIVIDER_WIDTH: f32 = 6.0;
@@ -653,7 +658,7 @@ fn show_table(app: &mut BExplorerApp, ui: &mut egui::Ui) {
 
     // Context menu
     let has_selection = !app.selected.is_empty();
-    let can_paste = app.can_paste();
+    let can_paste = app.can_paste(ui.ctx());
     body_response.context_menu(|ui| {
         background_context_menu(ui, &app.config, has_selection, can_paste, &mut action);
     });
@@ -667,12 +672,35 @@ fn show_table(app: &mut BExplorerApp, ui: &mut egui::Ui) {
             egui::ScrollArea::vertical()
                 .id_salt("file_table_grouped_body")
                 .auto_shrink([false, false])
-                .show(ui, |ui| {
+                .show_viewport(ui, |ui, viewport| {
                     let mut row_index = 0;
+                    let mut cursor_y = 0.0;
                     for group in groups {
-                        paint_group_header(ui, &app.config, width, &group.label);
+                        let header_visible = rect_range_visible(
+                            cursor_y,
+                            cursor_y + GROUP_HEADER_HEIGHT,
+                            viewport.top(),
+                            viewport.bottom(),
+                        );
+                        if header_visible {
+                            paint_group_header(ui, &app.config, width, &group.label);
+                        } else {
+                            ui.add_space(GROUP_HEADER_HEIGHT);
+                        }
+                        cursor_y += GROUP_HEADER_HEIGHT;
                         for entry in group.entries {
-                            paint_row(app, ui, &columns, &entry, row_index, &mut action);
+                            let row_visible = rect_range_visible(
+                                cursor_y,
+                                cursor_y + ROW_HEIGHT,
+                                viewport.top(),
+                                viewport.bottom(),
+                            );
+                            if row_visible {
+                                paint_row(app, ui, &columns, &entry, row_index, &mut action);
+                            } else {
+                                ui.add_space(ROW_HEIGHT);
+                            }
+                            cursor_y += ROW_HEIGHT;
                             row_index += 1;
                         }
                     }
@@ -778,7 +806,7 @@ fn show_visual_view(app: &mut BExplorerApp, ui: &mut egui::Ui, layout: VisualLay
         app.register_file_drag_folder_rect(destination, body_response.rect);
     }
     let has_selection = !app.selected.is_empty();
-    let can_paste = app.can_paste();
+    let can_paste = app.can_paste(ui.ctx());
     body_response.context_menu(|ui| {
         background_context_menu(ui, &app.config, has_selection, can_paste, &mut action);
     });
@@ -1183,7 +1211,7 @@ fn paint_visual_item_at(
         app.clear_text_input_active();
         app.ensure_selected(entry.path.clone());
     }
-    let can_paste = app.can_paste();
+    let can_paste = app.can_paste(ui.ctx());
     let show_open_location = app.showing_complete_search_results();
     response.context_menu(|ui| {
         context_menu(
@@ -1708,7 +1736,7 @@ fn paint_row(
         app.ensure_selected(entry.path.clone());
     }
 
-    let can_paste = app.can_paste();
+    let can_paste = app.can_paste(ui.ctx());
     let show_open_location = app.showing_complete_search_results();
     response.context_menu(|ui| {
         context_menu(

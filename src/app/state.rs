@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -40,6 +40,10 @@ mod thumbnail;
 mod types;
 
 const STORAGE_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+const CLIPBOARD_PROBE_TTL: Duration = Duration::from_millis(900);
+const CLIPBOARD_PROBE_REPAINT: Duration = Duration::from_millis(120);
+const THUMBNAIL_WORKER_COUNT: usize = 3;
+const NATIVE_ICON_WORKER_COUNT: usize = 2;
 
 type StorageSnapshot = (Vec<FileEntry>, Vec<explorer::PortableDevice>);
 
@@ -140,9 +144,10 @@ pub enum PreviewContentRef {
 }
 
 use types::{
-    ActiveArchive, ActiveTransfer, ArchiveHistoryItem, FileClipboard, LoadMessage, NativeIconState,
-    OperationMessage, PortableThumbnailJob, PreviewCacheState, PreviewJob, PreviewMessage,
-    SearchMessage, TabSearchState, ThumbnailMessage, ThumbnailState, TransferHistoryItem,
+    ActiveArchive, ActiveTransfer, ArchiveHistoryItem, FileClipboard, LoadMessage, NativeIconJob,
+    NativeIconMessage, NativeIconState, OperationMessage, PortableThumbnailJob, PreviewCacheState,
+    PreviewJob, PreviewMessage, SearchMessage, TabSearchState, ThumbnailJob, ThumbnailMessage,
+    ThumbnailState, TransferHistoryItem,
 };
 
 use entry_utils::*;
@@ -224,9 +229,11 @@ pub struct BExplorerApp {
     pub transfer_progress: HashMap<u64, TransferProgress>,
     transfer_history: VecDeque<TransferHistoryItem>,
     max_parallel_transfers: usize,
-    thumbnail_tx: Sender<ThumbnailMessage>,
     thumbnail_rx: Receiver<ThumbnailMessage>,
+    thumbnail_job_tx: Sender<ThumbnailJob>,
     portable_thumbnail_tx: Sender<PortableThumbnailJob>,
+    native_icon_job_tx: Sender<NativeIconJob>,
+    native_icon_rx: Receiver<NativeIconMessage>,
     preview_tx: Sender<PreviewJob>,
     preview_rx: Receiver<PreviewMessage>,
     preview_generation: Arc<AtomicU64>,
@@ -246,6 +253,9 @@ pub struct BExplorerApp {
     pub defender_panel_minimized: bool,
     pub defender_panel_spawned: bool,
     clipboard: Option<FileClipboard>,
+    system_clipboard_can_paste: bool,
+    system_clipboard_checked_at: Option<Instant>,
+    system_clipboard_probe_rx: Option<Receiver<bool>>,
     thumbnail_cache: HashMap<PathBuf, ThumbnailState>,
     native_icon_cache: HashMap<PathBuf, NativeIconState>,
     preview_cache: HashMap<PathBuf, PreviewCacheState>,
@@ -357,6 +367,7 @@ impl PaneState {
 impl BExplorerApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let config = AppConfig::load();
+        crate::ui::theme::install_system_fonts(&cc.egui_ctx);
         crate::ui::theme::apply(&cc.egui_ctx, &config);
 
         let session = AppSession::load();
@@ -383,13 +394,38 @@ impl BExplorerApp {
         });
 
         let (thumbnail_tx, thumbnail_rx) = mpsc::channel();
+        let (thumbnail_job_tx, thumbnail_job_rx) = mpsc::channel::<ThumbnailJob>();
         let (portable_thumbnail_tx, portable_thumbnail_rx) =
             mpsc::channel::<PortableThumbnailJob>();
+        let (native_icon_job_tx, native_icon_job_rx) = mpsc::channel::<NativeIconJob>();
+        let (native_icon_result_tx, native_icon_rx) = mpsc::channel::<NativeIconMessage>();
         let (preview_tx, preview_job_rx) = mpsc::channel::<PreviewJob>();
         let (preview_result_tx, preview_rx) = mpsc::channel::<PreviewMessage>();
         let preview_generation = Arc::new(AtomicU64::new(0));
         let sidebar_visible = config.sidebar_visible;
         let preview_panel_visible = config.show_preview_panel;
+        let thumbnail_job_rx = Arc::new(Mutex::new(thumbnail_job_rx));
+        for _ in 0..THUMBNAIL_WORKER_COUNT {
+            let job_rx = Arc::clone(&thumbnail_job_rx);
+            let result_tx = thumbnail_tx.clone();
+            thread::spawn(move || {
+                loop {
+                    let job = match job_rx.lock() {
+                        Ok(rx) => rx.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(job) = job else {
+                        break;
+                    };
+                    let image = load_desktop_thumbnail_image(&job.path)
+                        .or_else(|| load_thumbnail_image(&job.path));
+                    let _ = result_tx.send(ThumbnailMessage {
+                        path: job.path,
+                        image,
+                    });
+                }
+            });
+        }
         let portable_thumbnail_result_tx = thumbnail_tx.clone();
         thread::spawn(move || {
             while let Ok(job) = portable_thumbnail_rx.recv() {
@@ -404,6 +440,27 @@ impl BExplorerApp {
                 });
             }
         });
+        let native_icon_job_rx = Arc::new(Mutex::new(native_icon_job_rx));
+        for _ in 0..NATIVE_ICON_WORKER_COUNT {
+            let job_rx = Arc::clone(&native_icon_job_rx);
+            let result_tx = native_icon_result_tx.clone();
+            thread::spawn(move || {
+                loop {
+                    let job = match job_rx.lock() {
+                        Ok(rx) => rx.recv(),
+                        Err(_) => return,
+                    };
+                    let Ok(job) = job else {
+                        break;
+                    };
+                    let image = load_native_icon_image(&job.path, job.is_directory, job.size);
+                    let _ = result_tx.send(NativeIconMessage {
+                        cache_key: job.cache_key,
+                        image,
+                    });
+                }
+            });
+        }
         thread::spawn(move || {
             while let Ok(job) = preview_job_rx.recv() {
                 let path = job.entry.path.clone();
@@ -487,9 +544,11 @@ impl BExplorerApp {
             transfer_progress: HashMap::new(),
             transfer_history: VecDeque::new(),
             max_parallel_transfers: 2,
-            thumbnail_tx,
             thumbnail_rx,
+            thumbnail_job_tx,
             portable_thumbnail_tx,
+            native_icon_job_tx,
+            native_icon_rx,
             preview_tx,
             preview_rx,
             preview_generation,
@@ -509,6 +568,9 @@ impl BExplorerApp {
             defender_panel_minimized: false,
             defender_panel_spawned: false,
             clipboard: None,
+            system_clipboard_can_paste: false,
+            system_clipboard_checked_at: None,
+            system_clipboard_probe_rx: None,
             thumbnail_cache: HashMap::new(),
             native_icon_cache: HashMap::new(),
             preview_cache: HashMap::new(),
@@ -1888,6 +1950,8 @@ impl BExplorerApp {
 
             let worker_paths = paths.clone();
             self.clipboard = Some(FileClipboard { paths, cut: false });
+            self.system_clipboard_can_paste = true;
+            self.system_clipboard_checked_at = Some(Instant::now());
             if let Err(error) = crate::platform::shell::clear_clipboard() {
                 crate::utils::log::error(format!("Clipboard clear failed: {error}"));
             }
@@ -1905,6 +1969,8 @@ impl BExplorerApp {
         let cut = cut && !archive_items;
         sync_file_clipboard(&paths, cut);
         self.clipboard = Some(FileClipboard { paths, cut });
+        self.system_clipboard_can_paste = true;
+        self.system_clipboard_checked_at = Some(Instant::now());
         self.status_message = if cut {
             "Ready to move selected item(s)".into()
         } else if archive_items {
@@ -1920,11 +1986,51 @@ impl BExplorerApp {
         })
     }
 
-    pub fn can_paste(&self) -> bool {
-        self.clipboard
+    pub fn can_paste(&mut self, ctx: &egui::Context) -> bool {
+        if self
+            .clipboard
             .as_ref()
             .is_some_and(|clipboard| !clipboard.paths.is_empty())
-            || crate::platform::shell::read_files().is_ok()
+        {
+            return true;
+        }
+
+        self.poll_system_clipboard_probe(ctx);
+        let stale = self
+            .system_clipboard_checked_at
+            .is_none_or(|checked_at| checked_at.elapsed() >= CLIPBOARD_PROBE_TTL);
+        if stale && self.system_clipboard_probe_rx.is_none() {
+            let (tx, rx) = mpsc::channel();
+            self.system_clipboard_probe_rx = Some(rx);
+            self.system_clipboard_checked_at = Some(Instant::now());
+            thread::spawn(move || {
+                let _ = tx.send(crate::platform::shell::read_files().is_ok());
+            });
+        }
+        if self.system_clipboard_probe_rx.is_some() {
+            ctx.request_repaint_after(CLIPBOARD_PROBE_REPAINT);
+        }
+        self.system_clipboard_can_paste
+    }
+
+    fn poll_system_clipboard_probe(&mut self, ctx: &egui::Context) {
+        let Some(rx) = self.system_clipboard_probe_rx.as_ref() else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(can_paste) => {
+                self.system_clipboard_can_paste = can_paste;
+                self.system_clipboard_checked_at = Some(Instant::now());
+                self.system_clipboard_probe_rx = None;
+                ctx.request_repaint();
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.system_clipboard_can_paste = false;
+                self.system_clipboard_checked_at = Some(Instant::now());
+                self.system_clipboard_probe_rx = None;
+            }
+        }
     }
 
     fn import_system_clipboard_paths(&mut self) -> bool {
@@ -1938,6 +2044,8 @@ impl BExplorerApp {
             if let Ok(files) = crate::platform::shell::read_files()
                 && !files.paths.is_empty()
             {
+                self.system_clipboard_can_paste = true;
+                self.system_clipboard_checked_at = Some(Instant::now());
                 self.clipboard = Some(FileClipboard {
                     paths: files.paths,
                     cut: files.cut,
@@ -1952,6 +2060,8 @@ impl BExplorerApp {
             if paths.is_empty() {
                 return false;
             }
+            self.system_clipboard_can_paste = true;
+            self.system_clipboard_checked_at = Some(Instant::now());
             self.clipboard = Some(FileClipboard { paths, cut: false });
             true
         }
@@ -2607,6 +2717,8 @@ impl BExplorerApp {
 
         if clear_clipboard_on_confirm {
             self.clipboard = None;
+            self.system_clipboard_can_paste = false;
+            self.system_clipboard_checked_at = Some(Instant::now());
             clear_system_clipboard_after_cut();
         }
 
@@ -3818,6 +3930,25 @@ impl BExplorerApp {
             }
         }
 
+        while let Ok(message) = self.native_icon_rx.try_recv() {
+            match message.image {
+                Some(image) => {
+                    let texture = ctx.load_texture(
+                        format!("native-icon:{}", message.cache_key.display()),
+                        image,
+                        TextureOptions::LINEAR,
+                    );
+                    self.native_icon_cache
+                        .insert(message.cache_key, NativeIconState::Ready(texture));
+                    ctx.request_repaint();
+                }
+                None => {
+                    self.native_icon_cache
+                        .insert(message.cache_key, NativeIconState::Missing);
+                }
+            }
+        }
+
         while let Ok(message) = self.preview_rx.try_recv() {
             let cache_generation_matches = matches!(
                 self.preview_cache.get(&message.path),
@@ -4571,10 +4702,21 @@ impl eframe::App for BExplorerApp {
         {
             use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-            if let (Ok(display), Ok(window)) = (frame.display_handle(), frame.window_handle()) {
+            let should_poll_native_drag = self.file_drag.is_some()
+                || self.drag_selection.is_some()
+                || self.sidebar_drag.is_some()
+                || ctx.input(|input| {
+                    input.pointer.primary_down()
+                        || input.pointer.secondary_down()
+                        || !input.events.is_empty()
+                });
+
+            if should_poll_native_drag
+                && let (Ok(display), Ok(window)) = (frame.display_handle(), frame.window_handle())
+            {
                 crate::platform::linux::prepare_native_file_drag(display.as_raw(), window.as_raw());
             }
-            if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            if should_poll_native_drag {
                 ctx.request_repaint_after(Duration::from_millis(16));
             }
         }
@@ -5330,8 +5472,11 @@ mod shortcut_tests {
 
     fn test_app_at(path: PathBuf) -> BExplorerApp {
         let (transfer_tx, transfer_rx) = mpsc::channel();
-        let (thumbnail_tx, thumbnail_rx) = mpsc::channel();
+        let (_thumbnail_tx, thumbnail_rx) = mpsc::channel();
+        let (thumbnail_job_tx, _thumbnail_job_rx) = mpsc::channel();
         let (portable_thumbnail_tx, _portable_thumbnail_rx) = mpsc::channel();
+        let (native_icon_job_tx, _native_icon_job_rx) = mpsc::channel();
+        let (_native_icon_result_tx, native_icon_rx) = mpsc::channel();
         let (preview_tx, _preview_job_rx) = mpsc::channel();
         let (_preview_result_tx, preview_rx) = mpsc::channel();
 
@@ -5404,9 +5549,11 @@ mod shortcut_tests {
             transfer_progress: HashMap::new(),
             transfer_history: VecDeque::new(),
             max_parallel_transfers: 2,
-            thumbnail_tx,
             thumbnail_rx,
+            thumbnail_job_tx,
             portable_thumbnail_tx,
+            native_icon_job_tx,
+            native_icon_rx,
             preview_tx,
             preview_rx,
             preview_generation: Arc::new(AtomicU64::new(0)),
@@ -5426,6 +5573,9 @@ mod shortcut_tests {
             defender_panel_minimized: false,
             defender_panel_spawned: false,
             clipboard: None,
+            system_clipboard_can_paste: false,
+            system_clipboard_checked_at: None,
+            system_clipboard_probe_rx: None,
             thumbnail_cache: HashMap::new(),
             native_icon_cache: HashMap::new(),
             preview_cache: HashMap::new(),

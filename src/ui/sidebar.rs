@@ -193,7 +193,7 @@ fn section_header(
         Align2::LEFT_CENTER,
         label,
         theme::font(config, 12.4),
-        theme::muted(config),
+        theme::sidebar_muted(config),
     );
 
     draw_section_chevron(
@@ -203,7 +203,7 @@ fn section_header(
             Vec2::splat(12.0),
         ),
         *open,
-        theme::muted(config),
+        theme::sidebar_muted(config),
     );
 
     if response.clicked() {
@@ -548,7 +548,7 @@ fn paint_sidebar_drag_preview(app: &BExplorerApp, ctx: &egui::Context) {
                         Align2::LEFT_CENTER,
                         label,
                         theme::font(&app.config, 12.4),
-                        theme::text(&app.config),
+                        theme::sidebar_text(&app.config),
                     );
                 });
         });
@@ -654,7 +654,7 @@ fn sidebar_path_row(
         Align2::LEFT_CENTER,
         label,
         theme::font(&app.config, 12.3),
-        theme::text(&app.config),
+        theme::sidebar_text(&app.config),
     );
 
     if let Some(path) = path {
@@ -707,7 +707,7 @@ fn favorite_row(
         Align2::LEFT_CENTER,
         label,
         theme::font(&app.config, 12.3),
-        theme::text(&app.config),
+        theme::sidebar_text(&app.config),
     );
 
     let remove_rect = Rect::from_center_size(
@@ -725,7 +725,7 @@ fn favorite_row(
         Align2::CENTER_CENTER,
         "x",
         theme::font(&app.config, 11.0),
-        theme::muted(&app.config),
+        theme::sidebar_muted(&app.config),
     );
 
     if remove_response.clicked() {
@@ -775,7 +775,7 @@ fn storage_row(app: &mut BExplorerApp, ui: &mut egui::Ui, entry: &FileEntry) -> 
         Align2::LEFT_CENTER,
         &entry.name,
         theme::font(&app.config, 12.3),
-        theme::text(&app.config),
+        theme::sidebar_text(&app.config),
     );
 
     let response = response.on_hover_text(entry.path.display().to_string());
@@ -823,14 +823,14 @@ fn sidebar_context_row(ui: &mut egui::Ui, config: &AppConfig, label: &str) -> eg
             Pos2::new(rect.left() + 18.0, rect.center().y),
             Vec2::splat(16.0),
         ),
-        theme::muted(config),
+        theme::sidebar_muted(config),
     );
     ui.painter().text(
         Pos2::new(rect.left() + 38.0, rect.center().y),
         Align2::LEFT_CENTER,
         label,
         theme::font(config, 12.3),
-        theme::text(config),
+        theme::sidebar_text(config),
     );
     response
 }
@@ -879,7 +879,7 @@ fn portable_device_row(
         Align2::LEFT_CENTER,
         label,
         theme::font(&app.config, 12.3),
-        theme::text(&app.config),
+        theme::sidebar_text(&app.config),
     );
 
     let response = if description.trim().is_empty() {
@@ -898,7 +898,7 @@ fn muted_row(ui: &mut egui::Ui, config: &AppConfig, text: &str) {
         Align2::LEFT_CENTER,
         text,
         theme::font(config, 12.0),
-        theme::faint(config),
+        theme::sidebar_faint(config),
     );
 }
 

@@ -1,18 +1,19 @@
 use std::path::{Path, PathBuf};
 
 use std::sync::atomic::Ordering as AtomicOrdering;
-use std::thread;
 use std::time::Duration;
 
-use eframe::egui::{self, ColorImage, TextureOptions};
+use eframe::egui::{self, ColorImage};
 
 use crate::fs::explorer::{self, EntryKind, FileCategory, FileEntry};
 
 use super::types::{
-    NativeIconState, PortableThumbnailJob, PreviewCacheState, PreviewJob, ThumbnailMessage,
-    ThumbnailState,
+    NativeIconJob, NativeIconState, PortableThumbnailJob, PreviewCacheState, PreviewJob,
+    ThumbnailJob, ThumbnailState,
 };
 use super::{BExplorerApp, PreviewContentRef};
+
+const NATIVE_ICON_SIZE: u32 = 256;
 
 impl BExplorerApp {
     pub fn thumbnail_texture_id(
@@ -62,12 +63,17 @@ impl BExplorerApp {
 
         self.thumbnail_cache
             .insert(entry.path.clone(), ThumbnailState::Loading);
-        let tx = self.thumbnail_tx.clone();
-        let path = entry.path.clone();
-        thread::spawn(move || {
-            let image = load_desktop_thumbnail_image(&path).or_else(|| load_thumbnail_image(&path));
-            let _ = tx.send(ThumbnailMessage { path, image });
-        });
+        if self
+            .thumbnail_job_tx
+            .send(ThumbnailJob {
+                path: entry.path.clone(),
+            })
+            .is_err()
+        {
+            self.thumbnail_cache
+                .insert(entry.path.clone(), ThumbnailState::Missing);
+            return None;
+        }
         ctx.request_repaint_after(Duration::from_millis(80));
         None
     }
@@ -107,7 +113,8 @@ impl BExplorerApp {
             }
             return None;
         }
-        self.native_icon_texture_for_key(ctx, path, path, is_directory)
+        let key = native_path_icon_cache_key(path, is_directory, NATIVE_ICON_SIZE);
+        self.native_icon_texture_for_key(ctx, &key, path, is_directory)
     }
 
     pub fn preview_content(
@@ -186,32 +193,29 @@ impl BExplorerApp {
         if let Some(state) = self.native_icon_cache.get(cache_key) {
             return match state {
                 NativeIconState::Ready(texture) => Some(texture.id()),
+                NativeIconState::Loading => None,
                 NativeIconState::Missing => None,
             };
         }
 
-        let icon = crate::platform::native_file_icon_highres(path, is_directory)
-            .or_else(|| crate::platform::native_file_icon(path, is_directory, 32));
-        match icon {
-            Some(icon) => {
-                let color_image =
-                    ColorImage::from_rgba_unmultiplied([icon.width, icon.height], &icon.rgba);
-                let texture = ctx.load_texture(
-                    format!("native-icon:{}", cache_key.display()),
-                    color_image,
-                    TextureOptions::LINEAR,
-                );
-                let id = texture.id();
-                self.native_icon_cache
-                    .insert(cache_key.to_path_buf(), NativeIconState::Ready(texture));
-                Some(id)
-            }
-            None => {
-                self.native_icon_cache
-                    .insert(cache_key.to_path_buf(), NativeIconState::Missing);
-                None
-            }
+        self.native_icon_cache
+            .insert(cache_key.to_path_buf(), NativeIconState::Loading);
+        if self
+            .native_icon_job_tx
+            .send(NativeIconJob {
+                cache_key: cache_key.to_path_buf(),
+                path: path.to_path_buf(),
+                is_directory,
+                size: NATIVE_ICON_SIZE,
+            })
+            .is_err()
+        {
+            self.native_icon_cache
+                .insert(cache_key.to_path_buf(), NativeIconState::Missing);
+            return None;
         }
+        ctx.request_repaint_after(Duration::from_millis(80));
+        None
     }
 }
 
@@ -237,7 +241,9 @@ pub(super) fn virtual_native_icon_request(entry: &FileEntry) -> Option<(PathBuf,
 
     match entry.kind {
         EntryKind::Folder => Some((
-            PathBuf::from("__bexplorer_portable_folder_icon"),
+            PathBuf::from(format!(
+                "__bexplorer_portable_folder_icon_size_{NATIVE_ICON_SIZE}"
+            )),
             PathBuf::from("bexplorer-folder"),
             true,
         )),
@@ -256,7 +262,9 @@ pub(super) fn virtual_native_icon_request(entry: &FileEntry) -> Option<(PathBuf,
                 .filter(|extension| !extension.is_empty())
                 .unwrap_or_else(|| "file".into());
             Some((
-                PathBuf::from(format!("__bexplorer_portable_ext_{extension}")),
+                PathBuf::from(format!(
+                    "__bexplorer_portable_ext_{extension}_size_{NATIVE_ICON_SIZE}"
+                )),
                 PathBuf::from(format!("bexplorer.{extension}")),
                 false,
             ))
@@ -265,6 +273,7 @@ pub(super) fn virtual_native_icon_request(entry: &FileEntry) -> Option<(PathBuf,
     }
 }
 
+#[cfg(target_os = "windows")]
 pub(super) fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
     match entry.kind {
         EntryKind::Drive => PathBuf::from(format!(
@@ -272,9 +281,74 @@ pub(super) fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
             entry.drive_kind,
             entry.path.display().to_string().replace(['\\', ':'], "_")
         )),
-        EntryKind::Folder => entry.path.clone(),
-        EntryKind::File | EntryKind::Symlink | EntryKind::Other => entry.path.clone(),
+        EntryKind::Folder | EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
+            entry.path.clone()
+        }
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
+    match entry.kind {
+        EntryKind::Drive => PathBuf::from(format!(
+            "__bexplorer_drive_{:?}_{}_size_{NATIVE_ICON_SIZE}",
+            entry.drive_kind,
+            native_directory_icon_class(&entry.path)
+        )),
+        EntryKind::Folder => native_path_icon_cache_key(&entry.path, true, NATIVE_ICON_SIZE),
+        EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
+            native_file_icon_cache_key(&entry.path, Some(&entry.name), NATIVE_ICON_SIZE)
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn native_path_icon_cache_key(path: &Path, _is_directory: bool, _size: u32) -> PathBuf {
+    path.to_path_buf()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_path_icon_cache_key(path: &Path, is_directory: bool, size: u32) -> PathBuf {
+    if is_directory {
+        PathBuf::from(format!(
+            "__bexplorer_native_folder_{}_size_{size}",
+            native_directory_icon_class(path)
+        ))
+    } else {
+        native_file_icon_cache_key(path, None, size)
+    }
+}
+
+fn native_directory_icon_class(path: &Path) -> &'static str {
+    if path == Path::new("/") {
+        "root"
+    } else if path.starts_with("/media") || path.starts_with("/run/media") {
+        "removable"
+    } else if path.starts_with("/mnt") {
+        "mnt"
+    } else {
+        "folder"
+    }
+}
+
+fn native_file_icon_cache_key(path: &Path, fallback_name: Option<&str>, size: u32) -> PathBuf {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .or_else(|| {
+            fallback_name.and_then(|name| name.rsplit_once('.').map(|(_, extension)| extension))
+        })
+        .map(|extension| {
+            extension
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase()
+        })
+        .filter(|extension| !extension.is_empty())
+        .unwrap_or_else(|| "none".into());
+    PathBuf::from(format!(
+        "__bexplorer_native_file_ext_{extension}_size_{size}"
+    ))
 }
 
 pub(super) fn load_thumbnail_image(path: &Path) -> Option<ColorImage> {
@@ -287,6 +361,24 @@ pub(super) fn load_desktop_thumbnail_image(path: &Path) -> Option<ColorImage> {
     Some(ColorImage::from_rgba_unmultiplied(
         [image.width, image.height],
         &image.rgba,
+    ))
+}
+
+pub(super) fn load_native_icon_image(
+    path: &Path,
+    is_directory: bool,
+    size: u32,
+) -> Option<ColorImage> {
+    let icon = if size >= 128 {
+        crate::platform::native_file_icon_highres(path, is_directory)
+            .or_else(|| crate::platform::native_file_icon(path, is_directory, size))
+    } else {
+        crate::platform::native_file_icon(path, is_directory, size)
+            .or_else(|| crate::platform::native_file_icon_highres(path, is_directory))
+    }?;
+    Some(ColorImage::from_rgba_unmultiplied(
+        [icon.width, icon.height],
+        &icon.rgba,
     ))
 }
 

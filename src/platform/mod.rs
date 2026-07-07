@@ -299,7 +299,7 @@ pub fn network_computers_netbios_cached() -> Vec<NetworkComputerInfo> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn network_computers_netbios_cached() -> Vec<NetworkComputerInfo> {
-    linux::network_computers()
+    Vec::new()
 }
 
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
@@ -355,7 +355,7 @@ pub fn network_computers_wnet() -> Vec<NetworkComputerInfo> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn network_computers_wnet() -> Vec<NetworkComputerInfo> {
-    linux::network_computers()
+    Vec::new()
 }
 
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
@@ -377,7 +377,7 @@ pub fn network_shell_devices() -> Vec<NetworkComputerInfo> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn network_shell_devices() -> Vec<NetworkComputerInfo> {
-    linux::network_computers()
+    Vec::new()
 }
 
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]

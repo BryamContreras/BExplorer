@@ -47,7 +47,7 @@ pub fn show(app: &mut BExplorerApp, ui: &mut egui::Ui, pane_id: usize) {
 
     let has_selection = !app.selected.is_empty();
     let single_selection = app.selected.len() == 1;
-    let can_paste = app.can_paste();
+    let can_paste = app.can_paste(ui.ctx());
     let mut command = None;
     let content_center = Pos2::new(rect.center().x, rect.center().y + ACTION_ROW_VERTICAL_NUDGE);
     let content_rect =

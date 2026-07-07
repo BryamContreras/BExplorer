@@ -1,6 +1,258 @@
-use eframe::egui::{self, Color32, FontFamily, FontId, Stroke, TextStyle};
+use std::path::Path;
+
+use eframe::egui::{
+    self, Color32, FontData, FontDefinitions, FontFamily, FontId, Stroke, TextStyle,
+};
 
 use crate::app::config::{AppConfig, ThemePreference, VibrancyMode};
+
+const SYSTEM_UI_FONT: &str = "bexplorer-system-ui";
+
+pub fn install_system_fonts(ctx: &egui::Context) {
+    let Some((label, bytes)) = system_ui_font_bytes() else {
+        crate::utils::log::info("Using built-in egui fonts; no system UI font was found");
+        return;
+    };
+
+    let mut fonts = FontDefinitions::default();
+    fonts
+        .font_data
+        .insert(SYSTEM_UI_FONT.to_owned(), FontData::from_owned(bytes));
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .retain(|name| name != SYSTEM_UI_FONT);
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .insert(0, SYSTEM_UI_FONT.to_owned());
+    ctx.set_fonts(fonts);
+    crate::utils::log::info(format!("Using system UI font: {label}"));
+}
+
+fn system_ui_font_bytes() -> Option<(String, Vec<u8>)> {
+    #[cfg(target_os = "windows")]
+    return windows_system_ui_font_bytes();
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux_system_ui_font_bytes();
+
+    #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_ui_font_bytes() -> Option<(String, Vec<u8>)> {
+    let windows_dir = std::env::var_os("WINDIR")
+        .map(std::path::PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::PathBuf::from(r"C:\Windows"));
+    let font_dir = windows_dir.join("Fonts");
+
+    for file_name in ["segoeui.ttf", "SegUIVar.ttf", "segoeuisl.ttf"] {
+        let path = font_dir.join(file_name);
+        if let Some(bytes) = read_font_file(&path) {
+            return Some((format!("Segoe UI ({})", path.display()), bytes));
+        }
+    }
+
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_system_ui_font_bytes() -> Option<(String, Vec<u8>)> {
+    for name in linux_ui_font_candidates() {
+        let Some(path) = fontconfig_match_file(&name) else {
+            continue;
+        };
+        if let Some(bytes) = read_font_file(&path) {
+            return Some((format!("{name} ({})", path.display()), bytes));
+        }
+    }
+
+    for path in linux_fallback_font_paths() {
+        if let Some(bytes) = read_font_file(&path) {
+            return Some((path.display().to_string(), bytes));
+        }
+    }
+
+    None
+}
+
+fn read_font_file(path: &Path) -> Option<Vec<u8>> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    if !matches!(extension.as_str(), "ttf" | "otf") {
+        return None;
+    }
+
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > 64 * 1024 * 1024 {
+        return None;
+    }
+
+    std::fs::read(path).ok().filter(|bytes| !bytes.is_empty())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_ui_font_candidates() -> Vec<String> {
+    let mut candidates = Vec::new();
+
+    for raw_name in [
+        gtk_font_name_from_settings("gtk-4.0/settings.ini"),
+        gtk_font_name_from_settings("gtk-3.0/settings.ini"),
+        kde_font_name_from_settings(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        push_linux_font_candidate(&mut candidates, &raw_name);
+    }
+
+    for name in [
+        "Adwaita Sans",
+        "Cantarell",
+        "Noto Sans",
+        "Ubuntu",
+        "DejaVu Sans",
+        "Liberation Sans",
+        "Sans",
+    ] {
+        push_unique_candidate(&mut candidates, name.to_owned());
+    }
+
+    candidates
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn push_linux_font_candidate(candidates: &mut Vec<String>, raw_name: &str) {
+    let raw_name = raw_name.trim();
+    if raw_name.is_empty() {
+        return;
+    }
+
+    push_unique_candidate(candidates, strip_linux_font_size(raw_name));
+    push_unique_candidate(candidates, raw_name.to_owned());
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn push_unique_candidate(candidates: &mut Vec<String>, name: String) {
+    let name = name.trim();
+    if !name.is_empty() && !candidates.iter().any(|candidate| candidate == name) {
+        candidates.push(name.to_owned());
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn strip_linux_font_size(value: &str) -> String {
+    let family = value.split(',').next().unwrap_or(value).trim();
+    let mut parts: Vec<&str> = family.split_whitespace().collect();
+    while parts.last().is_some_and(|token| is_font_size_token(token)) {
+        parts.pop();
+    }
+
+    if parts.is_empty() {
+        family.to_owned()
+    } else {
+        parts.join(" ")
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn is_font_size_token(token: &str) -> bool {
+    let token = token.trim().trim_end_matches("px");
+    !token.is_empty() && token.parse::<f32>().is_ok()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn fontconfig_match_file(name: &str) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("fc-match")
+        .args(["-f", "%{file}", name])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!path.is_empty()).then(|| std::path::PathBuf::from(path))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn gtk_font_name_from_settings(relative_path: &str) -> Option<String> {
+    let path = xdg_config_home()?.join(relative_path);
+    let settings = std::fs::read_to_string(path).ok()?;
+    ini_value(&settings, "Settings", "gtk-font-name")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn kde_font_name_from_settings() -> Option<String> {
+    let path = xdg_config_home()?.join("kdeglobals");
+    let settings = std::fs::read_to_string(path).ok()?;
+    let font = ini_value(&settings, "General", "font")?;
+    let family = font.split(',').next().unwrap_or(font.as_str()).trim();
+    (!family.is_empty()).then(|| family.to_owned())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn ini_value(text: &str, section: &str, key: &str) -> Option<String> {
+    let mut in_section = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+
+        if line.starts_with('[') && line.ends_with(']') {
+            in_section = line[1..line.len() - 1].trim() == section;
+            continue;
+        }
+
+        if in_section
+            && let Some((candidate_key, value)) = line.split_once('=')
+            && candidate_key.trim() == key
+        {
+            let value = value.trim().trim_matches('"').trim().to_owned();
+            if !value.is_empty() {
+                return Some(value);
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn xdg_config_home() -> Option<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from)
+        && !path.as_os_str().is_empty()
+    {
+        return Some(path);
+    }
+
+    home_dir().map(|path| path.join(".config"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_fallback_font_paths() -> [std::path::PathBuf; 7] {
+    [
+        std::path::PathBuf::from("/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf"),
+        std::path::PathBuf::from("/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"),
+        std::path::PathBuf::from("/usr/share/fonts/noto/NotoSans-Regular.ttf"),
+        std::path::PathBuf::from("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"),
+        std::path::PathBuf::from("/usr/share/fonts/TTF/DejaVuSans.ttf"),
+        std::path::PathBuf::from("/usr/share/fonts/liberation/LiberationSans-Regular.ttf"),
+        std::path::PathBuf::from("/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"),
+    ]
+}
 
 pub fn apply(ctx: &egui::Context, config: &AppConfig) {
     match config.theme {
@@ -290,6 +542,27 @@ pub fn muted(config: &AppConfig) -> Color32 {
     pick(config, MUTED, LIGHT_MUTED)
 }
 
+pub fn sidebar_text(config: &AppConfig) -> Color32 {
+    match config.theme {
+        ThemePreference::Dark => TEXT,
+        ThemePreference::Light | ThemePreference::Gray => LIGHT_SIDEBAR_TEXT,
+    }
+}
+
+pub fn sidebar_muted(config: &AppConfig) -> Color32 {
+    match config.theme {
+        ThemePreference::Dark => MUTED,
+        ThemePreference::Light | ThemePreference::Gray => LIGHT_SIDEBAR_MUTED,
+    }
+}
+
+pub fn sidebar_faint(config: &AppConfig) -> Color32 {
+    match config.theme {
+        ThemePreference::Dark => FAINT,
+        ThemePreference::Light | ThemePreference::Gray => LIGHT_SIDEBAR_FAINT,
+    }
+}
+
 pub fn faint(config: &AppConfig) -> Color32 {
     pick(config, FAINT, LIGHT_FAINT)
 }
@@ -366,6 +639,11 @@ pub fn paint_titlebar_gradient(painter: &egui::Painter, rect: egui::Rect, config
 
 pub fn paint_sidebar_gradient(painter: &egui::Painter, rect: egui::Rect, config: &AppConfig) {
     let base = sidebar(config);
+    if matches!(config.theme, ThemePreference::Light | ThemePreference::Gray) {
+        painter.rect_filled(rect, 0.0, base);
+        return;
+    }
+
     let accent = accent(config);
     let alpha = vibrancy_alpha(config);
     let apply_alpha = |c: Color32| Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), alpha);
@@ -374,10 +652,7 @@ pub fn paint_sidebar_gradient(painter: &egui::Painter, rect: egui::Rect, config:
             apply_alpha(blend(base, canvas(config), 0.030)),
             apply_alpha(blend(base, accent, 0.010)),
         ),
-        ThemePreference::Light | ThemePreference::Gray => (
-            apply_alpha(blend(base, accent, 0.006)),
-            apply_alpha(blend(base, canvas(config), 0.040)),
-        ),
+        ThemePreference::Light | ThemePreference::Gray => (base, base),
     };
 
     paint_horizontal_gradient_rect(painter, rect, left, right);
@@ -657,8 +932,11 @@ const LIGHT_TITLEBAR: Color32 = Color32::from_rgb(236, 240, 240);
 const LIGHT_TAB_ACTIVE: Color32 = Color32::from_rgb(250, 252, 252);
 const LIGHT_TAB_INACTIVE: Color32 = Color32::from_rgb(226, 232, 232);
 const LIGHT_TAB_HOVER: Color32 = Color32::from_rgb(238, 244, 244);
-const LIGHT_SIDEBAR: Color32 = Color32::from_rgb(238, 243, 243);
+const LIGHT_SIDEBAR: Color32 = Color32::from_rgb(230, 231, 234);
 const LIGHT_SIDEBAR_ROW: Color32 = Color32::from_rgb(225, 234, 234);
+const LIGHT_SIDEBAR_TEXT: Color32 = Color32::from_rgb(72, 76, 82);
+const LIGHT_SIDEBAR_MUTED: Color32 = Color32::from_rgb(104, 109, 116);
+const LIGHT_SIDEBAR_FAINT: Color32 = Color32::from_rgb(136, 141, 148);
 const LIGHT_CANVAS: Color32 = Color32::from_rgb(248, 250, 250);
 const LIGHT_SURFACE: Color32 = Color32::from_rgb(244, 247, 247);
 const LIGHT_SURFACE_ELEVATED: Color32 = Color32::from_rgb(255, 255, 255);

@@ -282,10 +282,26 @@ pub(super) struct ThumbnailMessage {
     pub(super) image: Option<ColorImage>,
 }
 
+pub(super) struct ThumbnailJob {
+    pub(super) path: PathBuf,
+}
+
 pub(super) struct PortableThumbnailJob {
     pub(super) path: PathBuf,
     pub(super) max_bytes: usize,
     pub(super) allow_default_resource: bool,
+}
+
+pub(super) struct NativeIconJob {
+    pub(super) cache_key: PathBuf,
+    pub(super) path: PathBuf,
+    pub(super) is_directory: bool,
+    pub(super) size: u32,
+}
+
+pub(super) struct NativeIconMessage {
+    pub(super) cache_key: PathBuf,
+    pub(super) image: Option<ColorImage>,
 }
 
 pub(super) struct PreviewJob {
@@ -423,6 +439,7 @@ pub(super) enum ThumbnailState {
 
 pub(super) enum NativeIconState {
     Ready(TextureHandle),
+    Loading,
     Missing,
 }
 
