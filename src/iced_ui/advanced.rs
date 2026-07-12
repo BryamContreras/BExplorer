@@ -167,7 +167,7 @@ impl BExplorerIced {
             let _ = paths;
             self.pane_mut(pane).status =
                 "Microsoft Defender solo está disponible en Windows".into();
-            return Task::none();
+            Task::none()
         }
 
         #[cfg(target_os = "windows")]
@@ -288,7 +288,7 @@ impl BExplorerIced {
             let _ = (action, success);
             self.pane_mut(self.focused_pane()).status =
                 "Microsoft Defender solo está disponible en Windows".into();
-            return Task::none();
+            Task::none()
         }
 
         #[cfg(target_os = "windows")]

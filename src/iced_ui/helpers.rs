@@ -168,10 +168,12 @@ mod tests {
 
     #[test]
     fn vibrancy_uses_dense_glass_for_menus_inputs_and_overlay_windows() {
-        let mut config = AppConfig::default();
-        config.vibrancy = VibrancyMode::Blur;
-        config.vibrancy_intensity = 90;
-        config.vibrancy_active = true;
+        let config = AppConfig {
+            vibrancy: VibrancyMode::Blur,
+            vibrancy_intensity: 90,
+            vibrancy_active: true,
+            ..AppConfig::default()
+        };
 
         let palette = Palette::from_config(&config, true);
         assert!(palette.page_bg.a < 1.0);

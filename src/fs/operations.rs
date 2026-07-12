@@ -159,10 +159,10 @@ pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome
                     })
             })
             .collect();
-        return Ok(TrashDeleteOutcome {
+        Ok(TrashDeleteOutcome {
             count,
             undo_records,
-        });
+        })
     }
 
     #[cfg(not(any(
@@ -221,7 +221,7 @@ pub fn restore_from_trash(records: &[TrashUndoRecord]) -> Result<usize> {
         trash::os_limited::restore_all(items).map_err(|error| {
             BExplorerError::Operation(format!("No se pudo restaurar desde la papelera: {error}"))
         })?;
-        return Ok(count);
+        Ok(count)
     }
 
     #[cfg(not(any(

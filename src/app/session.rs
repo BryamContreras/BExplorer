@@ -1,5 +1,3 @@
-use std::fs::OpenOptions;
-use std::io::Write;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -156,7 +154,7 @@ impl AppSession {
     pub fn save(&self) -> Result<()> {
         let path = crate::utils::paths::session_file()?;
         let text = serde_json::to_string_pretty(self)?;
-        write_session_atomically(&path, text.as_bytes())
+        crate::utils::atomic_file::write(&path, text.as_bytes())
     }
 
     fn normalized(mut self) -> Self {
@@ -220,35 +218,6 @@ fn normalized_tab_indices(indices: Vec<usize>, len: usize) -> Vec<usize> {
         }
     }
     normalized
-}
-
-fn write_session_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("session.json");
-    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
-    let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .open(&temp_path)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    drop(file);
-
-    if let Err(first_error) = std::fs::rename(&temp_path, path) {
-        #[cfg(windows)]
-        if path.exists() {
-            std::fs::remove_file(path)?;
-            std::fs::rename(&temp_path, path)?;
-            return Ok(());
-        }
-
-        let _ = std::fs::remove_file(&temp_path);
-        return Err(first_error.into());
-    }
-    Ok(())
 }
 
 fn try_load() -> Result<AppSession> {

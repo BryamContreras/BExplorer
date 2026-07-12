@@ -20,6 +20,8 @@ macOS support is kept behind separate platform modules for future work.
 
 BExplorer is in active beta development. Its desktop interface has been migrated
 from `egui` to `iced` and the superseded UI implementation has been removed.
+The current development phase focuses on reliability and clean-machine testing
+rather than adding another broad set of file-manager features.
 
 The current `iced` interface covers local browsing, tabs, split panes, view
 modes, filtering, grouping and column sorting, rename, background file deletion,
@@ -53,6 +55,9 @@ drives, and desktop clipboard implementations.
 - Internal and external drag-and-drop support.
 - Transfer queue with progress, pause, cancel, cleanup of partial files, and
   conflict handling.
+- Transactional local replacements: the complete new file or directory is
+  copied and synchronized beside the destination before the existing item is
+  replaced. A failed preparation leaves the previous destination untouched.
 - Concurrent archive jobs with a dedicated progress window that is restored
   when a new compression or transfer starts.
 - Elevated Microsoft Defender remediation and exclusion actions on Windows.
@@ -79,7 +84,8 @@ explorer:
 
 Conflict resolution is available for copy and move operations:
 
-- `Replace`: overwrite the existing destination item.
+- `Replace`: prepare and synchronize the complete replacement before changing
+  the existing destination item.
 - `Skip`: leave the destination item untouched.
 - `Keep both`: copy the new item using a numbered name such as
   `report (2).txt`.
@@ -329,45 +335,46 @@ Important files:
 - `session.json`: open tabs, history, active paths, and split-pane state.
 - `bexplorer.log`: non-fatal errors and diagnostic events.
 
+Configuration and session JSON are written through synchronized sibling files
+and atomically replaced, so an interrupted save does not expose a partially
+written document.
+
 ## Project Layout
 
 ```text
 src/
   main.rs
   app/
-    state.rs
-    state/
     config.rs
     session.rs
-    commands.rs
+    thumbnail_data.rs
   fs/
     archive.rs
-    archive/
+    archive/                 # ZIP, 7-Zip and shared archive types
     archive_listing.rs
     explorer.rs
+    explorer/                # Platform storage enumeration
     operations.rs
     portable.rs
     search.rs
     transfer_queue.rs
+  iced_ui/
+    mod.rs
+    state.rs
+    update.rs                # Exhaustive Message dispatcher
+    interaction/             # Context, selection, drag and layout input
+    view/                    # Chrome, menus, dialogs and file presentations
+    helpers/
   platform/
     mod.rs
     windows.rs
     windows/
     linux.rs
+    linux/                   # Icons, storage watching, blur and Wayland drag
     macos.rs
     shell/
-  preview/
-  ui/
-    action_bar.rs
-    bookmarks_bar.rs
-    dialogs.rs
-    file_table.rs
-    sidebar.rs
-    status_bar.rs
-    tabs.rs
-    theme.rs
-    window_frame.rs
   utils/
+    atomic_file.rs
     errors.rs
     log.rs
     paths.rs
@@ -392,6 +399,9 @@ The current test suite covers:
 - duplicate filtering for USB/MTP devices;
 - basic create-folder and create-file operations;
 - transfer conflict policies;
+- synchronized staged replacement and preservation of an existing destination
+  when replacement preparation fails;
+- atomic configuration/session file replacement;
 - clipboard and paste shortcut behavior;
 - Linux mountinfo parsing, MIME/file URI clipboard helpers, UDisks parsing,
   network helper parsing, and XDG thumbnail/icon metadata.
@@ -399,7 +409,9 @@ The current test suite covers:
 Run:
 
 ```bash
-cargo test
+cargo fmt --check
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
 ```
 
 ## Roadmap

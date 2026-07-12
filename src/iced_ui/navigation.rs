@@ -208,17 +208,17 @@ impl BExplorerIced {
             }
         }
 
-        if let Some((cache_key, path, is_directory)) = native_icon_request_for_entry(entry) {
-            if !self.native_icon_cache.contains_key(&cache_key) {
-                self.native_icon_cache
-                    .insert(cache_key.clone(), IcedImageState::Loading);
-                tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
-                    cache_key,
-                    path,
-                    is_directory,
-                    size: thumbnail_data::NATIVE_ICON_SIZE,
-                }));
-            }
+        if let Some((cache_key, path, is_directory)) = native_icon_request_for_entry(entry)
+            && !self.native_icon_cache.contains_key(&cache_key)
+        {
+            self.native_icon_cache
+                .insert(cache_key.clone(), IcedImageState::Loading);
+            tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
+                cache_key,
+                path,
+                is_directory,
+                size: thumbnail_data::NATIVE_ICON_SIZE,
+            }));
         }
 
         tasks

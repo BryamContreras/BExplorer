@@ -61,22 +61,22 @@ pub fn common_places() -> Vec<CommonPlace> {
 }
 
 fn push_place(places: &mut Vec<CommonPlace>, label: &str, path: Option<&std::path::Path>) {
-    if let Some(path) = path {
-        if path.exists() {
-            places.push(CommonPlace {
-                // XDG folders may be named Documents, Documentos, Dokumente,
-                // etc. Their filesystem name is the only reliable display
-                // name; the old static English labels ignored the user's
-                // actual desktop layout.
-                label: path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .filter(|name| !name.is_empty())
-                    .unwrap_or(label)
-                    .to_owned(),
-                path: path.to_path_buf(),
-            });
-        }
+    if let Some(path) = path
+        && path.exists()
+    {
+        places.push(CommonPlace {
+            // XDG folders may be named Documents, Documentos, Dokumente,
+            // etc. Their filesystem name is the only reliable display
+            // name; the old static English labels ignored the user's
+            // actual desktop layout.
+            label: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+                .unwrap_or(label)
+                .to_owned(),
+            path: path.to_path_buf(),
+        });
     }
 }
 
