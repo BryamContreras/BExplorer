@@ -1,4 +1,16 @@
 use super::*;
+
+const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/icons/appicon.png");
+
+pub(in crate::iced_ui) fn app_window_icon() -> Option<window::Icon> {
+    let icon = image::load_from_memory(APP_ICON_PNG)
+        .ok()?
+        .thumbnail(256, 256)
+        .to_rgba8();
+    let (width, height) = icon.dimensions();
+    window::icon::from_rgba(icon.into_raw(), width, height).ok()
+}
+
 pub(in crate::iced_ui) fn main_window_settings(size: Size) -> window::Settings {
     window::Settings {
         size: Size::new(size.width.max(920.0), size.height.max(560.0)),
@@ -6,6 +18,7 @@ pub(in crate::iced_ui) fn main_window_settings(size: Size) -> window::Settings {
         decorations: false,
         resizable: true,
         transparent: true,
+        icon: app_window_icon(),
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {
             application_id: crate::platform::LINUX_APPLICATION_ID.into(),
@@ -46,6 +59,7 @@ fn fixed_progress_window_settings(size: Size, position: Option<Point>) -> window
         decorations: false,
         resizable: false,
         transparent: true,
+        icon: app_window_icon(),
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {
             application_id: crate::platform::LINUX_APPLICATION_ID.into(),
@@ -93,22 +107,46 @@ pub(in crate::iced_ui) fn transfer_tick_stream() -> impl iced::futures::Stream<I
     periodic_message_stream(Duration::from_millis(80), Message::PollTransfers)
 }
 
-pub(in crate::iced_ui) fn sidebar_animation_tick_stream()
--> impl iced::futures::Stream<Item = Message> {
-    periodic_message_stream(Duration::from_millis(32), Message::SidebarAnimationTick)
+pub(in crate::iced_ui) fn advance_layout_animation(
+    current: f32,
+    target: f32,
+    elapsed: Duration,
+) -> f32 {
+    let elapsed = elapsed.as_secs_f32().clamp(0.0, 1.0 / 30.0);
+    let blend = 1.0 - (-LAYOUT_ANIMATION_RESPONSE * elapsed).exp();
+    let next = current + (target - current) * blend;
+    if (next - target).abs() <= 0.0005 {
+        target
+    } else {
+        next.clamp(0.0, 1.0)
+    }
 }
 
-pub(in crate::iced_ui) fn preview_panel_animation_tick_stream()
--> impl iced::futures::Stream<Item = Message> {
-    periodic_message_stream(
-        Duration::from_millis(16),
-        Message::PreviewPanelAnimationTick,
-    )
+pub(in crate::iced_ui) fn advance_popup_animation(
+    current: f32,
+    target: f32,
+    elapsed: Duration,
+) -> f32 {
+    let elapsed = elapsed.as_secs_f32().clamp(0.0, 1.0 / 30.0);
+    let blend = 1.0 - (-POPUP_ANIMATION_RESPONSE * elapsed).exp();
+    let next = current + (target - current) * blend;
+    if (next - target).abs() <= 0.002 {
+        target
+    } else {
+        next.clamp(0.0, 1.0)
+    }
 }
 
-pub(in crate::iced_ui) fn popup_fade_animation_tick_stream()
--> impl iced::futures::Stream<Item = Message> {
-    periodic_message_stream(Duration::from_millis(16), Message::PopupFadeAnimationTick)
+pub(in crate::iced_ui) fn popup_backdrop_opacity(progress: f32, target: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    if target < progress {
+        // While closing, the foreground becomes translucent and would expose
+        // its cached blur underneath. Retire that texture faster so it never
+        // survives visually after the menu surface.
+        progress * progress
+    } else {
+        progress
+    }
 }
 
 pub(in crate::iced_ui) fn scrollbar_animation_tick_stream()

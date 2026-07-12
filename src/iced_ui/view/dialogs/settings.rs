@@ -428,7 +428,14 @@ impl BExplorerIced {
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(|_| container::Style::default().background(Color::from_rgba8(0, 0, 0, 0.42)));
+            .style(move |_| {
+                container::Style::default().background(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    0.42 * palette.text.a,
+                ))
+            });
 
         if !color_picker_open {
             return modal.into();
@@ -438,7 +445,8 @@ impl BExplorerIced {
         let picker_y = ((self.window_size.height - 310.0) * 0.5 + 158.0)
             .min((self.window_size.height - 330.0).max(8.0))
             .max(8.0);
-        let picker = float(opaque(self.color_picker_panel(palette)))
+        let picker_palette = palette.with_opacity(self.color_picker_fade_progress);
+        let picker = float(opaque(self.color_picker_panel(picker_palette)))
             .translate(move |_, _| Vector::new(picker_x, picker_y));
 
         stack(vec![modal.into(), picker.into()])

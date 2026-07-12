@@ -129,6 +129,7 @@ impl BExplorerIced {
 
     fn view(&self) -> Element<'_, Message> {
         let palette = Palette::from_config(&self.config, self.is_dark_theme());
+        let popup_palette = palette.with_opacity(self.popup_fade_progress);
         let window_radius = self.main_window_corner_radius();
         // With one shared sidebar in split mode, it controls whichever pane
         // currently owns focus. Once per-pane sidebars are enabled, each one
@@ -179,10 +180,10 @@ impl BExplorerIced {
 
         let mut layers = vec![base.into(), self.window_resize_handles()];
         if self.title_menu_open {
-            layers.push(self.title_menu_overlay(palette));
+            layers.push(self.title_menu_overlay(popup_palette));
         }
         if self.context_menu.is_some() {
-            layers.push(self.context_menu_overlay(palette));
+            layers.push(self.context_menu_overlay(popup_palette));
         }
         if let Some(split_placement) = self.tab_split_placement_overlay(palette) {
             layers.push(split_placement);
@@ -192,19 +193,19 @@ impl BExplorerIced {
         }
         let mut modal_layers = vec![stack(layers).into()];
         if self.settings_open {
-            modal_layers.push(opaque(self.settings_modal(palette)));
+            modal_layers.push(opaque(self.settings_modal(popup_palette)));
         }
         if self.shortcuts_open {
-            modal_layers.push(opaque(self.shortcuts_modal(palette)));
+            modal_layers.push(opaque(self.shortcuts_modal(popup_palette)));
         }
         if self.permanent_delete_dialog.is_some() {
-            modal_layers.push(opaque(self.permanent_delete_modal(palette)));
+            modal_layers.push(opaque(self.permanent_delete_modal(popup_palette)));
         }
         if self.transfer_conflict_dialog.is_some() {
-            modal_layers.push(opaque(self.transfer_conflict_modal(palette)));
+            modal_layers.push(opaque(self.transfer_conflict_modal(popup_palette)));
         }
         if self.archive_dialog.is_some() {
-            modal_layers.push(opaque(self.archive_dialog_modal(palette)));
+            modal_layers.push(opaque(self.archive_dialog_modal(popup_palette)));
         }
         if self.defender_visible() {
             modal_layers.push(opaque(self.defender_modal(palette)));

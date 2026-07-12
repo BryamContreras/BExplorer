@@ -5,10 +5,12 @@ use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::process::Command;
 
+use image::ImageEncoder;
+
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=BEXPLORER_SKIP_7ZIP_BUILD");
-    println!("cargo:rerun-if-changed=assets/windows/bexplorer.ico");
+    println!("cargo:rerun-if-changed=assets/icons/appicon.png");
     println!("cargo:rerun-if-changed=assets/windows/bexplorer.rc");
     println!("cargo:rerun-if-changed=vendor/7zip-ffi/bexplorer_7zip.cpp");
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/Main.cpp");
@@ -60,8 +62,8 @@ fn compile_windows_resources() {
     let root = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let resource_dir = root.join("assets").join("windows");
     let rc_path = resource_dir.join("bexplorer.rc");
-    let ico_path = resource_dir.join("bexplorer.ico");
-    if !rc_path.exists() || !ico_path.exists() {
+    let png_path = root.join("assets").join("icons").join("appicon.png");
+    if !rc_path.exists() || !png_path.exists() {
         println!("cargo:warning=Windows app icon resources are missing; skipping icon embed");
         return;
     }
@@ -72,13 +74,23 @@ fn compile_windows_resources() {
     };
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
+    let generated_rc_path = out_dir.join("bexplorer.rc");
+    let generated_ico_path = out_dir.join("bexplorer.ico");
+    if let Err(error) = generate_windows_icon(&png_path, &generated_ico_path)
+        .and_then(|()| fs::copy(&rc_path, &generated_rc_path).map(|_| ()))
+    {
+        println!(
+            "cargo:warning=Could not generate Windows resources from appicon.png ({error}); skipping icon embed"
+        );
+        return;
+    }
     let res_path = out_dir.join("bexplorer.res");
     let status = Command::new(&rc_exe)
         .arg("/nologo")
         .arg("/fo")
         .arg(&res_path)
-        .arg(&rc_path)
-        .current_dir(&resource_dir)
+        .arg(&generated_rc_path)
+        .current_dir(&out_dir)
         .status();
 
     match status {
@@ -96,6 +108,46 @@ fn compile_windows_resources() {
             );
         }
     }
+}
+
+fn generate_windows_icon(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
+    const SIZES: [u32; 7] = [16, 24, 32, 48, 64, 128, 256];
+
+    let source = image::open(source)
+        .map_err(std::io::Error::other)?
+        .to_rgba8();
+    let mut images = Vec::with_capacity(SIZES.len());
+    for size in SIZES {
+        let resized =
+            image::imageops::resize(&source, size, size, image::imageops::FilterType::Lanczos3);
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&resized, size, size, image::ExtendedColorType::Rgba8)
+            .map_err(std::io::Error::other)?;
+        images.push((size, png));
+    }
+
+    let mut ico = Vec::new();
+    ico.extend_from_slice(&0_u16.to_le_bytes());
+    ico.extend_from_slice(&1_u16.to_le_bytes());
+    ico.extend_from_slice(&(images.len() as u16).to_le_bytes());
+    let mut offset = 6 + images.len() * 16;
+    for (size, png) in &images {
+        let dimension = if *size == 256 { 0 } else { *size as u8 };
+        ico.extend_from_slice(&[dimension, dimension, 0, 0]);
+        ico.extend_from_slice(&1_u16.to_le_bytes());
+        ico.extend_from_slice(&32_u16.to_le_bytes());
+        ico.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        ico.extend_from_slice(&(offset as u32).to_le_bytes());
+        offset += png.len();
+    }
+    for (_, png) in images {
+        ico.extend_from_slice(&png);
+    }
+    fs::write(destination, ico)
 }
 
 fn find_windows_resource_compiler() -> Option<PathBuf> {

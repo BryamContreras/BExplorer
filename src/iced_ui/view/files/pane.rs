@@ -290,26 +290,30 @@ impl BExplorerIced {
                 )))
         })
         .into();
+        let popup_palette = palette.with_opacity(self.popup_fade_progress);
 
         if self.new_menu_open == Some(pane) {
-            stack(vec![pane_body, self.new_menu_overlay(pane, palette)])
+            stack(vec![pane_body, self.new_menu_overlay(pane, popup_palette)])
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
         } else if self.view_menu_open == Some(pane) {
-            stack(vec![pane_body, self.view_menu_overlay(pane, palette)])
+            stack(vec![pane_body, self.view_menu_overlay(pane, popup_palette)])
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .into()
         } else if self.group_menu_open == Some(pane) {
-            stack(vec![pane_body, self.group_menu_overlay(pane, palette)])
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .into()
+            stack(vec![
+                pane_body,
+                self.group_menu_overlay(pane, popup_palette),
+            ])
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
         } else if self.search_mode_menu_open == Some(pane) {
             stack(vec![
                 pane_body,
-                self.search_mode_menu_overlay(pane, palette),
+                self.search_mode_menu_overlay(pane, popup_palette),
             ])
             .width(Length::Fill)
             .height(Length::Fill)

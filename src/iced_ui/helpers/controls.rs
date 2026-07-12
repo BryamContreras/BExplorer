@@ -616,6 +616,32 @@ pub(in crate::iced_ui) struct Palette {
 }
 
 impl Palette {
+    pub(in crate::iced_ui) fn with_opacity(mut self, opacity: f32) -> Self {
+        let opacity = opacity.clamp(0.0, 1.0);
+        for color in [
+            &mut self.page_bg,
+            &mut self.table_bg,
+            &mut self.title_bg,
+            &mut self.sidebar_bg,
+            &mut self.menu_bg,
+            &mut self.overlay_bg,
+            &mut self.overlay_title_bg,
+            &mut self.input_bg,
+            &mut self.header_bg,
+            &mut self.hover,
+            &mut self.border,
+            &mut self.strong_border,
+            &mut self.text,
+            &mut self.muted_text,
+            &mut self.accent,
+            &mut self.accent_text,
+            &mut self.folder,
+        ] {
+            color.a *= opacity;
+        }
+        self
+    }
+
     pub(in crate::iced_ui) fn from_config(config: &AppConfig, dark_theme: bool) -> Self {
         let accent = Color::from_rgb8(
             config.accent_color[0],

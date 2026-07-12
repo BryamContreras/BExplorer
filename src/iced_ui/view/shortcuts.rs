@@ -83,7 +83,14 @@ impl BExplorerIced {
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(|_| container::Style::default().background(Color::from_rgba8(0, 0, 0, 0.24)))
+            .style(move |_| {
+                container::Style::default().background(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    0.24 * palette.text.a,
+                ))
+            })
             .into()
     }
 
@@ -234,39 +241,28 @@ impl BExplorerIced {
             return foreground;
         };
 
-        let fade = if self.color_picker_backdrop.as_ref() == Some(backdrop) {
-            self.color_picker_fade_progress
+        let (fade, target) = if self.color_picker_backdrop.as_ref() == Some(backdrop) {
+            (
+                self.color_picker_fade_progress,
+                self.color_picker_fade_target,
+            )
         } else {
-            self.popup_fade_progress
-        }
-        .clamp(0.0, 1.0);
+            (self.popup_fade_progress, self.popup_fade_target)
+        };
+        let fade = fade.clamp(0.0, 1.0);
+        let backdrop_opacity = popup_backdrop_opacity(fade, target);
 
         let backdrop = iced_image::Image::new(backdrop.clone())
             .width(Length::Fill)
             .height(Length::Fill)
             .border_radius(border::radius(7.0))
             .content_fit(ContentFit::Fill)
-            .opacity(fade);
-        // Iced has no general-purpose opacity wrapper for arbitrary widgets.
-        // This neutral veil fades out over a few frames, revealing the whole
-        // surface (including its text and controls) without relaying out it.
-        let fade_veil = container(Space::new())
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .style(move |_| {
-                container::Style::default().background(Color::from_rgba8(
-                    15,
-                    19,
-                    21,
-                    ((1.0 - fade) * 0.74).clamp(0.0, 0.74),
-                ))
-            });
+            .opacity(backdrop_opacity);
         // Let the actual foreground surface determine the height. The former
         // fixed-height backdrop could outlive a shorter dialog/menu and show
         // as a blurred strip below it.
         stack(vec![foreground])
             .push_under(backdrop)
-            .push(fade_veil)
             .width(Length::Fixed(width))
             .height(Length::Shrink)
             .into()

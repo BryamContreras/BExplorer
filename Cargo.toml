@@ -36,6 +36,7 @@ zbus = "=5.17.0"
 
 [build-dependencies]
 cc = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [patch.crates-io]
 # Iced's Wayland clipboard owns the data-device that receives file drops.

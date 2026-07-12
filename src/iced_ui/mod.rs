@@ -90,7 +90,8 @@ const SIDEBAR_SECTION_HEIGHT: f32 = 31.0;
 const SIDEBAR_SECTION_ICON_SIZE: f32 = 18.0;
 const SIDEBAR_ITEM_HEIGHT: f32 = 30.0;
 const SIDEBAR_SECTION_DRAG_START_THRESHOLD: f32 = 5.0;
-const SIDEBAR_SLIDE_STEP: f32 = 0.16;
+const LAYOUT_ANIMATION_RESPONSE: f32 = 24.0;
+const POPUP_ANIMATION_RESPONSE: f32 = 30.0;
 const SPLIT_DIVIDER_WIDTH: f32 = 6.0;
 const SPLIT_MIN_RATIO: f32 = 0.24;
 const SPLIT_MAX_RATIO: f32 = 0.76;
@@ -173,7 +174,10 @@ struct BExplorerIced {
     title_submenu_backdrop: Option<iced_image::Handle>,
     color_picker_backdrop: Option<iced_image::Handle>,
     popup_fade_progress: f32,
+    popup_fade_target: f32,
     color_picker_fade_progress: f32,
+    color_picker_fade_target: f32,
+    pending_popup_close: Option<PendingPopupClose>,
     context_archive_submenu: bool,
     context_extract_submenu: bool,
     context_new_submenu: bool,
@@ -228,6 +232,7 @@ struct BExplorerIced {
     color_rgb_inputs: [String; 3],
     sidebar_progress: f32,
     preview_panel_progress: f32,
+    last_animation_frame: Option<Instant>,
     color_picker_open: bool,
     accent_plane_dragging: bool,
     accent_plane_pointer: Option<Point>,
@@ -490,6 +495,7 @@ impl BExplorerIced {
             sidebar_pointer_inside: false,
             sidebar_progress: if config.sidebar_visible { 1.0 } else { 0.0 },
             preview_panel_progress,
+            last_animation_frame: None,
             window_size: initial_size,
             cursor_position: Point::new(0.0, 0.0),
             resize_drag: None,
@@ -517,8 +523,11 @@ impl BExplorerIced {
             popup_backdrop: None,
             title_submenu_backdrop: None,
             color_picker_backdrop: None,
-            popup_fade_progress: 1.0,
-            color_picker_fade_progress: 1.0,
+            popup_fade_progress: 0.0,
+            popup_fade_target: 0.0,
+            color_picker_fade_progress: 0.0,
+            color_picker_fade_target: 0.0,
+            pending_popup_close: None,
             context_archive_submenu: false,
             context_extract_submenu: false,
             context_new_submenu: false,
@@ -900,18 +909,11 @@ impl BExplorerIced {
             } else {
                 Subscription::none()
             };
-        let sidebar_tick = if self.sidebar_animation_active() {
-            Subscription::run(sidebar_animation_tick_stream)
-        } else {
-            Subscription::none()
-        };
-        let preview_panel_tick = if self.preview_panel_animation_active() {
-            Subscription::run(preview_panel_animation_tick_stream)
-        } else {
-            Subscription::none()
-        };
-        let popup_fade_tick = if self.popup_fade_animation_active() {
-            Subscription::run(popup_fade_animation_tick_stream)
+        let animation_frame = if self.sidebar_animation_active()
+            || self.preview_panel_animation_active()
+            || self.popup_fade_animation_active()
+        {
+            window::frames().map(Message::AnimationFrame)
         } else {
             Subscription::none()
         };
@@ -946,9 +948,7 @@ impl BExplorerIced {
             keyboard_events,
             pointer_events,
             transfer_tick,
-            sidebar_tick,
-            preview_panel_tick,
-            popup_fade_tick,
+            animation_frame,
             scrollbar_tick,
             external_drag_tick,
             search_tick,
