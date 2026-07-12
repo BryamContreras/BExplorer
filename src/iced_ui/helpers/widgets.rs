@@ -356,6 +356,17 @@ pub(in crate::iced_ui) fn address_input_id(pane: PaneId) -> Id {
     })
 }
 
+pub(in crate::iced_ui) fn search_input_id(pane: PaneId) -> Id {
+    Id::new(match pane {
+        PaneId::Primary => "search-primary",
+        PaneId::Secondary => "search-secondary",
+    })
+}
+
+pub(in crate::iced_ui) fn focus_search_input_task(pane: PaneId) -> Task<Message> {
+    iced::widget::operation::focus(search_input_id(pane))
+}
+
 pub(in crate::iced_ui) fn focus_address_input_task(
     pane: PaneId,
     select_end: usize,

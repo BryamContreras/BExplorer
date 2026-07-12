@@ -6,6 +6,11 @@ pub(in crate::iced_ui) fn main_window_settings(size: Size) -> window::Settings {
         decorations: false,
         resizable: true,
         transparent: true,
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: crate::platform::LINUX_APPLICATION_ID.into(),
+            ..window::settings::PlatformSpecific::default()
+        },
         ..window::Settings::default()
     }
 }
@@ -41,6 +46,11 @@ fn fixed_progress_window_settings(size: Size, position: Option<Point>) -> window
         decorations: false,
         resizable: false,
         transparent: true,
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: crate::platform::LINUX_APPLICATION_ID.into(),
+            ..window::settings::PlatformSpecific::default()
+        },
         ..window::Settings::default()
     }
 }
@@ -119,6 +129,25 @@ pub(in crate::iced_ui) fn external_drag_tick_stream(
 
 pub(in crate::iced_ui) fn search_tick_stream() -> impl iced::futures::Stream<Item = Message> {
     periodic_message_stream(Duration::from_millis(32), Message::PollSearches)
+}
+
+pub(in crate::iced_ui) fn storage_change_stream() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::channel::mpsc;
+
+    iced::stream::channel(1, move |output: mpsc::Sender<Message>| async move {
+        thread::spawn(move || {
+            let receiver = crate::platform::storage_change_receiver();
+            let mut output = output;
+            while receiver.recv().is_ok() {
+                if let Err(error) = output.try_send(Message::StorageDevicesChanged)
+                    && error.is_disconnected()
+                {
+                    break;
+                }
+            }
+        });
+        iced::futures::future::pending::<()>().await;
+    })
 }
 
 fn periodic_message_stream(

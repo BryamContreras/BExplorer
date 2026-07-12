@@ -131,6 +131,10 @@ impl BExplorerIced {
         pane: PaneId,
         path: PathBuf,
     ) -> Task<Message> {
+        if !self.mounting_disk_images.insert(path.clone()) {
+            self.pane_mut(pane).status = format!("Ya se está montando {}…", path.display());
+            return Task::none();
+        }
         self.pane_mut(pane).status = format!("Montando {}…", path.display());
         let operation_path = path.clone();
         Task::perform(
@@ -146,9 +150,10 @@ impl BExplorerIced {
 
     pub(in crate::iced_ui) fn eject_drive(&mut self, pane: PaneId, path: PathBuf) -> Task<Message> {
         self.pane_mut(pane).status = format!("Expulsando {}…", path.display());
+        let operation_path = path.clone();
         Task::perform(
-            run_blocking_file_operation(move || operations::eject_drive(&path)),
-            move |result| Message::DriveEjected(pane, result),
+            run_blocking_file_operation(move || operations::eject_drive(&operation_path)),
+            move |result| Message::DriveEjected(pane, path, result),
         )
     }
 

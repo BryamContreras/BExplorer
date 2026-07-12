@@ -160,6 +160,7 @@ impl BExplorerIced {
             self.localized("Filtrar", "Filter"),
             &self.pane(pane).search_text,
         )
+        .id(search_input_id(pane))
         .on_input(move |value| Message::SearchChanged(pane, value))
         .size(self.font_size())
         .padding(Padding::new(6.0).left(9.0).right(38.0))
@@ -245,22 +246,26 @@ impl BExplorerIced {
         .padding([4, 14])
         .align_y(Alignment::Center);
 
-        let status: Element<'_, Message> = if self.pane(pane).search_receiver.is_some() {
-            column![
-                iced::widget::progress_bar(0.0..=1.0, self.pane(pane).search_progress_phase,)
-                    .girth(2)
-                    .style(move |_| iced::widget::progress_bar::Style {
-                        background: translucent_color(palette.border, 0.72).into(),
-                        bar: accent_gradient(palette).into(),
-                        border: border::rounded(0),
-                    }),
-                status_content,
-            ]
-            .spacing(0)
-            .into()
+        let transfer_active = self.transfer_in_progress_for(pane);
+        let search_active = self.pane(pane).search_receiver.is_some();
+        let progress_active = transfer_active || search_active;
+        let progress = if transfer_active {
+            self.transfer_progress_fraction_for(pane).unwrap_or(0.0)
         } else {
-            status_content.into()
+            self.pane(pane).search_progress_phase
         };
+        let status: Element<'_, Message> = column![
+            iced::widget::progress_bar(0.0..=1.0, progress)
+                .girth(if progress_active { 2.0 } else { 0.0 })
+                .style(move |_| iced::widget::progress_bar::Style {
+                    background: translucent_color(palette.border, 0.72).into(),
+                    bar: accent_gradient(palette).into(),
+                    border: border::rounded(0),
+                }),
+            status_content,
+        ]
+        .spacing(0)
+        .into();
 
         let pane_body = container(
             column![

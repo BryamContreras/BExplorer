@@ -51,6 +51,12 @@ pub(super) async fn delay(duration: Duration) {
     let _ = receiver.await;
 }
 
+pub(super) fn is_mountable_disk_image_entry(entry: &FileEntry) -> bool {
+    entry.category == FileCategory::DiskImage
+        && !explorer::is_virtual_path(&entry.path)
+        && operations::can_mount_disk_image(&entry.path)
+}
+
 /// Builds a compact, cached backdrop for an in-window floating surface.
 ///
 /// Iced overlays share the same native surface as the file table, so a
@@ -176,6 +182,13 @@ mod tests {
         assert!(palette.overlay_bg.a < 1.0);
     }
 
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn linux_uses_one_blur_label_for_gnome_and_kde() {
+        assert_eq!(vibrancy_mode_label(VibrancyMode::Blur, true), "Difuminado");
+        assert_eq!(vibrancy_mode_label(VibrancyMode::Blur, false), "Blur");
+    }
+
     #[test]
     fn backdrop_snapshot_blurs_a_requested_region() {
         let mut pixels = vec![0_u8; 12 * 8 * 4];
@@ -208,6 +221,31 @@ mod tests {
         let mut entry = test_entry("disk", EntryKind::Drive, Some(512 * GB));
         entry.free_space = Some(256 * GB);
         assert_eq!(drive_capacity_label(&entry), "256.0 GB de 512.0 GB");
+    }
+
+    #[test]
+    fn iso_entries_use_the_native_mount_action() {
+        let entry = test_entry("installer.iso", EntryKind::File, Some(1024));
+        assert!(is_mountable_disk_image_entry(&entry));
+
+        let document = test_entry("notes.txt", EntryKind::File, Some(32));
+        assert!(!is_mountable_disk_image_entry(&document));
+    }
+
+    #[test]
+    fn sidebar_exposes_eject_only_for_removable_storage() {
+        let mut system = test_entry("system", EntryKind::Drive, None);
+        system.path = filesystem_root_path();
+        system.drive_kind = Some(DriveKind::Local);
+
+        let mut image = test_entry("installer", EntryKind::Drive, None);
+        image.path = filesystem_root_path().join("media").join("installer");
+        image.drive_kind = Some(DriveKind::Optical);
+
+        let items = sidebar_storage_items(&[system, image], true);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].context_drive_index, None);
+        assert_eq!(items[1].context_drive_index, Some(1));
     }
 
     #[test]
@@ -386,6 +424,20 @@ mod tests {
         assert_eq!(transfer.max_size, Some(size));
         assert_eq!(archive.min_size, Some(size));
         assert_eq!(archive.max_size, Some(size));
+
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(
+                main_window_settings(Size::new(1280.0, 760.0))
+                    .platform_specific
+                    .application_id,
+                crate::platform::LINUX_APPLICATION_ID
+            );
+            assert_eq!(
+                transfer.platform_specific.application_id,
+                crate::platform::LINUX_APPLICATION_ID
+            );
+        }
     }
 
     #[test]

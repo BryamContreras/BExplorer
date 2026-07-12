@@ -72,13 +72,14 @@ pub(in crate::iced_ui) fn sidebar_section_header(
 
 pub(in crate::iced_ui) fn sidebar_items_for_section(
     config: &AppConfig,
+    storage_entries: &[FileEntry],
     section: SidebarSection,
     spanish: bool,
 ) -> Vec<SidebarItem> {
     match section {
         SidebarSection::Favorites => sidebar_favorite_items(config, spanish),
         SidebarSection::Places => sidebar_place_items(),
-        SidebarSection::Storage => sidebar_storage_items(spanish),
+        SidebarSection::Storage => sidebar_storage_items(storage_entries, spanish),
         SidebarSection::Network => vec![SidebarItem {
             label: if spanish {
                 String::from("Abrir red")
@@ -87,6 +88,7 @@ pub(in crate::iced_ui) fn sidebar_items_for_section(
             },
             target: SidebarTarget::Navigate(Some(explorer::network_root_path())),
             icon: "net",
+            context_drive_index: None,
         }],
         SidebarSection::Recents => sidebar_recent_items(config, spanish),
     }
@@ -105,6 +107,7 @@ pub(in crate::iced_ui) fn sidebar_favorite_items(
             },
             target: SidebarTarget::Disabled,
             icon: "bookmark",
+            context_drive_index: None,
         }];
     }
 
@@ -115,6 +118,7 @@ pub(in crate::iced_ui) fn sidebar_favorite_items(
             label: display_label(path),
             target: SidebarTarget::Navigate(Some(path.clone())),
             icon: "dir",
+            context_drive_index: None,
         })
         .collect()
 }
@@ -124,27 +128,53 @@ pub(in crate::iced_ui) fn sidebar_place_items() -> Vec<SidebarItem> {
         label: String::from(THIS_PC_LABEL),
         target: SidebarTarget::Navigate(None),
         icon: "pc",
+        context_drive_index: None,
     }];
     for place in paths::common_places() {
         items.push(SidebarItem {
             label: place.label,
             target: SidebarTarget::Navigate(Some(place.path)),
             icon: "dir",
+            context_drive_index: None,
         });
     }
     items
 }
 
-pub(in crate::iced_ui) fn sidebar_storage_items(spanish: bool) -> Vec<SidebarItem> {
-    vec![SidebarItem {
-        label: if spanish {
-            String::from("Sistema de archivos")
-        } else {
-            String::from("Filesystem")
-        },
-        target: SidebarTarget::Navigate(Some(filesystem_root_path())),
-        icon: "storage",
-    }]
+pub(in crate::iced_ui) fn sidebar_storage_items(
+    storage_entries: &[FileEntry],
+    spanish: bool,
+) -> Vec<SidebarItem> {
+    if storage_entries.is_empty() {
+        return vec![SidebarItem {
+            label: if spanish {
+                String::from("Sistema de archivos")
+            } else {
+                String::from("Filesystem")
+            },
+            target: SidebarTarget::Navigate(Some(filesystem_root_path())),
+            icon: "storage",
+            context_drive_index: None,
+        }];
+    }
+
+    storage_entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| SidebarItem {
+            label: if entry.path == filesystem_root_path() && spanish {
+                String::from("Sistema de archivos")
+            } else {
+                entry.name.clone()
+            },
+            target: SidebarTarget::Navigate(Some(entry.path.clone())),
+            icon: "storage",
+            context_drive_index: entry
+                .drive_kind
+                .is_some_and(DriveKind::is_ejectable)
+                .then_some(index),
+        })
+        .collect()
 }
 
 pub(in crate::iced_ui) fn sidebar_recent_items(
@@ -160,6 +190,7 @@ pub(in crate::iced_ui) fn sidebar_recent_items(
             },
             target: SidebarTarget::Disabled,
             icon: "rec",
+            context_drive_index: None,
         }];
     }
 
@@ -171,6 +202,7 @@ pub(in crate::iced_ui) fn sidebar_recent_items(
             label: display_label(recent),
             target: SidebarTarget::Navigate(Some(recent.clone())),
             icon: "rec",
+            context_drive_index: None,
         })
         .collect()
 }
@@ -299,7 +331,7 @@ pub(in crate::iced_ui) fn available_vibrancy_modes() -> &'static [VibrancyMode] 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         // Wayland/X11 has no compositor-independent blur protocol. The
-        // transparent option is intentionally offered as the safe fallback.
+        // compositor-specific blur option falls back to an opaque surface.
         &[VibrancyMode::None, VibrancyMode::Blur]
     }
 }
@@ -322,11 +354,7 @@ pub(in crate::iced_ui) fn vibrancy_mode_label(mode: VibrancyMode, spanish: bool)
             }
             #[cfg(not(any(target_os = "windows", target_os = "macos")))]
             {
-                if spanish {
-                    "Transparente"
-                } else {
-                    "Transparent"
-                }
+                if spanish { "Difuminado" } else { "Blur" }
             }
             #[cfg(target_os = "windows")]
             {

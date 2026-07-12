@@ -171,6 +171,14 @@ Disk image mount/eject uses UDisks2 through `udisksctl` when available, elevated
 retry uses Polkit through `pkexec`, and network discovery uses available
 Freedesktop/GVfs, Avahi, and Samba command-line helpers.
 
+KDE Plasma/Wayland uses KWin's optional native blur protocol. GNOME/Mutter does
+not expose its Shell blur actor as a Wayland client protocol, so BExplorer uses
+the optional [Blur My Shell](https://extensions.gnome.org/extension/3193/blur-my-shell/)
+extension for GNOME application blur. Selecting Blur registers the `bexplorer`
+application ID with that extension; disabling it removes BExplorer's entry
+again. If the extension is unavailable, BExplorer keeps an opaque readable
+background.
+
 ## Known Limitations
 
 - Linux support is initial and not yet at Windows feature parity.
@@ -239,6 +247,7 @@ Linux requirements:
 
 Optional Linux integrations:
 
+- Blur My Shell for application blur on GNOME Wayland.
 - `wl-clipboard`, `xclip`, or `xsel` for file clipboard MIME interoperability.
 - `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` for native
   drag-out to other applications on Wayland.

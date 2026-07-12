@@ -224,51 +224,74 @@ impl BExplorerIced {
             .map(|mode| vibrancy_mode_label(*mode, spanish).to_owned())
             .collect::<Vec<_>>();
         let selected_vibrancy = vibrancy_mode_label(self.config.vibrancy, spanish).to_owned();
-        let vibrancy_description =
-            if self.config.vibrancy != VibrancyMode::None && !self.config.vibrancy_active {
+        let vibrancy_description = if self.config.vibrancy != VibrancyMode::None
+            && !self.config.vibrancy_active
+        {
+            #[cfg(target_os = "linux")]
+            if crate::platform::linux::is_gnome_wayland() {
+                self.localized(
+                    "GNOME requiere que la extensión Blur My Shell esté instalada y habilitada",
+                    "GNOME requires the Blur My Shell extension to be installed and enabled",
+                )
+            } else {
                 self.localized(
                     "El compositor no ofrece difuminado; se usa un fondo opaco",
                     "The compositor does not provide blur; an opaque background is used",
                 )
-            } else {
-                match self.config.vibrancy {
-            VibrancyMode::None => self.localized(
-                "Usa superficies opacas normales",
-                "Uses regular opaque surfaces",
-            ),
-            #[cfg(target_os = "windows")]
-            VibrancyMode::Mica => self.localized(
-                "Material nativo de Windows 11",
-                "Native Windows 11 material",
-            ),
-            #[cfg(target_os = "windows")]
-            VibrancyMode::Acrylic => {
-                self.localized("Difuminado acrílico nativo", "Native acrylic blur")
             }
-            #[cfg(target_os = "macos")]
-            VibrancyMode::Blur => {
-                self.localized("Vibrancy nativa de macOS", "Native macOS vibrancy")
+            #[cfg(not(target_os = "linux"))]
+            self.localized(
+                "El compositor no ofrece difuminado; se usa un fondo opaco",
+                "The compositor does not provide blur; an opaque background is used",
+            )
+        } else {
+            match self.config.vibrancy {
+                VibrancyMode::None => self.localized(
+                    "Usa superficies opacas normales",
+                    "Uses regular opaque surfaces",
+                ),
+                #[cfg(target_os = "windows")]
+                VibrancyMode::Mica => self.localized(
+                    "Material nativo de Windows 11",
+                    "Native Windows 11 material",
+                ),
+                #[cfg(target_os = "windows")]
+                VibrancyMode::Acrylic => {
+                    self.localized("Difuminado acrílico nativo", "Native acrylic blur")
+                }
+                #[cfg(target_os = "macos")]
+                VibrancyMode::Blur => {
+                    self.localized("Vibrancy nativa de macOS", "Native macOS vibrancy")
+                }
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+                VibrancyMode::Blur => {
+                    if crate::platform::linux::is_gnome_wayland() {
+                        self.localized(
+                            "Integración de aplicaciones con Blur My Shell",
+                            "Application integration with Blur My Shell",
+                        )
+                    } else {
+                        self.localized(
+                        "Solicita difuminado al compositor; si no está disponible, usa un fondo opaco",
+                        "Requests compositor blur; uses an opaque fallback when unavailable",
+                    )
+                    }
+                }
+                #[cfg(target_os = "windows")]
+                VibrancyMode::Blur => {
+                    self.localized("Difuminado nativo de ventana", "Native window blur")
+                }
+                #[cfg(target_os = "macos")]
+                VibrancyMode::Mica | VibrancyMode::Acrylic => {
+                    self.localized("Vibrancy nativa de macOS", "Native macOS vibrancy")
+                }
+                #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+                VibrancyMode::Mica | VibrancyMode::Acrylic => self.localized(
+                    "Solicita difuminado al compositor; si no está disponible, usa un fondo opaco",
+                    "Requests compositor blur; uses an opaque fallback when unavailable",
+                ),
             }
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            VibrancyMode::Blur => self.localized(
-                "Solicita difuminado al compositor; si no está disponible, usa un fondo opaco",
-                "Requests compositor blur; uses an opaque fallback when unavailable",
-            ),
-            #[cfg(target_os = "windows")]
-            VibrancyMode::Blur => {
-                self.localized("Difuminado nativo de ventana", "Native window blur")
-            }
-            #[cfg(target_os = "macos")]
-            VibrancyMode::Mica | VibrancyMode::Acrylic => {
-                self.localized("Vibrancy nativa de macOS", "Native macOS vibrancy")
-            }
-            #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-            VibrancyMode::Mica | VibrancyMode::Acrylic => self.localized(
-                "Solicita difuminado al compositor; si no está disponible, usa un fondo opaco",
-                "Requests compositor blur; uses an opaque fallback when unavailable",
-            ),
-            }
-            };
+        };
         let vibrancy_row = container(
             row![
                 column![
@@ -1595,7 +1618,7 @@ impl BExplorerIced {
             .style(move |_| {
                 container::Style::default()
                     .background(
-                        gradient::Linear::new(-std::f32::consts::FRAC_PI_2)
+                        gradient::Linear::new(std::f32::consts::FRAC_PI_2)
                             .add_stop(0.0, Color::from_rgb8(255, 0, 0))
                             .add_stop(0.17, Color::from_rgb8(255, 255, 0))
                             .add_stop(0.33, Color::from_rgb8(0, 255, 0))

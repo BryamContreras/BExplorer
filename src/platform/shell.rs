@@ -10,6 +10,8 @@ use std::sync::atomic::AtomicBool;
 
 use crate::utils::errors::{BExplorerError, Result};
 
+#[cfg(target_os = "linux")]
+mod clipboard;
 mod defender;
 mod disk;
 #[cfg(target_os = "windows")]
@@ -25,7 +27,12 @@ pub struct ClipboardFiles {
     pub cut: bool,
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn copy_text(text: &str) -> Result<()> {
+    clipboard::set_text(text)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn copy_text(text: &str) -> Result<()> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
@@ -34,7 +41,12 @@ fn copy_text(text: &str) -> Result<()> {
         .map_err(|error| BExplorerError::Clipboard(error.to_string()))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn read_text() -> Result<String> {
+    clipboard::text()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn read_text() -> Result<String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
@@ -375,7 +387,12 @@ fn read_files_platform() -> Result<ClipboardFiles> {
     clipboard_files_from_text(&text)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn copy_file_list(paths: &[PathBuf]) -> Result<()> {
+    clipboard::set_file_list(paths)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn copy_file_list(paths: &[PathBuf]) -> Result<()> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
@@ -385,7 +402,21 @@ fn copy_file_list(paths: &[PathBuf]) -> Result<()> {
         .map_err(|error| BExplorerError::Clipboard(error.to_string()))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn read_file_list() -> Result<Vec<PathBuf>> {
+    let paths = clipboard::file_list()?
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Err(BExplorerError::Clipboard(
+            "No file paths in clipboard".into(),
+        ));
+    }
+    Ok(paths)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn read_file_list() -> Result<Vec<PathBuf>> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
@@ -634,7 +665,12 @@ fn command_exists(program: &str) -> bool {
         .any(|directory| directory.join(program).is_file())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn clear_clipboard_platform() -> Result<()> {
+    clipboard::clear()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn clear_clipboard_platform() -> Result<()> {
     copy_text("")
 }

@@ -58,6 +58,54 @@ impl BExplorerIced {
                 }
                 Task::batch(tasks)
             }
+            Message::SidebarStorageLoaded(result) => {
+                let Ok(entries) = result else {
+                    return Task::none();
+                };
+                let paths = entries
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect::<Vec<_>>();
+                self.sidebar_storage_entries = entries.clone();
+                let available_paths = entries
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect::<HashSet<_>>();
+                let mut tasks = paths
+                    .iter()
+                    .map(|path| self.queue_sidebar_path_icon(path))
+                    .collect::<Vec<_>>();
+                for pane in [PaneId::Primary, PaneId::Secondary] {
+                    if pane == PaneId::Secondary && self.split.is_none() {
+                        continue;
+                    }
+                    if self.tab_for_pane(pane).path.is_some() || self.pane(pane).loading {
+                        continue;
+                    }
+                    let state = self.pane_mut(pane);
+                    state.status = format!("{} elements", entries.len());
+                    state.folder_entries = None;
+                    state.entries = entries.clone();
+                    state.selected.retain(|path| available_paths.contains(path));
+                    state.selection_anchor = None;
+                    state.mark_entries_changed();
+                    tasks.push(self.queue_visible_images(pane));
+                }
+                Task::batch(tasks)
+            }
+            Message::StorageDevicesChanged => {
+                if self.storage_refresh_scheduled {
+                    return Task::none();
+                }
+                self.storage_refresh_scheduled = true;
+                Task::perform(delay(Duration::from_millis(650)), |_| {
+                    Message::RefreshStorageAfterDeviceChange
+                })
+            }
+            Message::RefreshStorageAfterDeviceChange => {
+                self.storage_refresh_scheduled = false;
+                self.refresh_sidebar_storage()
+            }
             Message::CloseTab(pane, slot) => {
                 self.tab_drag = None;
                 self.close_tab(pane, slot);
@@ -243,6 +291,14 @@ impl BExplorerIced {
                 save_config(&self.config);
                 Task::none()
             }
+            Message::SidebarPointerEntered => {
+                self.sidebar_pointer_inside = true;
+                Task::none()
+            }
+            Message::SidebarPointerExited => {
+                self.sidebar_pointer_inside = false;
+                Task::none()
+            }
             Message::SidebarAnimationTick => {
                 let target = if self.sidebar_visible { 1.0 } else { 0.0 };
                 self.sidebar_progress = if target > self.sidebar_progress {
@@ -311,6 +367,7 @@ impl BExplorerIced {
                 self.new_menu_open = None;
                 self.popup_backdrop = None;
                 if self.split.is_some() {
+                    self.collapse_transfer_ownership_to_primary();
                     self.split = None;
                     if self.preview_panel_pane == Some(PaneId::Secondary) {
                         self.preview_panel_pane = Some(PaneId::Primary);
@@ -528,7 +585,9 @@ impl BExplorerIced {
                     Task::none()
                 }
             }
-            Message::Refresh(pane) => self.start_load(pane),
+            Message::Refresh(pane) => {
+                Task::batch([self.start_load(pane), self.refresh_sidebar_storage()])
+            }
             Message::ToggleNewMenu(pane) => {
                 self.focus_pane(pane);
                 if self.new_menu_open == Some(pane) {
@@ -740,7 +799,7 @@ impl BExplorerIced {
             Message::SearchChanged(pane, value) => {
                 self.focus_pane(pane);
                 self.pane_mut(pane).search_text = value;
-                self.refresh_search(pane)
+                Task::batch([self.refresh_search(pane), focus_search_input_task(pane)])
             }
             Message::ToggleSearchModeMenu(pane) => {
                 self.focus_pane(pane);
@@ -1136,6 +1195,15 @@ impl BExplorerIced {
                     Task::batch([commit_task, menu_task])
                 }
             }
+            Message::OpenSidebarDriveContext(pane, index) => {
+                let Some(entry) = self.sidebar_storage_entries.get(index) else {
+                    return Task::none();
+                };
+                if !entry.drive_kind.is_some_and(DriveKind::is_ejectable) {
+                    return Task::none();
+                }
+                self.request_context_menu(pane, ContextTarget::SidebarDrive(index))
+            }
             Message::ContextPasteAvailabilityResolved(menu, paste_available) => {
                 if menu.request_id != self.context_menu_request_id {
                     return Task::none();
@@ -1472,21 +1540,38 @@ impl BExplorerIced {
                 self.popup_backdrop = None;
                 Task::none()
             }
-            Message::DiskImageMounted(pane, source, result) => match result {
-                Ok(root) => {
-                    self.pane_mut(pane).status = format!("Imagen montada en {}", root.display());
-                    self.update(Message::Navigate(pane, Some(root)))
+            Message::DiskImageMounted(pane, source, result) => {
+                self.mounting_disk_images.remove(&source);
+                match result {
+                    Ok(root) => {
+                        self.pane_mut(pane).status =
+                            format!("Imagen montada en {}", root.display());
+                        Task::batch([
+                            self.open_path_in_new_tab(pane, Some(root)),
+                            self.refresh_sidebar_storage(),
+                        ])
+                    }
+                    Err(error) => {
+                        self.pane_mut(pane).status =
+                            format!("No se pudo montar {}: {error}", source.display());
+                        Task::none()
+                    }
                 }
-                Err(error) => {
-                    self.pane_mut(pane).status =
-                        format!("No se pudo montar {}: {error}", source.display());
-                    Task::none()
-                }
-            },
-            Message::DriveEjected(pane, result) => match result {
+            }
+            Message::DriveEjected(pane, path, result) => match result {
                 Ok(()) => {
                     self.pane_mut(pane).status = "Unidad expulsada".into();
-                    self.start_load(pane)
+                    let pane_task = if self
+                        .tab_for_pane(pane)
+                        .path
+                        .as_ref()
+                        .is_some_and(|current| current.starts_with(&path))
+                    {
+                        self.update(Message::Navigate(pane, None))
+                    } else {
+                        self.start_load(pane)
+                    };
+                    Task::batch([pane_task, self.refresh_sidebar_storage()])
                 }
                 Err(error) => {
                     self.pane_mut(pane).status = error;
@@ -1811,7 +1896,10 @@ impl BExplorerIced {
                     Task::none()
                 }
             }
-            Message::PointerLeftWindow => self.start_external_file_drag(),
+            Message::PointerLeftWindow => {
+                self.sidebar_pointer_inside = false;
+                self.start_external_file_drag()
+            }
             Message::StopResize => {
                 let tab_drag_dirty = self.tab_drag.is_some_and(|drag| drag.dirty);
                 let split_placement = self.tab_drag.and_then(|drag| {

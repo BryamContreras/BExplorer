@@ -878,23 +878,23 @@ impl BExplorerIced {
         let (x, y) = self.context_menu_window_position(menu_state);
         let menu_height = self.context_menu_height(menu_state);
         let is_entry = matches!(menu_state.target, ContextTarget::Entry(_));
+        let is_sidebar_drive = matches!(menu_state.target, ContextTarget::SidebarDrive(_));
         let extractable_archive = self
             .context_entry(menu_state.pane, menu_state.target)
             .is_some_and(|entry| {
                 crate::fs::archive_listing::has_extractable_archive_extension(&entry.path)
             });
-        let terminal_available = !is_entry
-            || self
-                .context_entry(menu_state.pane, menu_state.target)
-                .is_some_and(|entry| {
-                    entry.kind.is_container() && !explorer::is_virtual_path(&entry.path)
-                });
+        let terminal_available = !is_sidebar_drive
+            && (!is_entry
+                || self
+                    .context_entry(menu_state.pane, menu_state.target)
+                    .is_some_and(|entry| {
+                        entry.kind.is_container() && !explorer::is_virtual_path(&entry.path)
+                    }));
         let context_entry = self.context_entry(menu_state.pane, menu_state.target);
-        let mountable_disk_image = context_entry.as_ref().is_some_and(|entry| {
-            entry.category == FileCategory::DiskImage
-                && !explorer::is_virtual_path(&entry.path)
-                && operations::can_mount_disk_image(&entry.path)
-        });
+        let mountable_disk_image = context_entry
+            .as_ref()
+            .is_some_and(is_mountable_disk_image_entry);
         let ejectable_drive = context_entry
             .as_ref()
             .and_then(|entry| entry.drive_kind)
@@ -961,11 +961,24 @@ impl BExplorerIced {
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-        let mut items = column![quick_actions, context_separator(palette)]
-            .spacing(2)
-            .width(Length::Fill);
+        let mut items = if is_sidebar_drive {
+            column![context_menu_row(
+                "storage",
+                self.localized("Expulsar", "Eject"),
+                None,
+                ContextCommand::EjectDrive,
+                palette,
+            )]
+        } else {
+            column![quick_actions, context_separator(palette)]
+        }
+        .spacing(2)
+        .width(Length::Fill);
 
-        if is_entry {
+        if is_sidebar_drive {
+            // The sidebar menu intentionally contains only actions that are
+            // safe for the mounted volume itself.
+        } else if is_entry {
             items = items
                 .push(context_menu_row(
                     "open",
@@ -1092,13 +1105,15 @@ impl BExplorerIced {
                 palette,
             ));
         }
-        items = items.push(context_menu_row(
-            "properties",
-            self.localized("Propiedades", "Properties"),
-            Some(ContextMenuTrailing::Text("Alt+Enter")),
-            ContextCommand::Properties,
-            palette,
-        ));
+        if !is_sidebar_drive {
+            items = items.push(context_menu_row(
+                "properties",
+                self.localized("Propiedades", "Properties"),
+                Some(ContextMenuTrailing::Text("Alt+Enter")),
+                ContextCommand::Properties,
+                palette,
+            ));
+        }
 
         let menu_content = container(items.padding([4, 6])).width(258).style(move |_| {
             container::Style::default()
@@ -1815,7 +1830,7 @@ impl BExplorerIced {
         &self,
         pane: PaneId,
         palette: Palette,
-        round_bottom_left: bool,
+        _round_bottom_left: bool,
     ) -> Element<'_, Message> {
         if !self.sidebar_is_rendered() {
             return container(Space::new().height(Length::Fill)).width(0).into();
@@ -1831,28 +1846,34 @@ impl BExplorerIced {
             .width(sidebar_width)
             .height(Length::Fill)
             .clip(true)
-            .style(move |_| {
-                container::Style::default()
-                    .background(palette.sidebar_bg)
-                    .border(
-                        border::rounded(bottom_radius(round_bottom_left, false))
-                            .color(palette.border)
-                            .width(1),
-                    )
-            });
+            .style(move |_| container::Style::default().background(palette.sidebar_bg));
 
-        stack(vec![
-            panel.into(),
-            row![
-                Space::new().width(Length::Fill),
-                self.sidebar_resize_handle(palette)
-            ]
-            .height(Length::Fill)
-            .width(Length::Fill)
-            .into(),
-        ])
-        .width(sidebar_width)
-        .height(Length::Fill)
+        mouse_area(
+            stack(vec![
+                panel.into(),
+                row![
+                    Space::new().width(Length::Fill),
+                    container(Space::new())
+                        .width(1)
+                        .height(Length::Fill)
+                        .style(move |_| container::Style::default().background(palette.border)),
+                ]
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into(),
+                row![
+                    Space::new().width(Length::Fill),
+                    self.sidebar_resize_handle(palette)
+                ]
+                .height(Length::Fill)
+                .width(Length::Fill)
+                .into(),
+            ])
+            .width(sidebar_width)
+            .height(Length::Fill),
+        )
+        .on_enter(Message::SidebarPointerEntered)
+        .on_exit(Message::SidebarPointerExited)
         .into()
     }
 
@@ -1877,7 +1898,12 @@ impl BExplorerIced {
                 .spacing(1)
                 .width(Length::Fill);
             if expanded {
-                for item in sidebar_items_for_section(&self.config, section, self.is_spanish()) {
+                for item in sidebar_items_for_section(
+                    &self.config,
+                    &self.sidebar_storage_entries,
+                    section,
+                    self.is_spanish(),
+                ) {
                     section_content = section_content.push(self.sidebar_item(pane, item, palette));
                 }
             }
@@ -1909,7 +1935,12 @@ impl BExplorerIced {
             .spacing(1)
             .width(Length::Fill);
             if expanded {
-                for item in sidebar_items_for_section(&self.config, section, self.is_spanish()) {
+                for item in sidebar_items_for_section(
+                    &self.config,
+                    &self.sidebar_storage_entries,
+                    section,
+                    self.is_spanish(),
+                ) {
                     section_content = section_content.push(self.sidebar_item(pane, item, palette));
                 }
             }
@@ -1923,6 +1954,7 @@ impl BExplorerIced {
         item: SidebarItem,
         palette: Palette,
     ) -> Element<'_, Message> {
+        let context_drive_index = item.context_drive_index;
         let active = match &item.target {
             SidebarTarget::Navigate(path) => self.tab_for_pane(pane).path == *path,
             SidebarTarget::Disabled => false,
@@ -1975,10 +2007,15 @@ impl BExplorerIced {
 
         match item.target {
             SidebarTarget::Navigate(Some(path)) if !explorer::is_virtual_path(&path) => {
-                mouse_area(button.on_press(Message::Navigate(pane, Some(path.clone()))))
+                let area = mouse_area(button.on_press(Message::Navigate(pane, Some(path.clone()))))
                     .on_enter(Message::FileDragSidebarTargetEnter(pane, path.clone()))
-                    .on_exit(Message::FileDragSidebarTargetExit(path))
-                    .into()
+                    .on_exit(Message::FileDragSidebarTargetExit(path));
+                if let Some(index) = context_drive_index {
+                    area.on_right_press(Message::OpenSidebarDriveContext(pane, index))
+                        .into()
+                } else {
+                    area.into()
+                }
             }
             SidebarTarget::Navigate(path) => button.on_press(Message::Navigate(pane, path)).into(),
             SidebarTarget::Disabled => button.into(),

@@ -104,11 +104,22 @@ unsafe extern "system" fn autoplay_cancel_wndproc(
     use std::sync::atomic::Ordering;
 
     use windows::Win32::Foundation::LRESULT;
-    use windows::Win32::UI::WindowsAndMessaging::{CallWindowProcW, DefWindowProcW, WNDPROC};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallWindowProcW, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED,
+        DefWindowProcW, WM_DEVICECHANGE, WNDPROC,
+    };
 
     let autoplay_message = AUTOPLAY_CANCEL_MESSAGE.load(Ordering::Acquire);
     if autoplay_message != 0 && msg == autoplay_message {
         return LRESULT(1);
+    }
+    if msg == WM_DEVICECHANGE
+        && matches!(
+            wparam.0 as u32,
+            DBT_DEVICEARRIVAL | DBT_DEVICEREMOVECOMPLETE | DBT_DEVNODES_CHANGED
+        )
+    {
+        super::storage_watch::notify_storage_change();
     }
 
     let previous = AUTOPLAY_CANCEL_PREV_WNDPROC.load(Ordering::Acquire);
