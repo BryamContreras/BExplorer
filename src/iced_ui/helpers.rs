@@ -167,6 +167,55 @@ mod tests {
     }
 
     #[test]
+    fn layout_animation_is_refresh_rate_independent() {
+        fn simulate(refresh_rate: u32, seconds: f32) -> f32 {
+            let frames = (refresh_rate as f32 * seconds).round() as u32;
+            let elapsed = Duration::from_secs_f32(1.0 / refresh_rate as f32);
+            (0..frames).fold(0.0, |progress, _| {
+                advance_layout_animation(progress, 1.0, elapsed)
+            })
+        }
+
+        let at_60_hz = simulate(60, 0.25);
+        let at_144_hz = simulate(144, 0.25);
+        assert!(at_60_hz > 0.99);
+        assert!((at_60_hz - at_144_hz).abs() < 0.002);
+    }
+
+    #[test]
+    fn popup_fade_is_bidirectional_and_refresh_rate_independent() {
+        fn simulate(refresh_rate: u32, start: f32, target: f32, seconds: f32) -> f32 {
+            let frames = (refresh_rate as f32 * seconds).round() as u32;
+            let elapsed = Duration::from_secs_f32(1.0 / refresh_rate as f32);
+            (0..frames).fold(start, |progress, _| {
+                advance_popup_animation(progress, target, elapsed)
+            })
+        }
+
+        let opened_60_hz = simulate(60, 0.0, 1.0, 0.25);
+        let opened_144_hz = simulate(144, 0.0, 1.0, 0.25);
+        let closed_60_hz = simulate(60, 1.0, 0.0, 0.25);
+        assert!(opened_60_hz > 0.99);
+        assert!((opened_60_hz - opened_144_hz).abs() < 0.002);
+        assert!(closed_60_hz < 0.01);
+    }
+
+    #[test]
+    fn popup_blur_retires_before_the_foreground_while_closing() {
+        assert_eq!(popup_backdrop_opacity(0.5, 1.0), 0.5);
+        assert_eq!(popup_backdrop_opacity(0.5, 0.0), 0.25);
+        assert_eq!(popup_backdrop_opacity(0.0, 0.0), 0.0);
+    }
+
+    #[test]
+    fn palette_opacity_scales_text_and_surfaces_together() {
+        let palette = Palette::from_config(&AppConfig::default(), true).with_opacity(0.25);
+        assert!((palette.text.a - 0.25).abs() < f32::EPSILON);
+        assert!((palette.menu_bg.a - 0.25).abs() < f32::EPSILON);
+        assert!((palette.border.a - 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
     fn vibrancy_uses_dense_glass_for_menus_inputs_and_overlay_windows() {
         let config = AppConfig {
             vibrancy: VibrancyMode::Blur,
@@ -440,6 +489,30 @@ mod tests {
                 crate::platform::LINUX_APPLICATION_ID
             );
         }
+    }
+
+    #[test]
+    fn every_native_window_uses_the_embedded_app_icon() {
+        let icon = app_window_icon().expect("decode embedded app icon");
+        let (rgba, size) = icon.into_raw();
+        assert_eq!(size.width, 256);
+        assert_eq!(size.height, 256);
+        assert_eq!(rgba.len(), 256 * 256 * 4);
+        assert!(
+            main_window_settings(Size::new(1200.0, 720.0))
+                .icon
+                .is_some()
+        );
+        assert!(
+            transfer_window_settings(Size::new(540.0, 220.0))
+                .icon
+                .is_some()
+        );
+        assert!(
+            archive_window_settings(Size::new(540.0, 220.0))
+                .icon
+                .is_some()
+        );
     }
 
     #[test]

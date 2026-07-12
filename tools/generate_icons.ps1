@@ -1,5 +1,5 @@
 param(
-    [string]$Source = "assets/icons/appicon-source.png",
+    [string]$Source = "assets/icons/appicon.png",
     [double]$ContentScale = 0.92
 )
 
@@ -83,11 +83,14 @@ $sourceImage = [System.Drawing.Bitmap]::FromFile($sourcePath)
 try {
     $bounds = Get-AlphaBounds $sourceImage
 
-    $normalized = New-ScaledBitmap $sourceImage $bounds 1024 $ContentScale
-    try {
-        $normalized.Save((Join-Path $assetDir "appicon.png"), [System.Drawing.Imaging.ImageFormat]::Png)
-    } finally {
-        $normalized.Dispose()
+    $canonicalPath = Join-Path $assetDir "appicon.png"
+    if ([System.IO.Path]::GetFullPath($sourcePath) -ne [System.IO.Path]::GetFullPath($canonicalPath)) {
+        $normalized = New-ScaledBitmap $sourceImage $bounds 1024 $ContentScale
+        try {
+            $normalized.Save($canonicalPath, [System.Drawing.Imaging.ImageFormat]::Png)
+        } finally {
+            $normalized.Dispose()
+        }
     }
 
     $sizes = @(16, 24, 32, 48, 64, 128, 256, 512)

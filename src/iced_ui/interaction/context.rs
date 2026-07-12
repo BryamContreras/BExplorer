@@ -6,6 +6,7 @@ impl BExplorerIced {
         pane: PaneId,
         target: ContextTarget,
     ) -> Task<Message> {
+        self.begin_popup_animation(false);
         self.focus_pane(pane);
         self.title_menu_open = false;
         self.view_menu_open = None;
@@ -200,17 +201,114 @@ impl BExplorerIced {
     ) -> Task<Message> {
         self.title_submenu_backdrop = None;
         if matches!(target, PopupBackdropTarget::ColorPicker) {
+            self.begin_popup_animation(true);
             self.color_picker_backdrop = None;
-            self.color_picker_fade_progress = 0.0;
         } else {
+            self.begin_popup_animation(false);
             self.popup_backdrop = None;
-            self.popup_fade_progress = 0.0;
         }
         let Some(id) = self.main_window_id else {
             return self.show_popup_with_backdrop(target);
         };
         window::screenshot(id)
             .map(move |screenshot| Message::PopupBackdropCaptured(target.clone(), screenshot))
+    }
+
+    pub(in crate::iced_ui) fn begin_popup_animation(&mut self, color_picker: bool) {
+        self.pending_popup_close = None;
+        self.last_animation_frame = None;
+        if color_picker {
+            self.color_picker_fade_progress = 0.0;
+            self.color_picker_fade_target = 1.0;
+        } else {
+            self.popup_fade_progress = 0.0;
+            self.popup_fade_target = 1.0;
+        }
+    }
+
+    pub(in crate::iced_ui) fn request_popup_close(
+        &mut self,
+        pending: PendingPopupClose,
+    ) -> Task<Message> {
+        self.pending_popup_close = Some(pending);
+        self.last_animation_frame = None;
+        let already_hidden = if pending == PendingPopupClose::ColorPicker {
+            self.color_picker_fade_target = 0.0;
+            self.color_picker_fade_progress <= 0.002
+        } else {
+            self.popup_fade_target = 0.0;
+            self.popup_fade_progress <= 0.002
+        };
+        if already_hidden {
+            self.finish_pending_popup_close();
+        }
+        Task::none()
+    }
+
+    pub(in crate::iced_ui) fn finish_pending_popup_close(&mut self) {
+        let Some(pending) = self.pending_popup_close.take() else {
+            return;
+        };
+        match pending {
+            PendingPopupClose::FloatingMenus => {
+                self.title_menu_open = false;
+                self.show_menu_open = false;
+                self.show_menu_parent_hovered = false;
+                self.show_menu_submenu_hovered = false;
+                self.view_menu_open = None;
+                self.group_menu_open = None;
+                self.search_mode_menu_open = None;
+                self.new_menu_open = None;
+                self.title_submenu_backdrop = None;
+                self.popup_backdrop = None;
+            }
+            PendingPopupClose::Shortcuts => {
+                self.shortcuts_open = false;
+                self.shortcut_capture = None;
+                self.popup_backdrop = None;
+            }
+            PendingPopupClose::Settings => {
+                self.settings_open = false;
+                self.popup_backdrop = None;
+                self.color_picker_backdrop = None;
+                self.color_picker_open = false;
+                self.accent_plane_dragging = false;
+                self.accent_hue_dragging = false;
+            }
+            PendingPopupClose::ColorPicker => {
+                self.color_picker_open = false;
+                self.color_picker_backdrop = None;
+                self.accent_plane_dragging = false;
+                self.accent_hue_dragging = false;
+            }
+            PendingPopupClose::ArchiveDialog => {
+                self.archive_dialog = None;
+                self.popup_backdrop = None;
+            }
+            PendingPopupClose::PermanentDelete => {
+                self.permanent_delete_dialog = None;
+                self.popup_backdrop = None;
+            }
+            PendingPopupClose::TransferConflict => {
+                self.transfer_conflict_dialog = None;
+                self.popup_backdrop = None;
+            }
+        }
+    }
+
+    pub(in crate::iced_ui) fn dismiss_context_menu(&mut self) {
+        self.context_menu = None;
+        self.context_archive_submenu = false;
+        self.context_extract_submenu = false;
+        self.context_new_submenu = false;
+        self.context_archive_parent_hovered = false;
+        self.context_archive_submenu_hovered = false;
+        self.context_new_parent_hovered = false;
+        self.context_new_submenu_hovered = false;
+        self.popup_fade_progress = 0.0;
+        self.popup_fade_target = 0.0;
+        self.pending_popup_close = None;
+        self.last_animation_frame = None;
     }
 
     pub(in crate::iced_ui) fn show_popup_with_backdrop(
@@ -391,14 +489,7 @@ impl BExplorerIced {
             self.context_new_submenu = true;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::New);
         }
-        self.context_menu = None;
-        self.context_archive_submenu = false;
-        self.context_extract_submenu = false;
-        self.context_new_submenu = false;
-        self.context_archive_parent_hovered = false;
-        self.context_archive_submenu_hovered = false;
-        self.context_new_parent_hovered = false;
-        self.context_new_submenu_hovered = false;
+        self.dismiss_context_menu();
         match command {
             ContextCommand::Paste => self.context_paste(menu.pane, menu.target),
             ContextCommand::Copy => self.context_copy(menu.pane, menu.target, false),

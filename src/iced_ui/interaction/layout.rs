@@ -37,7 +37,9 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn popup_fade_animation_active(&self) -> bool {
-        self.popup_fade_progress < 0.999 || self.color_picker_fade_progress < 0.999
+        (self.popup_fade_progress - self.popup_fade_target).abs() > f32::EPSILON
+            || (self.color_picker_fade_progress - self.color_picker_fade_target).abs()
+                > f32::EPSILON
     }
 
     pub(in crate::iced_ui) fn scrollbar_animation_active(&self) -> bool {

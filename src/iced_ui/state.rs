@@ -39,9 +39,7 @@ enum Message {
     ToggleSidebar,
     SidebarPointerEntered,
     SidebarPointerExited,
-    SidebarAnimationTick,
-    PreviewPanelAnimationTick,
-    PopupFadeAnimationTick,
+    AnimationFrame(Instant),
     ScrollbarHover(PaneId, ScrollbarAxis, bool),
     ScrollbarAnimationTick,
     ToggleSplit,
@@ -239,6 +237,17 @@ enum PopupBackdropTarget {
     PermanentDelete(PendingPermanentDelete),
     Archive(ArchiveDialogState),
     TransferConflict(PendingTransferConflict),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PendingPopupClose {
+    FloatingMenus,
+    Shortcuts,
+    Settings,
+    ColorPicker,
+    ArchiveDialog,
+    PermanentDelete,
+    TransferConflict,
 }
 
 #[derive(Clone, Debug)]

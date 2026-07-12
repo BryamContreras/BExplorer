@@ -75,7 +75,14 @@ impl BExplorerIced {
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(|_| container::Style::default().background(Color::from_rgba8(0, 0, 0, 0.24)))
+            .style(move |_| {
+                container::Style::default().background(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    0.24 * palette.text.a,
+                ))
+            })
             .into()
     }
 
@@ -181,7 +188,14 @@ impl BExplorerIced {
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill)
-            .style(|_| container::Style::default().background(Color::from_rgba8(0, 0, 0, 0.24)))
+            .style(move |_| {
+                container::Style::default().background(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    0.24 * palette.text.a,
+                ))
+            })
             .into()
     }
 }

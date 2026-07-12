@@ -156,10 +156,7 @@ impl BExplorerIced {
             }
             Message::ToggleMenu => {
                 if self.title_menu_open {
-                    self.title_menu_open = false;
-                    self.popup_backdrop = None;
-                    self.title_submenu_backdrop = None;
-                    return Task::none();
+                    return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
                 self.show_menu_open = false;
                 self.show_menu_parent_hovered = false;
@@ -185,12 +182,7 @@ impl BExplorerIced {
                 self.show_menu_submenu_hovered = false;
                 self.request_popup_backdrop(PopupBackdropTarget::Shortcuts)
             }
-            Message::CloseShortcuts => {
-                self.shortcuts_open = false;
-                self.shortcut_capture = None;
-                self.popup_backdrop = None;
-                Task::none()
-            }
+            Message::CloseShortcuts => self.request_popup_close(PendingPopupClose::Shortcuts),
             Message::BeginShortcutCapture(action) => {
                 self.shortcut_capture = Some(action);
                 Task::none()
@@ -211,17 +203,7 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::CloseFloatingMenus => {
-                self.title_menu_open = false;
-                self.show_menu_open = false;
-                self.show_menu_parent_hovered = false;
-                self.show_menu_submenu_hovered = false;
-                self.view_menu_open = None;
-                self.group_menu_open = None;
-                self.search_mode_menu_open = None;
-                self.new_menu_open = None;
-                self.popup_backdrop = None;
-                self.title_submenu_backdrop = None;
-                Task::none()
+                self.request_popup_close(PendingPopupClose::FloatingMenus)
             }
             Message::OpenShowMenu => {
                 self.show_menu_open = true;
@@ -286,6 +268,7 @@ impl BExplorerIced {
                 self.new_menu_open = None;
                 self.popup_backdrop = None;
                 self.sidebar_visible = !self.sidebar_visible;
+                self.last_animation_frame = None;
                 self.config.sidebar_visible = self.sidebar_visible;
                 save_config(&self.config);
                 Task::none()
@@ -298,38 +281,59 @@ impl BExplorerIced {
                 self.sidebar_pointer_inside = false;
                 Task::none()
             }
-            Message::SidebarAnimationTick => {
-                let target = if self.sidebar_visible { 1.0 } else { 0.0 };
-                self.sidebar_progress = if target > self.sidebar_progress {
-                    (self.sidebar_progress + SIDEBAR_SLIDE_STEP).min(target)
-                } else {
-                    (self.sidebar_progress - SIDEBAR_SLIDE_STEP).max(target)
-                };
-                Task::none()
-            }
-            Message::PreviewPanelAnimationTick => {
-                let target = self.preview_panel_animation_target();
-                self.preview_panel_progress = if target > self.preview_panel_progress {
-                    (self.preview_panel_progress + SIDEBAR_SLIDE_STEP).min(target)
-                } else {
-                    (self.preview_panel_progress - SIDEBAR_SLIDE_STEP).max(target)
-                };
+            Message::AnimationFrame(now) => {
+                let elapsed = self
+                    .last_animation_frame
+                    .replace(now)
+                    .map(|previous| now.saturating_duration_since(previous))
+                    .unwrap_or(Duration::from_secs_f32(1.0 / 60.0));
+                let sidebar_target = if self.sidebar_visible { 1.0 } else { 0.0 };
+                self.sidebar_progress =
+                    advance_layout_animation(self.sidebar_progress, sidebar_target, elapsed);
+                let preview_target = self.preview_panel_animation_target();
+                self.preview_panel_progress =
+                    advance_layout_animation(self.preview_panel_progress, preview_target, elapsed);
+                let mut preview_to_queue = None;
                 if self.preview_panel_progress <= 0.001 {
                     if let Some(pane) = self.preview_panel_target_pane.take() {
                         self.preview_panel_pane = Some(pane);
-                        return self.queue_selected_preview(pane);
+                        preview_to_queue = Some(pane);
                     }
                     if !self.config.show_preview_panel {
                         self.preview_panel_pane = None;
                         self.pdf_previews.clear();
                     }
                 }
-                Task::none()
-            }
-            Message::PopupFadeAnimationTick => {
-                self.popup_fade_progress = (self.popup_fade_progress + 0.18).min(1.0);
-                self.color_picker_fade_progress = (self.color_picker_fade_progress + 0.18).min(1.0);
-                Task::none()
+                self.popup_fade_progress = advance_popup_animation(
+                    self.popup_fade_progress,
+                    self.popup_fade_target,
+                    elapsed,
+                );
+                self.color_picker_fade_progress = advance_popup_animation(
+                    self.color_picker_fade_progress,
+                    self.color_picker_fade_target,
+                    elapsed,
+                );
+                let close_finished =
+                    self.pending_popup_close
+                        .is_some_and(|pending| match pending {
+                            PendingPopupClose::ColorPicker => {
+                                self.color_picker_fade_progress <= 0.0
+                            }
+                            _ => self.popup_fade_progress <= 0.0,
+                        });
+                if close_finished {
+                    self.finish_pending_popup_close();
+                }
+                if !self.sidebar_animation_active()
+                    && !self.preview_panel_animation_active()
+                    && !self.popup_fade_animation_active()
+                {
+                    self.last_animation_frame = None;
+                }
+                preview_to_queue
+                    .map(|pane| self.queue_selected_preview(pane))
+                    .unwrap_or_else(Task::none)
             }
             Message::ScrollbarHover(pane, axis, hovered) => {
                 let state = self.pane_mut(pane);
@@ -590,9 +594,7 @@ impl BExplorerIced {
             Message::ToggleNewMenu(pane) => {
                 self.focus_pane(pane);
                 if self.new_menu_open == Some(pane) {
-                    self.new_menu_open = None;
-                    self.popup_backdrop = None;
-                    return Task::none();
+                    return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
                 self.title_menu_open = false;
                 self.show_menu_open = false;
@@ -730,9 +732,7 @@ impl BExplorerIced {
             }
             Message::ConfirmArchiveDialog => self.confirm_archive_dialog(),
             Message::CancelArchiveDialog => {
-                self.archive_dialog = None;
-                self.popup_backdrop = None;
-                Task::none()
+                self.request_popup_close(PendingPopupClose::ArchiveDialog)
             }
             Message::CancelArchive(id) => {
                 self.cancel_archive(id);
@@ -803,9 +803,7 @@ impl BExplorerIced {
             Message::ToggleSearchModeMenu(pane) => {
                 self.focus_pane(pane);
                 if self.search_mode_menu_open == Some(pane) {
-                    self.search_mode_menu_open = None;
-                    self.popup_backdrop = None;
-                    return Task::none();
+                    return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
                 self.title_menu_open = false;
                 self.view_menu_open = None;
@@ -877,9 +875,7 @@ impl BExplorerIced {
             Message::ToggleViewMenu(pane) => {
                 self.focus_pane(pane);
                 if self.view_menu_open == Some(pane) {
-                    self.view_menu_open = None;
-                    self.popup_backdrop = None;
-                    return Task::none();
+                    return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
                 self.title_menu_open = false;
                 self.group_menu_open = None;
@@ -904,9 +900,7 @@ impl BExplorerIced {
             Message::ToggleGroupMenu(pane) => {
                 self.focus_pane(pane);
                 if self.group_menu_open == Some(pane) {
-                    self.group_menu_open = None;
-                    self.popup_backdrop = None;
-                    return Task::none();
+                    return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
                 self.title_menu_open = false;
                 self.view_menu_open = None;
@@ -1370,14 +1364,7 @@ impl BExplorerIced {
                 self.show_popup_with_backdrop(PopupBackdropTarget::TitleMenu)
             }
             Message::CloseContextMenu => {
-                self.context_menu = None;
-                self.context_archive_submenu = false;
-                self.context_extract_submenu = false;
-                self.context_new_submenu = false;
-                self.context_archive_parent_hovered = false;
-                self.context_archive_submenu_hovered = false;
-                self.context_new_parent_hovered = false;
-                self.context_new_submenu_hovered = false;
+                self.dismiss_context_menu();
                 Task::none()
             }
             Message::ContextArchiveParentEnter => {
@@ -1535,9 +1522,7 @@ impl BExplorerIced {
                 }
             }
             Message::CancelPermanentDelete => {
-                self.permanent_delete_dialog = None;
-                self.popup_backdrop = None;
-                Task::none()
+                self.request_popup_close(PendingPopupClose::PermanentDelete)
             }
             Message::DiskImageMounted(pane, source, result) => {
                 self.mounting_disk_images.remove(&source);
@@ -1666,19 +1651,11 @@ impl BExplorerIced {
             },
             Message::ResolveTransferConflict(policy) => self.resolve_transfer_conflict(policy),
             Message::CancelTransferConflict => {
-                self.transfer_conflict_dialog = None;
-                self.popup_backdrop = None;
-                Task::none()
+                self.request_popup_close(PendingPopupClose::TransferConflict)
             }
             Message::ToggleSettings => {
                 if self.settings_open {
-                    self.settings_open = false;
-                    self.popup_backdrop = None;
-                    self.color_picker_backdrop = None;
-                    self.color_picker_open = false;
-                    self.accent_plane_dragging = false;
-                    self.accent_hue_dragging = false;
-                    return Task::none();
+                    return self.request_popup_close(PendingPopupClose::Settings);
                 }
                 self.title_menu_open = false;
                 self.show_menu_open = false;
@@ -1725,11 +1702,7 @@ impl BExplorerIced {
             }
             Message::ToggleColorPicker => {
                 if self.color_picker_open {
-                    self.color_picker_open = false;
-                    self.color_picker_backdrop = None;
-                    self.accent_plane_dragging = false;
-                    self.accent_hue_dragging = false;
-                    return Task::none();
+                    return self.request_popup_close(PendingPopupClose::ColorPicker);
                 }
                 self.request_popup_backdrop(PopupBackdropTarget::ColorPicker)
             }
