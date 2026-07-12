@@ -19,9 +19,25 @@ operaciones comunes como copiar, mover, eliminar y renombrar. En Linux ya hay
 soporte inicial para compilar, navegar archivos locales, detectar montajes desde
 `/proc/self/mountinfo`, clasificar unidades USB/red/opticas cuando el sistema
 lo expone, usar terminales comunes y registrar la app como gestor de carpetas
-con un archivo `.desktop`. La ventana la maneja `eframe/winit`, asi que la app
+con un archivo `.desktop`. La ventana la maneja `iced`/`winit`, asi que la app
 puede ejecutarse tanto en Wayland como en X11 cuando las librerias de runtime
 estan disponibles.
+
+La interfaz ya se ha migrado de `egui` a `iced` y se ha eliminado la
+implementacion visual sustituida. Cubre navegacion local, pestanas, panel
+dividido, vistas, filtrado, agrupacion y ordenacion por columnas, renombrado,
+eliminacion en segundo plano y transferencias en cola. Los cambios de sesion se
+guardan al producirse y las carpetas grandes se renderizan incrementalmente en
+lotes de 500 elementos, sin ocultar permanentemente los elementos restantes.
+La busqueda completa, vistas previas, comprimidos, Defender, MTP, montaje de
+imagenes, red y arrastrar y soltar nativo estan conectados a la interfaz.
+
+La interfaz `iced` esta organizada por responsabilidad en `src/iced_ui`:
+`mod.rs` contiene el estado y los mensajes; `update.rs` procesa eventos;
+`interaction.rs`, `navigation.rs` y `search_state.rs` gestionan entrada,
+navegacion y busqueda; `view.rs` y `view/` contienen la composicion visual;
+`file_actions.rs` las operaciones y transferencias; `advanced.rs` conecta
+Defender, MTP y unidades; y `helpers/` agrupa presentacion y persistencia.
 
 Antes de una beta publica conviene seguir probando:
 
@@ -50,7 +66,9 @@ Antes de una beta publica conviene seguir probando:
 - Arrastrar y soltar dentro de BExplorer y entre BExplorer y Windows.
 - Cola de transferencias con progreso, pausa, cancelacion y manejo de
   conflictos.
-- Reintento elevado con UAC cuando Windows deniega permisos.
+- Compresiones concurrentes con ventana propia de progreso, que vuelve a primer
+  plano al iniciar una transferencia o compresion nueva.
+- Acciones elevadas de remediacion y exclusiones de Microsoft Defender.
 - Busqueda rapida y busqueda completa, incluyendo archivos dentro de
   comprimidos soportados.
 - Panel de vista previa para imagenes, texto, SVG y PDF.
@@ -115,6 +133,9 @@ Flujos soportados:
 - crear archivos ZIP;
 - crear archivos 7z;
 - crear ZIP y 7z protegidos con contrasena;
+- elegir nombre, formato ZIP/7z y nivel rapido, normal o alto desde la barra
+  de acciones, o crear ZIP/7z normal con un clic desde el menu contextual;
+- ejecutar varias compresiones a la vez, con progreso y cancelacion por tarea;
 - extraer ZIP, 7z, RAR, ISO, TAR y otros formatos compatibles con 7-Zip;
 - pedir contrasena cuando el comprimido la requiere;
 - buscar dentro de comprimidos durante la busqueda completa.

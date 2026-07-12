@@ -1,5 +1,4 @@
 use std::collections::HashSet;
-use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -15,7 +14,6 @@ use crate::utils::errors::{BExplorerError, Result};
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
-const ELEVATED_TRANSFER_HELPER_ARG: &str = "--bexplorer-elevated-transfer-helper";
 static RESERVED_TARGETS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -79,6 +77,21 @@ pub struct TransferProgress {
     pub bytes_per_second: f64,
 }
 
+/// A completed top-level item and the exact destination chosen for it. The
+/// destination can differ from the source filename when Keep Both resolves a
+/// collision, so callers must use this instead of reconstructing a path.
+#[derive(Clone, Debug)]
+pub struct TransferCompletedRoot {
+    pub source: PathBuf,
+    pub target: PathBuf,
+}
+
+#[derive(Debug)]
+struct TransferOutcome {
+    completed_files: usize,
+    completed_roots: Vec<TransferCompletedRoot>,
+}
+
 impl TransferProgress {
     pub fn pending(job: &TransferJob) -> Self {
         Self {
@@ -107,6 +120,7 @@ pub enum TransferMessage {
         job_id: u64,
         kind: TransferKind,
         completed_files: usize,
+        completed_roots: Vec<TransferCompletedRoot>,
     },
     Failed {
         job_id: u64,
@@ -127,6 +141,7 @@ struct TransferRuntime {
     created_targets: Vec<PathBuf>,
     tracked_targets: HashSet<PathBuf>,
     reserved_targets: Vec<PathBuf>,
+    completed_roots: Vec<TransferCompletedRoot>,
 }
 
 impl TransferRuntime {
@@ -141,6 +156,7 @@ impl TransferRuntime {
             created_targets: Vec::new(),
             tracked_targets: HashSet::new(),
             reserved_targets: Vec::new(),
+            completed_roots: Vec::new(),
         }
     }
 
@@ -154,15 +170,23 @@ impl TransferRuntime {
     fn track_reserved(&mut self, path: &Path) {
         self.reserved_targets.push(path.to_path_buf());
     }
+
+    fn track_completed_root(&mut self, source: &Path, target: &Path) {
+        self.completed_roots.push(TransferCompletedRoot {
+            source: source.to_path_buf(),
+            target: target.to_path_buf(),
+        });
+    }
 }
 
 pub fn run_transfer(job: TransferJob, tx: Sender<TransferMessage>, control: TransferControl) {
     match run_transfer_inner(&job, &tx, &control) {
-        Ok(completed_files) => {
+        Ok(outcome) => {
             let _ = tx.send(TransferMessage::Finished {
                 job_id: job.id,
                 kind: job.kind,
-                completed_files,
+                completed_files: outcome.completed_files,
+                completed_roots: outcome.completed_roots,
             });
         }
         Err(error) if control.cancel.load(Ordering::Relaxed) => {
@@ -178,81 +202,11 @@ pub fn run_transfer(job: TransferJob, tx: Sender<TransferMessage>, control: Tran
     }
 }
 
-pub fn run_transfer_elevated(job: &TransferJob) -> Result<usize> {
-    let request_path = elevated_transfer_request_path()?;
-    let request_json = serde_json::to_string(job)?;
-    fs::write(&request_path, request_json)?;
-
-    let exit_code = crate::platform::shell::run_elevated_current_exe(&[
-        OsString::from(ELEVATED_TRANSFER_HELPER_ARG),
-        request_path.clone().into_os_string(),
-    ]);
-
-    if let Ok(code) = exit_code
-        && code == 0
-    {
-        return Ok(job.sources.len());
-    }
-
-    if request_path.exists() {
-        let _ = fs::remove_file(&request_path);
-    }
-
-    match exit_code {
-        Ok(code) => Err(BExplorerError::Operation(format!(
-            "Elevated transfer failed with exit code {code}"
-        ))),
-        Err(error) => Err(error),
-    }
-}
-
-pub fn try_run_elevated_transfer_helper_from_args() -> Option<i32> {
-    let mut args = std::env::args_os();
-    let _exe = args.next();
-    let marker = args.next()?;
-    if marker != OsStr::new(ELEVATED_TRANSFER_HELPER_ARG) {
-        return None;
-    }
-
-    let request_path = PathBuf::from(args.next()?);
-    Some(match run_elevated_transfer_helper(&request_path) {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("{error}");
-            1
-        }
-    })
-}
-
-fn run_elevated_transfer_helper(request_path: &Path) -> Result<()> {
-    let request_json = fs::read_to_string(request_path)?;
-    let _ = fs::remove_file(request_path);
-    let job: TransferJob = serde_json::from_str(request_json.trim_start_matches('\u{feff}'))
-        .map_err(|error| {
-            BExplorerError::Operation(format!("Elevated transfer request decode failed: {error}"))
-        })?;
-    let (tx, _rx) = std::sync::mpsc::channel();
-    run_transfer_inner(&job, &tx, &TransferControl::new())?;
-    Ok(())
-}
-
-fn elevated_transfer_request_path() -> Result<PathBuf> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "bexplorer-elevated-transfer-{}-{stamp}.json",
-        std::process::id()
-    ));
-    Ok(path)
-}
-
 fn run_transfer_inner(
     job: &TransferJob,
     tx: &Sender<TransferMessage>,
     control: &TransferControl,
-) -> Result<usize> {
+) -> Result<TransferOutcome> {
     let has_portable_destination = explorer::is_portable_path(&job.destination);
     let has_portable_sources = job
         .sources
@@ -301,13 +255,29 @@ fn run_transfer_inner(
                 mark_source_skipped(job, source, &mut runtime, tx);
                 continue;
             };
+            // Replacing an item means replacing the complete top-level entry,
+            // not merging two directories and leaving stale files behind. A
+            // source pasted into its own directory is the lone exception:
+            // replacing it would destroy the input before it can be read, so
+            // treat it as a completed no-op instead.
+            if source == &target {
+                mark_source_skipped(job, source, &mut runtime, tx);
+                continue;
+            }
+            if job.conflict_policy == ConflictPolicy::Replace && target.exists() {
+                remove_source(&target)?;
+            }
             runtime.track_reserved(&target);
             match job.kind {
                 TransferKind::Copy => copy_path(job, source, &target, tx, control, &mut runtime)?,
                 TransferKind::Move => move_path(job, source, &target, tx, control, &mut runtime)?,
             }
+            runtime.track_completed_root(source, &target);
         }
-        Ok(runtime.files_done)
+        Ok(TransferOutcome {
+            completed_files: runtime.files_done,
+            completed_roots: runtime.completed_roots.clone(),
+        })
     })();
 
     if result.is_err() && control.cancel.load(Ordering::Relaxed) {
@@ -322,7 +292,7 @@ fn run_portable_transfer(
     job: &TransferJob,
     tx: &Sender<TransferMessage>,
     control: &TransferControl,
-) -> Result<usize> {
+) -> Result<TransferOutcome> {
     if explorer::is_virtual_path(&job.destination) && !explorer::is_portable_path(&job.destination)
     {
         return Err(BExplorerError::Operation(
@@ -374,7 +344,12 @@ fn run_portable_transfer(
     if result.is_err() && control.cancel.load(Ordering::Relaxed) {
         cleanup_created_targets(&runtime.created_targets);
     }
-    result
+    result.map(|completed_files| TransferOutcome {
+        completed_files,
+        // Portable locations do not have a native local path that can be
+        // safely removed or restored by undo yet.
+        completed_roots: Vec::new(),
+    })
 }
 
 fn run_local_to_portable_transfer(
@@ -435,6 +410,9 @@ fn run_portable_to_local_transfer(
                 mark_portable_source_skipped(job, source, runtime, tx);
                 continue;
             };
+            if job.conflict_policy == ConflictPolicy::Replace && target.exists() {
+                remove_source(&target)?;
+            }
             runtime.track_reserved(&target);
             if !target.exists() {
                 runtime.track_created(&target);
@@ -460,11 +438,24 @@ fn run_portable_to_local_transfer(
             mark_source_skipped(job, source, runtime, tx);
             continue;
         };
+        // Replacing an item means replacing the complete top-level entry, not
+        // merging two directories and leaving stale files behind. A source
+        // pasted into its own directory is the lone exception: replacing it
+        // would destroy the input before it can be read, so treat it as a
+        // completed no-op instead.
+        if source == &target {
+            mark_source_skipped(job, source, runtime, tx);
+            continue;
+        }
+        if job.conflict_policy == ConflictPolicy::Replace && target.exists() {
+            remove_source(&target)?;
+        }
         runtime.track_reserved(&target);
         match job.kind {
             TransferKind::Copy => copy_path(job, source, &target, tx, control, runtime)?,
             TransferKind::Move => move_path(job, source, &target, tx, control, runtime)?,
         }
+        runtime.track_completed_root(source, &target);
     }
 
     Ok(runtime.files_done)
@@ -878,7 +869,9 @@ mod tests {
             kind: TransferKind::Copy,
             conflict_policy,
         };
-        run_transfer_inner(&job, &tx, &TransferControl::new()).expect("run transfer")
+        run_transfer_inner(&job, &tx, &TransferControl::new())
+            .expect("run transfer")
+            .completed_files
     }
 
     #[test]
@@ -910,6 +903,36 @@ mod tests {
     }
 
     #[test]
+    fn records_the_exact_keep_both_target_for_undo() {
+        let root = temp_transfer_dir("undo-target");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("create source");
+        fs::create_dir_all(&destination).expect("create destination");
+        let source = source_dir.join("report.txt");
+        fs::write(&source, b"new").expect("write source");
+        fs::write(destination.join("report.txt"), b"old").expect("write destination");
+        let job = TransferJob {
+            id: 1,
+            sources: vec![source.clone()],
+            destination: destination.clone(),
+            kind: TransferKind::Copy,
+            conflict_policy: ConflictPolicy::KeepBoth,
+        };
+        let (tx, _rx) = mpsc::channel();
+
+        let outcome = run_transfer_inner(&job, &tx, &TransferControl::new()).expect("run transfer");
+
+        assert_eq!(outcome.completed_roots.len(), 1);
+        assert_eq!(outcome.completed_roots[0].source, source);
+        assert_eq!(
+            outcome.completed_roots[0].target,
+            destination.join("report (2).txt")
+        );
+        fs::remove_dir_all(root).expect("cleanup temp transfer dir");
+    }
+
+    #[test]
     fn replace_overwrites_existing_file_on_conflict() {
         let root = temp_transfer_dir("replace");
         let source_dir = root.join("source");
@@ -931,6 +954,29 @@ mod tests {
             b"new"
         );
         assert!(!destination.join("report (2).txt").exists());
+        fs::remove_dir_all(root).expect("cleanup temp transfer dir");
+    }
+
+    #[test]
+    fn replace_replaces_a_conflicting_directory_instead_of_merging_it() {
+        let root = temp_transfer_dir("replace-directory");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        let source = source_dir.join("project");
+        let existing = destination.join("project");
+        fs::create_dir_all(&source).expect("create source project");
+        fs::create_dir_all(&existing).expect("create destination project");
+        fs::write(source.join("current.txt"), b"new").expect("write source file");
+        fs::write(existing.join("stale.txt"), b"old").expect("write stale file");
+
+        let completed = run_test_transfer(source, destination.clone(), ConflictPolicy::Replace);
+
+        assert_eq!(completed, 1);
+        assert_eq!(
+            fs::read(existing.join("current.txt")).expect("read copied file"),
+            b"new"
+        );
+        assert!(!existing.join("stale.txt").exists());
         fs::remove_dir_all(root).expect("cleanup temp transfer dir");
     }
 

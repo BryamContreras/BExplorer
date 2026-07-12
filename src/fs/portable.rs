@@ -15,6 +15,7 @@ struct PortableObjectRef {
     object_id: String,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub enum PortableTransferEvent<'a> {
     BeforeItem(&'a str),
     Bytes(&'a str, u64),
@@ -183,7 +184,7 @@ pub fn stage_paths_for_clipboard(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
             return Err(BExplorerError::InvalidPath(path.clone()));
         }
         let name = path_name(path);
-        let target = unique_destination(
+        let target = unique_local_destination(
             &root.join(safe_staging_name(&name)),
             path_is_folder(path),
             &reserved,
@@ -414,7 +415,7 @@ fn cleanup_old_staging(root: &Path, label: &str) {
     }
 }
 
-fn unique_destination(base: &Path, is_dir: bool, reserved: &[PathBuf]) -> PathBuf {
+pub(crate) fn unique_local_destination(base: &Path, is_dir: bool, reserved: &[PathBuf]) -> PathBuf {
     if !base.exists() && !reserved.iter().any(|path| path == base) {
         return base.to_path_buf();
     }

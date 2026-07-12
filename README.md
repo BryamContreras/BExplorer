@@ -6,7 +6,7 @@
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 BExplorer is a Windows-first desktop file explorer written in Rust with
-`eframe/egui`. It focuses on fast file management, split-pane workflows,
+`iced`. It focuses on fast file management, split-pane workflows,
 archive handling, preview support, and a modern compact interface without
 turning into a heavy system shell replacement.
 
@@ -18,19 +18,30 @@ macOS support is kept behind separate platform modules for future work.
 
 ## Status
 
-BExplorer is in active beta development.
+BExplorer is in active beta development. Its desktop interface has been migrated
+from `egui` to `iced` and the superseded UI implementation has been removed.
 
-It is already usable for day-to-day file management on Windows. Linux now
-builds and covers core local browsing/file operations with Freedesktop/XDG-style
-integration, but still needs broader runtime testing across distributions,
-Wayland/X11 sessions, portals, network mounts, USB drives, and desktop clipboard
-implementations.
+The current `iced` interface covers local browsing, tabs, split panes, view
+modes, filtering, grouping and column sorting, rename, background file deletion,
+and queued copy/move operations. Session changes are persisted as they happen
+and large directories are rendered incrementally instead of being silently
+truncated. Complete search, previews, archive jobs, Microsoft Defender actions,
+MTP transfers, disk-image mounting, network discovery, and native drag-and-drop
+are connected to the `iced` interface.
+
+Linux builds and covers core local browsing/file operations with
+Freedesktop/XDG-style integration, but still needs broader runtime testing
+across distributions, Wayland/X11 sessions, portals, network mounts, USB
+drives, and desktop clipboard implementations.
 
 ## Highlights
 
-- Native Rust desktop application using `eframe/egui`.
+- Native Rust desktop application using `iced`.
 - Tabbed navigation with independent history and session restore.
 - Split-pane mode with independent per-pane view state.
+- Incremental rendering for directories with thousands of entries.
+- Background rename, create-folder, trash, and permanent-delete operations so
+  slow disks and network paths do not block the UI thread.
 - Resizable and reorderable sidebar.
 - Optional action bar and bookmark bar.
 - Details, list, icons, large icons, extra-large icons, and tile views.
@@ -42,7 +53,9 @@ implementations.
 - Internal and external drag-and-drop support.
 - Transfer queue with progress, pause, cancel, cleanup of partial files, and
   conflict handling.
-- Elevated retry flow for operations that require administrator permission.
+- Concurrent archive jobs with a dedicated progress window that is restored
+  when a new compression or transfer starts.
+- Elevated Microsoft Defender remediation and exclusion actions on Windows.
 - Quick search and complete search, including search inside supported archives.
 - Resizable preview panel for images, text files, SVG, and PDF.
 - Native file icons, local thumbnails, and MTP thumbnails when exposed by the
@@ -81,6 +94,10 @@ Supported workflows:
 - create ZIP archives natively from Rust;
 - create 7z archives through the embedded 7-Zip engine;
 - create password-protected ZIP and 7z archives;
+- choose archive name, ZIP/7z format, and fast, normal, or high compression
+  from the action bar; context menus also offer one-click normal ZIP or 7z;
+- run multiple compression jobs at once with individual progress and cancel
+  controls;
 - extract ZIP, 7z, RAR, ISO, TAR, and other formats supported by 7-Zip;
 - extract password-protected archives when a password is provided;
 - browse common archive formats as folders;
@@ -124,9 +141,28 @@ The platform facade lives in `src/platform/mod.rs`. Windows-specific logic is
 kept under `src/platform/windows/` and related Windows shell helpers. Linux
 support uses `/proc/self/mountinfo`, sysfs, `xdg-terminal-exec`/common terminal
 fallbacks, and a Freedesktop `.desktop` entry without binding the application to
-one desktop environment. Linux windowing is handled by `eframe/winit`, so the
+one desktop environment. Linux windowing is handled by `iced`/`winit`, so the
 application can run under Wayland or X11 when the required runtime libraries are
 available.
+
+## Interface Architecture
+
+The `iced` interface is split by responsibility under `src/iced_ui`:
+
+- `mod.rs` owns application state, messages, subscriptions, and window setup;
+- `update.rs` routes messages and asynchronous operation results;
+- `interaction.rs`, `navigation.rs`, and `search_state.rs` own input, movement,
+  selection, drag-and-drop, and search state;
+- `view.rs` and `view/` build window chrome, file surfaces, and dialogs;
+- `file_actions.rs` owns clipboard, transfers, rename, delete, compression, and
+  shell actions;
+- `advanced.rs` connects Defender, MTP, disk images, and removable drives;
+- `helpers.rs` and `helpers/` contain formatting, layout, icon, theme, and
+  persistence helpers.
+
+Directory views initially build 500 entries and automatically append additional
+batches near the end of the scroll area. All matching entries remain available;
+the batching only limits how many widgets are constructed at once.
 
 On Linux, file icons are resolved through the Freedesktop icon theme layout and
 Shared MIME Info database. Image thumbnails first try the standard XDG
@@ -138,7 +174,12 @@ Freedesktop/GVfs, Avahi, and Samba command-line helpers.
 ## Known Limitations
 
 - Linux support is initial and not yet at Windows feature parity.
-- macOS support is not implemented yet.
+- Direct WPD/MTP sessions and Microsoft Defender are Windows-only. Linux exposes
+  portable devices mounted by GVfs as regular storage paths.
+- macOS has initial storage, disk-image, eject, and mounted-SMB adapters but
+  still needs broader runtime testing and native drag-and-drop integration.
+- Browsing an unmounted authenticated SMB share on Linux or macOS may still
+  require connecting it through the desktop environment first.
 - Linux file clipboard interoperability uses native MIME helpers when
   `wl-copy`/`wl-paste`, `xclip`, or `xsel` are installed, with a text fallback.
 - Linux icon theme lookup is implemented in-process and may not yet cover every
@@ -193,7 +234,7 @@ Linux requirements:
 - Rust stable installed with `rustup`.
 - A C/C++ toolchain usable by the `cc` crate, such as GCC, Clang, or Zig
   wrappers for `cc`, `c++`, `ar`, and `ranlib`.
-- Usual desktop runtime libraries required by `eframe`/`egui` on your
+- Usual desktop runtime libraries required by `iced`/`winit` on your
   distribution.
 
 Optional Linux integrations:

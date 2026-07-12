@@ -11,7 +11,6 @@ pub enum ArchiveJobKind {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArchiveState {
-    Pending,
     Running,
     Finished,
     Cancelled,
@@ -38,30 +37,6 @@ impl ArchiveJob {
         self.password
             .as_deref()
             .is_some_and(|value| !value.is_empty())
-    }
-
-    pub fn display_name(&self) -> String {
-        match self.kind {
-            ArchiveJobKind::Compress => self
-                .sources
-                .first()
-                .and_then(|p| p.file_name())
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    self.destination
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("Archive")
-                        .to_string()
-                }),
-            ArchiveJobKind::Extract => self
-                .archive_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Archive")
-                .to_string(),
-        }
     }
 }
 
@@ -110,18 +85,13 @@ impl ArchiveFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub enum ArchiveCompressionMethod {
     Store,
     Fast,
+    #[default]
     Normal,
     Maximum,
-}
-
-impl Default for ArchiveCompressionMethod {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]

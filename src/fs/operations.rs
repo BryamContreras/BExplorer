@@ -1,13 +1,22 @@
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
-
 use crate::utils::errors::{BExplorerError, Result};
 
-const ELEVATED_OPERATION_HELPER_ARG: &str = "--bexplorer-elevated-operation-helper";
+#[derive(Clone, Debug)]
+pub struct TrashUndoRecord {
+    pub id: OsString,
+    pub original_path: PathBuf,
+}
+
+#[derive(Clone, Debug)]
+pub struct TrashDeleteOutcome {
+    pub count: usize,
+    pub undo_records: Vec<TrashUndoRecord>,
+}
 
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,33 +25,32 @@ pub enum PasteMode {
     Move,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum ElevatedFileOperation {
-    Rename {
-        path: PathBuf,
-        new_name: String,
-    },
-    Delete {
-        paths: Vec<PathBuf>,
-        permanent: bool,
-    },
-    CreateFolder {
-        parent: PathBuf,
-        name: String,
-    },
-    CreateFile {
-        parent: PathBuf,
-        name: String,
-    },
-    Duplicate {
-        path: PathBuf,
-    },
-}
-
 pub fn open_path(path: &Path) -> Result<()> {
     open::that(path).map_err(|error| {
         BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
     })
+}
+
+pub fn can_mount_disk_image(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_ascii_lowercase);
+
+    #[cfg(target_os = "windows")]
+    return extension.is_some_and(|extension| matches!(extension.as_str(), "iso" | "vhd" | "vhdx"));
+
+    #[cfg(target_os = "macos")]
+    return extension.is_some_and(|extension| matches!(extension.as_str(), "dmg" | "iso" | "img"));
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return extension.is_some_and(|extension| matches!(extension.as_str(), "iso" | "img"));
+
+    #[cfg(not(any(target_os = "windows", unix)))]
+    {
+        let _ = extension;
+        false
+    }
 }
 
 pub fn mount_disk_image(path: &Path) -> Result<()> {
@@ -59,98 +67,6 @@ pub fn suppress_file_explorer_windows_at(path: &Path) -> Result<()> {
 
 pub fn eject_drive(path: &Path) -> Result<()> {
     crate::platform::shell::eject_drive(path)
-}
-
-pub fn run_elevated_file_operation(operation: &ElevatedFileOperation) -> Result<()> {
-    let request_path = elevated_operation_request_path();
-    let request_json = serde_json::to_string(operation)?;
-    fs::write(&request_path, request_json)?;
-
-    let exit_code = crate::platform::shell::run_elevated_current_exe(&[
-        OsString::from(ELEVATED_OPERATION_HELPER_ARG),
-        request_path.clone().into_os_string(),
-    ]);
-
-    if let Ok(code) = exit_code
-        && code == 0
-    {
-        return Ok(());
-    }
-
-    if request_path.exists() {
-        let _ = fs::remove_file(&request_path);
-    }
-
-    match exit_code {
-        Ok(code) => Err(BExplorerError::Operation(format!(
-            "Elevated operation failed with exit code {code}"
-        ))),
-        Err(error) => Err(error),
-    }
-}
-
-pub fn try_run_elevated_operation_helper_from_args() -> Option<i32> {
-    let mut args = std::env::args_os();
-    let _exe = args.next();
-    let marker = args.next()?;
-    if marker != OsStr::new(ELEVATED_OPERATION_HELPER_ARG) {
-        return None;
-    }
-
-    let request_path = PathBuf::from(args.next()?);
-    Some(match run_elevated_operation_helper(&request_path) {
-        Ok(()) => 0,
-        Err(error) => {
-            eprintln!("{error}");
-            1
-        }
-    })
-}
-
-fn run_elevated_operation_helper(request_path: &Path) -> Result<()> {
-    let request_json = fs::read_to_string(request_path)?;
-    let _ = fs::remove_file(request_path);
-    let operation: ElevatedFileOperation =
-        serde_json::from_str(request_json.trim_start_matches('\u{feff}')).map_err(|error| {
-            BExplorerError::Operation(format!("Elevated operation request decode failed: {error}"))
-        })?;
-    run_file_operation(&operation)
-}
-
-fn run_file_operation(operation: &ElevatedFileOperation) -> Result<()> {
-    match operation {
-        ElevatedFileOperation::Rename { path, new_name } => {
-            rename_path(path, new_name)?;
-        }
-        ElevatedFileOperation::Delete { paths, permanent } => {
-            if *permanent {
-                delete_permanently(paths)?;
-            } else {
-                delete_to_trash(paths)?;
-            }
-        }
-        ElevatedFileOperation::CreateFolder { parent, name } => {
-            create_folder_named(parent, name)?;
-        }
-        ElevatedFileOperation::CreateFile { parent, name } => {
-            create_empty_file_named(parent, name)?;
-        }
-        ElevatedFileOperation::Duplicate { path } => {
-            duplicate_path(path)?;
-        }
-    }
-    Ok(())
-}
-
-fn elevated_operation_request_path() -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "bexplorer-elevated-operation-{}-{stamp}.json",
-        std::process::id()
-    ))
 }
 
 #[allow(dead_code)]
@@ -195,6 +111,162 @@ pub fn delete_to_trash(paths: &[PathBuf]) -> Result<usize> {
         completed += 1;
     }
     Ok(completed)
+}
+
+/// Move items to the native system trash and retain the native identities
+/// needed to restore exactly this deletion. The identity is obtained from the
+/// trash implementation rather than guessing the trash filename.
+pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome> {
+    #[cfg(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
+    ))]
+    let previous_ids = trash::os_limited::list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|item| item.id)
+        .collect::<HashSet<_>>();
+
+    let count = delete_to_trash(paths)?;
+
+    #[cfg(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
+    ))]
+    {
+        let originals = paths.iter().cloned().collect::<HashSet<_>>();
+        let undo_records = trash::os_limited::list()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|item| !previous_ids.contains(&item.id))
+            .filter_map(|item| {
+                let original_path = item.original_path();
+                originals
+                    .contains(&original_path)
+                    .then_some(TrashUndoRecord {
+                        id: item.id,
+                        original_path,
+                    })
+            })
+            .collect();
+        return Ok(TrashDeleteOutcome {
+            count,
+            undo_records,
+        });
+    }
+
+    #[cfg(not(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
+    )))]
+    {
+        // The trash crate uses the native macOS trash APIs for deletion, but
+        // its cross-platform restoration API is not available there.
+        Ok(TrashDeleteOutcome {
+            count,
+            undo_records: Vec::new(),
+        })
+    }
+}
+
+pub fn restore_from_trash(records: &[TrashUndoRecord]) -> Result<usize> {
+    if records.is_empty() {
+        return Err(BExplorerError::Operation(
+            "No hay elementos de la papelera para restaurar".into(),
+        ));
+    }
+
+    #[cfg(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
+    ))]
+    {
+        let ids = records
+            .iter()
+            .map(|record| record.id.clone())
+            .collect::<HashSet<_>>();
+        let items = trash::os_limited::list()
+            .map_err(|error| {
+                BExplorerError::Operation(format!("No se pudo leer la papelera: {error}"))
+            })?
+            .into_iter()
+            .filter(|item| ids.contains(&item.id))
+            .collect::<Vec<_>>();
+        if items.len() != records.len() {
+            return Err(BExplorerError::Operation(
+                "Algunos elementos ya no están disponibles en la papelera".into(),
+            ));
+        }
+        let count = items.len();
+        trash::os_limited::restore_all(items).map_err(|error| {
+            BExplorerError::Operation(format!("No se pudo restaurar desde la papelera: {error}"))
+        })?;
+        return Ok(count);
+    }
+
+    #[cfg(not(any(
+        target_os = "windows",
+        all(
+            unix,
+            not(target_os = "macos"),
+            not(target_os = "ios"),
+            not(target_os = "android")
+        )
+    )))]
+    {
+        let _ = records;
+        Err(BExplorerError::Operation(
+            "La restauración desde la papelera aún no está disponible en este sistema".into(),
+        ))
+    }
+}
+
+/// Revert a completed move without replacing a file that appeared at the
+/// original location after the move.
+pub fn move_paths_back(moves: &[(PathBuf, PathBuf)]) -> Result<usize> {
+    if moves.is_empty() {
+        return Err(BExplorerError::Operation(
+            "No hay elementos movidos para devolver".into(),
+        ));
+    }
+    for (moved_path, original_path) in moves {
+        if !moved_path.exists() {
+            return Err(BExplorerError::InvalidPath(moved_path.clone()));
+        }
+        if original_path.exists() {
+            return Err(BExplorerError::Operation(format!(
+                "No se puede deshacer porque ya existe {}",
+                original_path.display()
+            )));
+        }
+    }
+    for (moved_path, original_path) in moves {
+        if let Some(parent) = original_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        move_recursively(moved_path, original_path)?;
+    }
+    Ok(moves.len())
 }
 
 pub fn delete_permanently(paths: &[PathBuf]) -> Result<usize> {
@@ -380,5 +452,44 @@ mod tests {
         assert_ne!(first, second);
 
         fs::remove_dir_all(dir).expect("cleanup temp test dir");
+    }
+
+    #[test]
+    fn moves_items_back_to_their_exact_original_location() {
+        let root = temp_test_dir("undo-move");
+        let original_parent = root.join("original");
+        let moved_parent = root.join("moved");
+        fs::create_dir_all(&original_parent).expect("create original parent");
+        fs::create_dir_all(&moved_parent).expect("create moved parent");
+        let original = original_parent.join("document.txt");
+        let moved = moved_parent.join("document.txt");
+        fs::write(&original, b"undo me").expect("write source");
+        fs::rename(&original, &moved).expect("simulate move");
+
+        let restored = move_paths_back(&[(moved.clone(), original.clone())]).expect("undo move");
+
+        assert_eq!(restored, 1);
+        assert_eq!(fs::read(&original).expect("read restored"), b"undo me");
+        assert!(!moved.exists());
+        fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn only_offers_disk_images_supported_by_the_current_platform() {
+        #[cfg(target_os = "windows")]
+        {
+            assert!(can_mount_disk_image(Path::new("backup.vhdx")));
+            assert!(!can_mount_disk_image(Path::new("backup.qcow2")));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert!(can_mount_disk_image(Path::new("installer.dmg")));
+            assert!(!can_mount_disk_image(Path::new("backup.vhdx")));
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            assert!(can_mount_disk_image(Path::new("installer.iso")));
+            assert!(!can_mount_disk_image(Path::new("backup.vmdk")));
+        }
     }
 }

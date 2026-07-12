@@ -6,15 +6,14 @@ description = "BExplorer, a native Rust desktop file explorer MVP."
 license = "MIT"
 
 [dependencies]
-arboard = "3"
+arboard = { version = "3", features = ["wayland-data-control"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crc32fast = "1.5"
 directories = "5"
-eframe = "0.29"
-egui_extras = "0.29"
 flate2 = "1.1"
 fs2 = "0.4"
 hayro = { version = "0.7", features = ["embed-fonts"] }
+iced = { version = "0.14.0", features = ["svg", "image"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 md5 = "0.7"
 open = "5"
@@ -28,16 +27,35 @@ walkdir = "2.5"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 rustix = { version = "1.1", features = ["pipe"] }
+smithay-clipboard = "0.7.3"
 wayland-backend = { version = "0.3.15", features = ["client_system"] }
 wayland-client = "0.31.14"
+wayland-protocols-plasma = { version = "0.3.12", features = ["client"] }
 wayland-sys = "0.31.11"
+zbus = "=5.17.0"
 
 [build-dependencies]
 cc = "1"
 
+[patch.crates-io]
+# Iced's Wayland clipboard owns the data-device that receives file drops.
+# Keep the tiny extension in-tree so it can forward URI drops to BExplorer.
+smithay-clipboard = { path = "vendor/smithay-clipboard" }
+
+[profile.dev]
+# `cargo run` is used during day-to-day development. A modest optimization
+# level keeps the Iced renderer responsive without the rebuild cost of release.
+opt-level = 1
+
+[profile.dev.package."*"]
+# Rendering, SVG and image dependencies account for most frame work; optimize
+# them further while keeping application code easy to iterate on.
+opt-level = 2
+
 [target.'cfg(windows)'.dependencies]
 windows-core = "0.58"
 windows = { version = "0.58", features = [
+    "implement",
     "Win32_Foundation",
     "Win32_Devices_FunctionDiscovery",
     "Win32_Graphics_Dwm",
@@ -63,4 +81,7 @@ windows = { version = "0.58", features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+window-vibrancy = "0.7"
+
+[target.'cfg(target_os = "macos")'.dependencies]
 window-vibrancy = "0.7"

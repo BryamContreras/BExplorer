@@ -9,10 +9,17 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use raw_window_handle::{
+    DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
+    WindowHandle,
+};
+
+use crate::app::config::VibrancyMode;
 use crate::utils::errors::Result;
 
+#[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriveKind {
     Unknown,
@@ -24,6 +31,7 @@ pub enum DriveKind {
     RamDisk,
 }
 
+#[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
 pub struct DriveInfo {
     pub volume_label: Option<String>,
@@ -47,6 +55,7 @@ pub struct PortableObjectInfo {
     pub size: Option<u64>,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkDeviceKind {
     Computer,
@@ -75,35 +84,226 @@ pub struct NativeIconImage {
     pub height: usize,
 }
 
+/// Initializes the native drag-and-drop bridge for a window. This is a no-op
+/// on platforms whose implementation does not need window registration.
+pub fn prepare_external_file_drag(display: RawDisplayHandle, window: RawWindowHandle) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    linux::prepare_native_file_drag(display, window);
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let _ = (display, window);
+}
+
+/// Starts an operating-system file drag so another application can receive
+/// real file references, rather than an in-app approximation.
+pub fn start_external_file_drag(
+    paths: Vec<std::path::PathBuf>,
+    display: RawDisplayHandle,
+    window: RawWindowHandle,
+) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = (display, window);
+        windows::release_mouse_capture();
+        return windows::start_file_drag(paths).map(|_| ());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return linux::start_file_drag(paths, display, window).map(|_| ());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (paths, display, window);
+        Err(crate::utils::errors::BExplorerError::Shell(
+            "Native file dragging is not available on this macOS backend yet".into(),
+        ))
+    }
+}
+
+/// Returns whether an external drag remains active after dispatching any
+/// pending native data-transfer events.
+pub fn poll_external_file_drag(display: RawDisplayHandle, window: RawWindowHandle) -> Result<bool> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return linux::poll_native_file_drag(display, window);
+    }
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = (display, window);
+        Ok(false)
+    }
+}
+
+/// Retrieves local file paths delivered by a native drag-and-drop operation.
+/// Window toolkits currently do not surface this event on Wayland, so Linux
+/// reads it from its data-device bridge; other platforms can use the toolkit
+/// event and therefore return an empty list here.
+pub fn take_external_file_drops(
+    display: RawDisplayHandle,
+    window: RawWindowHandle,
+) -> Vec<Vec<PathBuf>> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return linux::take_native_file_drops(display, window).0;
+    }
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = (display, window);
+        Vec::new()
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub use windows::PortableDeviceSession;
 
-#[cfg(not(target_os = "windows"))]
-pub struct PortableDeviceSession;
+pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        return path.exists().then(|| path.to_path_buf());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return linux::mounted_network_path(path);
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return macos::mounted_network_path(path);
+    }
+
+    #[cfg(not(any(target_os = "windows", unix)))]
+    {
+        let _ = path;
+        None
+    }
+}
 
 #[cfg(target_os = "windows")]
-pub fn apply_small_window_corners(handle: &raw_window_handle::WindowHandle<'_>) -> Result<()> {
-    windows::apply_small_window_corners(handle)
+pub fn apply_window_corners(
+    window: &WindowHandle<'_>,
+    _display: &DisplayHandle<'_>,
+    _radius: u32,
+) -> Result<()> {
+    windows::apply_small_window_corners(window)
+}
+
+pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
+    window: &W,
+    mode: VibrancyMode,
+    intensity: u8,
+    dark: bool,
+) -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        use window_vibrancy::{
+            apply_acrylic, apply_blur, apply_mica, clear_acrylic, clear_blur, clear_mica,
+        };
+
+        let _ = clear_mica(window);
+        let _ = clear_acrylic(window);
+        let _ = clear_blur(window);
+        match mode {
+            VibrancyMode::None => Ok(false),
+            VibrancyMode::Mica => apply_mica(window, Some(dark))
+                .map(|_| true)
+                .map_err(|error| {
+                    crate::utils::errors::BExplorerError::Operation(error.to_string())
+                }),
+            VibrancyMode::Acrylic => {
+                let alpha = (intensity.clamp(15, 90) as u16 * 2).min(220) as u8;
+                let color = if dark {
+                    (24, 29, 32, alpha)
+                } else {
+                    (246, 246, 248, alpha)
+                };
+                apply_acrylic(window, Some(color))
+                    .map(|_| true)
+                    .map_err(|error| {
+                        crate::utils::errors::BExplorerError::Operation(error.to_string())
+                    })
+            }
+            VibrancyMode::Blur => apply_blur(window, None).map(|_| true).map_err(|error| {
+                crate::utils::errors::BExplorerError::Operation(error.to_string())
+            }),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use window_vibrancy::{
+            NSVisualEffectMaterial, NSVisualEffectState, apply_vibrancy, clear_vibrancy,
+        };
+
+        let _ = clear_vibrancy(window);
+        match mode {
+            VibrancyMode::None => Ok(false),
+            VibrancyMode::Mica | VibrancyMode::Acrylic | VibrancyMode::Blur => apply_vibrancy(
+                window,
+                NSVisualEffectMaterial::WindowBackground,
+                Some(NSVisualEffectState::FollowsWindowActiveState),
+                Some(f64::from(intensity.clamp(15, 90)) / 7.0),
+            )
+            .map(|_| true)
+            .map_err(|error| crate::utils::errors::BExplorerError::Operation(error.to_string())),
+        }
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // KWin exposes blur through an optional Wayland protocol. If it is not
+        // present (GNOME, wlroots, X11, or a KWin instance without the effect),
+        // report that fact so the UI can use its opaque, readable fallback
+        // instead of pretending that transparency is a blur effect.
+        let _ = (intensity, dark);
+        if mode == VibrancyMode::Blur {
+            match linux::ensure_kwin_blur_effect() {
+                Ok(true) => crate::utils::log::info(
+                    "Requested KWin Blur effect before binding BExplorer's Wayland surface",
+                ),
+                Ok(false) => {}
+                Err(error) => crate::utils::log::info(format!(
+                    "Could not load KWin Blur effect automatically: {error}"
+                )),
+            }
+        }
+        match linux::apply_window_blur(window, mode == VibrancyMode::Blur) {
+            Ok(()) => Ok(mode == VibrancyMode::Blur),
+            Err(error) => {
+                crate::utils::log::info(format!(
+                    "Native Wayland blur unavailable; using opaque fallback: {error}"
+                ));
+                Ok(false)
+            }
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn apply_window_corners(
+    window: &WindowHandle<'_>,
+    display: &DisplayHandle<'_>,
+    radius: u32,
+) -> Result<()> {
+    linux::apply_window_corners(window, display, radius)
+}
+
+#[cfg(target_os = "macos")]
+pub fn apply_window_corners(
+    _window: &WindowHandle<'_>,
+    _display: &DisplayHandle<'_>,
+    _radius: u32,
+) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
 pub fn install_autoplay_cancel(handle: &raw_window_handle::WindowHandle<'_>) -> Result<()> {
     windows::install_autoplay_cancel(handle)
-}
-
-#[cfg(target_os = "windows")]
-pub fn file_paste_shortcut_down() -> bool {
-    windows::file_paste_shortcut_down()
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn file_paste_shortcut_down() -> bool {
-    false
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn apply_small_window_corners(_handle: &raw_window_handle::WindowHandle<'_>) -> Result<()> {
-    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -134,15 +334,6 @@ pub fn set_volume_label(_path: &Path, _label: &str) -> Result<()> {
     Err(crate::utils::errors::BExplorerError::Operation(
         "Renaming drive labels is currently available on Windows only".into(),
     ))
-}
-
-#[cfg(not(target_os = "windows"))]
-pub fn drive_info(_path: &Path) -> DriveInfo {
-    DriveInfo {
-        volume_label: None,
-        file_system: None,
-        kind: DriveKind::Unknown,
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -231,16 +422,6 @@ pub fn portable_device_thumbnail(
     windows::portable_device_thumbnail(device_id, object_id, max_bytes, allow_default_resource)
 }
 
-#[cfg(not(target_os = "windows"))]
-pub fn portable_device_thumbnail(
-    _device_id: &str,
-    _object_id: &str,
-    _max_bytes: usize,
-    _allow_default_resource: bool,
-) -> Option<Vec<u8>> {
-    None
-}
-
 #[cfg(target_os = "windows")]
 pub fn network_computers() -> Vec<NetworkComputerInfo> {
     windows::network_computers()
@@ -258,7 +439,12 @@ pub fn network_computers() -> Vec<NetworkComputerInfo> {
     linux::network_computers()
 }
 
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+pub fn network_computers() -> Vec<NetworkComputerInfo> {
+    macos::network_computers()
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 pub fn network_computers() -> Vec<NetworkComputerInfo> {
     Vec::new()
 }
@@ -280,7 +466,12 @@ pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
     linux::network_computers()
 }
 
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
+    macos::network_computers()
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
     Vec::new()
 }
@@ -435,7 +626,12 @@ pub fn network_shares(host: &str) -> Vec<NetworkShareInfo> {
     linux::network_shares(host)
 }
 
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+pub fn network_shares(host: &str) -> Vec<NetworkShareInfo> {
+    macos::network_shares(host)
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 pub fn network_shares(_host: &str) -> Vec<NetworkShareInfo> {
     Vec::new()
 }
