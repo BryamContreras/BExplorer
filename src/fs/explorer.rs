@@ -1333,6 +1333,9 @@ fn linux_drive_kind(mount: &LinuxMount) -> DriveKind {
     if matches!(fs_type.as_str(), "iso9660" | "udf") || linux_mount_source_is_optical(mount) {
         return DriveKind::Optical;
     }
+    if linux_mount_source_is_loop(mount) {
+        return DriveKind::External;
+    }
     if matches!(fs_type.as_str(), "ramfs" | "tmpfs") {
         return DriveKind::RamDisk;
     }
@@ -1352,6 +1355,19 @@ fn linux_mount_source_is_optical(mount: &LinuxMount) -> bool {
     linux_mount_block_name(mount)
         .and_then(|name| linux_block_value(&name, "device/type"))
         .is_some_and(|value| value.trim() == "5")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mount_source_is_loop(mount: &LinuxMount) -> bool {
+    linux_mount_block_name(mount).is_some_and(|name| {
+        let Some(suffix) = name.strip_prefix("loop") else {
+            return false;
+        };
+        let (device, partition) = suffix.split_once('p').unwrap_or((suffix, ""));
+        !device.is_empty()
+            && device.bytes().all(|byte| byte.is_ascii_digit())
+            && (partition.is_empty() || partition.bytes().all(|byte| byte.is_ascii_digit()))
+    })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -1604,5 +1620,19 @@ mod tests {
         };
 
         assert_eq!(linux_drive_kind(&mount), DriveKind::Optical);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn classifies_loop_partitions_as_ejectable_images() {
+        let mount = LinuxMount {
+            major_minor: "999:999".into(),
+            mount_point: PathBuf::from("/media/dev/resizeme"),
+            fs_type: "ext2".into(),
+            source: "/dev/loop7p2".into(),
+        };
+
+        assert_eq!(linux_drive_kind(&mount), DriveKind::External);
+        assert!(linux_drive_kind(&mount).is_ejectable());
     }
 }

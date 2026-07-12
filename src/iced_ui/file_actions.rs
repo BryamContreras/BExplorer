@@ -252,6 +252,12 @@ impl BExplorerIced {
     ) -> crate::utils::errors::Result<()> {
         self.validate_transfer(&sources, &destination)?;
 
+        if self.active_transfers.is_empty() && self.transfer_queue.is_empty() {
+            self.transfer_batch_totals.clear();
+        } else if !self.transfer_in_progress_for(pane) {
+            self.transfer_batch_totals.remove(&pane);
+        }
+
         self.next_transfer_id = self.next_transfer_id.saturating_add(1);
         // Only one completed mutating operation can be undone. A new transfer
         // supersedes a previously available undo immediately.
@@ -422,6 +428,7 @@ impl BExplorerIced {
                     completed_roots,
                 } => {
                     let active = self.active_transfers.remove(&job_id);
+                    let owner_pane = active.as_ref().map(|active| active.pane);
                     let mut progress = self.transfer_progress.remove(&job_id).or_else(|| {
                         active
                             .as_ref()
@@ -430,6 +437,12 @@ impl BExplorerIced {
                     if let Some(progress) = &mut progress {
                         progress.state = TransferState::Finished;
                         progress.files_done = completed_files;
+                        let completed_bytes = progress.total_bytes.max(progress.copied_bytes);
+                        if let Some(owner_pane) = owner_pane {
+                            let totals = self.transfer_batch_totals.entry(owner_pane).or_default();
+                            totals.0 = totals.0.saturating_add(completed_bytes);
+                            totals.1 = totals.1.saturating_add(completed_bytes);
+                        }
                         self.transfer_history.push_back(TransferHistoryState {
                             progress: progress.clone(),
                             finished_at: Instant::now(),
@@ -557,17 +570,77 @@ impl BExplorerIced {
         progress_window_size_for_item_count(self.transfer_items().len())
     }
 
-    pub(super) fn transfer_progress_fraction(&self) -> Option<f32> {
-        let mut copied = 0_u64;
-        let mut total = 0_u64;
-        for progress in self.transfer_progress.values() {
-            copied = copied.saturating_add(progress.copied_bytes);
-            total = total.saturating_add(progress.total_bytes);
+    pub(super) fn transfer_in_progress_for(&self, pane: PaneId) -> bool {
+        self.active_transfers
+            .values()
+            .any(|active| active.pane == pane)
+            || self.transfer_queue.iter().any(|queued| queued.pane == pane)
+    }
+
+    pub(super) fn transfer_progress_fraction_for(&self, pane: PaneId) -> Option<f32> {
+        let (mut copied, mut total) = self
+            .transfer_batch_totals
+            .get(&pane)
+            .copied()
+            .unwrap_or_default();
+        for (job_id, progress) in &self.transfer_progress {
+            let owner = self
+                .active_transfers
+                .get(job_id)
+                .map(|active| active.pane)
+                .or_else(|| {
+                    self.transfer_queue
+                        .iter()
+                        .find(|queued| queued.job.id == *job_id)
+                        .map(|queued| queued.pane)
+                });
+            if owner == Some(pane) {
+                copied = copied.saturating_add(progress.copied_bytes);
+                total = total.saturating_add(progress.total_bytes);
+            }
         }
         if total == 0 {
             None
         } else {
             Some((copied as f32 / total as f32).clamp(0.0, 1.0))
+        }
+    }
+
+    pub(super) fn transfer_progress_fraction(&self) -> Option<f32> {
+        let mut copied = 0_u64;
+        let mut total = 0_u64;
+        for pane in [PaneId::Primary, PaneId::Secondary] {
+            let (pane_copied, pane_total) = self
+                .transfer_batch_totals
+                .get(&pane)
+                .copied()
+                .unwrap_or_default();
+            copied = copied.saturating_add(pane_copied);
+            total = total.saturating_add(pane_total);
+        }
+        for progress in self.transfer_progress.values() {
+            copied = copied.saturating_add(progress.copied_bytes);
+            total = total.saturating_add(progress.total_bytes);
+        }
+        (total > 0).then(|| (copied as f32 / total as f32).clamp(0.0, 1.0))
+    }
+
+    pub(super) fn collapse_transfer_ownership_to_primary(&mut self) {
+        for active in self.active_transfers.values_mut() {
+            active.pane = PaneId::Primary;
+        }
+        for queued in &mut self.transfer_queue {
+            queued.pane = PaneId::Primary;
+        }
+        if let Some((secondary_copied, secondary_total)) =
+            self.transfer_batch_totals.remove(&PaneId::Secondary)
+        {
+            let primary = self
+                .transfer_batch_totals
+                .entry(PaneId::Primary)
+                .or_default();
+            primary.0 = primary.0.saturating_add(secondary_copied);
+            primary.1 = primary.1.saturating_add(secondary_total);
         }
     }
 
@@ -599,6 +672,9 @@ impl BExplorerIced {
         let Some(entry) = self.context_entry(pane, target) else {
             return Task::none();
         };
+        if is_mountable_disk_image_entry(&entry) {
+            return self.mount_disk_image(pane, entry.path);
+        }
         // A browsable archive is a virtual folder. Open its root in a fresh
         // tab so the original directory remains available, matching normal
         // archive browsing in desktop file managers.

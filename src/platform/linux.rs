@@ -3,8 +3,15 @@
 //! Keep Linux integrations behind the neutral functions exported from
 //! `crate::platform` so application and filesystem code stay portable.
 
+#[cfg(target_os = "linux")]
+mod gnome_blur;
 mod kwin_blur;
+#[cfg(target_os = "linux")]
+mod storage_watch;
 mod wayland_drag;
+
+#[cfg(target_os = "linux")]
+pub use storage_watch::storage_change_receiver;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -162,13 +169,20 @@ pub fn apply_window_corners(
     Ok(())
 }
 
-/// Requests compositor blur for a Wayland surface when KWin advertises its
-/// optional blur protocol. Other Linux backends deliberately remain a no-op so
-/// transparent windows still work everywhere.
+/// Requests native KWin blur, or registers the application with Blur My Shell
+/// on GNOME Wayland. Unsupported backends return an error when enabling so the
+/// UI can switch to its readable opaque fallback.
 pub fn apply_window_blur<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
     window: &W,
     enabled: bool,
-) -> Result<()> {
+) -> Result<bool> {
+    #[cfg(target_os = "linux")]
+    {
+        if gnome_blur::is_gnome_wayland() {
+            return gnome_blur::set_application_blur(enabled);
+        }
+    }
+
     let display_handle = window.display_handle().map_err(|error| {
         BExplorerError::Operation(format!("Could not access display handle for blur: {error}"))
     })?;
@@ -176,7 +190,29 @@ pub fn apply_window_blur<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
         BExplorerError::Operation(format!("Could not access window handle for blur: {error}"))
     })?;
 
-    kwin_blur::set_window_blur(display_handle.as_raw(), window_handle.as_raw(), enabled)
+    if !matches!(display_handle.as_raw(), RawDisplayHandle::Wayland(_)) {
+        return if enabled {
+            Err(BExplorerError::Operation(
+                "Window blur is unavailable on this Linux display backend".into(),
+            ))
+        } else {
+            Ok(false)
+        };
+    }
+
+    kwin_blur::set_window_blur(display_handle.as_raw(), window_handle.as_raw(), enabled)?;
+    Ok(enabled)
+}
+
+pub fn is_gnome_wayland() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        gnome_blur::is_gnome_wayland()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }
 
 /// Loads KWin's built-in Blur effect through its session D-Bus interface.

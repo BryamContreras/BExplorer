@@ -3,6 +3,7 @@ mod drives;
 mod icons;
 mod network;
 mod portable;
+mod storage_watch;
 mod util;
 mod window;
 
@@ -27,5 +28,6 @@ pub use portable::{
     portable_device_objects_result, portable_device_thumbnail, portable_devices,
     portable_download_file, portable_upload_file,
 };
+pub use storage_watch::{install_storage_change_notifications, storage_change_receiver};
 #[allow(unused_imports)]
 pub use window::{apply_small_window_corners, install_autoplay_cancel, normalize_long_path};

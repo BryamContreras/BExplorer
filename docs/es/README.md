@@ -39,6 +39,13 @@ navegacion y busqueda; `view.rs` y `view/` contienen la composicion visual;
 `file_actions.rs` las operaciones y transferencias; `advanced.rs` conecta
 Defender, MTP y unidades; y `helpers/` agrupa presentacion y persistencia.
 
+En KDE Plasma/Wayland el difuminado usa el protocolo nativo opcional de KWin.
+GNOME/Mutter no publica el efecto interno de GNOME Shell como protocolo para
+clientes Wayland, por lo que BExplorer se integra con la extension opcional
+Blur My Shell. Al activar Difuminado se registra el identificador `bexplorer`
+en la lista de aplicaciones de la extension y al desactivarlo se retira. Si la
+extension no esta instalada o habilitada, se conserva un fondo opaco legible.
+
 Antes de una beta publica conviene seguir probando:
 
 - instalaciones limpias de Windows;

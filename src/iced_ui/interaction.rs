@@ -18,11 +18,14 @@ impl BExplorerIced {
         self.context_archive_submenu_hovered = false;
         self.context_new_parent_hovered = false;
         self.context_new_submenu_hovered = false;
-        let position = self
-            .pane_pointer
-            .filter(|(pointer_pane, _)| *pointer_pane == pane)
-            .map(|(_, point)| point)
-            .unwrap_or(Point::new(18.0, 92.0));
+        let position = if matches!(target, ContextTarget::SidebarDrive(_)) {
+            self.cursor_position
+        } else {
+            self.pane_pointer
+                .filter(|(pointer_pane, _)| *pointer_pane == pane)
+                .map(|(_, point)| point)
+                .unwrap_or(Point::new(18.0, 92.0))
+        };
         self.context_menu = None;
         self.context_menu_request_id = self.context_menu_request_id.saturating_add(1);
         let menu = ContextMenuState {
@@ -42,6 +45,9 @@ impl BExplorerIced {
             backdrop_origin: Point::new(x, y),
             ..menu
         };
+        if matches!(target, ContextTarget::SidebarDrive(_)) {
+            return self.capture_context_menu_backdrop(menu);
+        }
         let local_paste_available = self
             .file_clipboard
             .as_ref()
@@ -261,6 +267,15 @@ impl BExplorerIced {
         const MENU_WIDTH: f32 = 258.0;
         let menu_height = self.context_menu_height(menu);
 
+        if matches!(menu.target, ContextTarget::SidebarDrive(_)) {
+            return (
+                (menu.position.x + 2.0)
+                    .clamp(8.0, (self.window_size.width - MENU_WIDTH - 8.0).max(8.0)),
+                (menu.position.y + 2.0)
+                    .clamp(8.0, (self.window_size.height - menu_height - 8.0).max(8.0)),
+            );
+        }
+
         let point = menu.position;
         let pane_x = self.pane_global_x(menu.pane);
         // `PanePointerMoved` is relative to the file-table surface. Convert
@@ -290,6 +305,7 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn context_menu_height(&self, menu: &ContextMenuState) -> f32 {
         match menu.target {
             ContextTarget::Background => 218.0,
+            ContextTarget::SidebarDrive(_) => 48.0,
             ContextTarget::Entry(_) => {
                 let has_extract_action =
                     self.context_entry(menu.pane, menu.target)
@@ -307,11 +323,8 @@ impl BExplorerIced {
                 let advanced_rows = self
                     .context_entry(menu.pane, menu.target)
                     .map(|entry| {
-                        usize::from(
-                            entry.category == FileCategory::DiskImage
-                                && !explorer::is_virtual_path(&entry.path)
-                                && operations::can_mount_disk_image(&entry.path),
-                        ) + usize::from(entry.drive_kind.is_some_and(DriveKind::is_ejectable))
+                        usize::from(is_mountable_disk_image_entry(&entry))
+                            + usize::from(entry.drive_kind.is_some_and(DriveKind::is_ejectable))
                             + usize::from(
                                 cfg!(target_os = "windows")
                                     && !explorer::is_virtual_path(&entry.path),
@@ -446,6 +459,7 @@ impl BExplorerIced {
     ) -> Option<FileEntry> {
         match target {
             ContextTarget::Entry(index) => self.pane(pane).entries.get(index).cloned(),
+            ContextTarget::SidebarDrive(index) => self.sidebar_storage_entries.get(index).cloned(),
             ContextTarget::Background => None,
         }
     }
@@ -1287,7 +1301,8 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn pointer_tracking_active(&self) -> bool {
-        self.resize_drag.is_some()
+        self.sidebar_pointer_inside
+            || self.resize_drag.is_some()
             || self.tab_drag.is_some()
             || self.sidebar_section_drag.is_some()
             || self.rubber_band.is_some()
@@ -1350,7 +1365,13 @@ impl BExplorerIced {
 
     pub(in crate::iced_ui) fn sidebar_section_layout_height(&self, section: SidebarSection) -> f32 {
         let item_count = if self.sidebar_section_expanded(section) {
-            sidebar_items_for_section(&self.config, section, self.is_spanish()).len() as f32
+            sidebar_items_for_section(
+                &self.config,
+                &self.sidebar_storage_entries,
+                section,
+                self.is_spanish(),
+            )
+            .len() as f32
         } else {
             0.0
         };

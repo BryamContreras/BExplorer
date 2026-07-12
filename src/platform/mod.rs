@@ -19,6 +19,9 @@ use raw_window_handle::{
 use crate::app::config::VibrancyMode;
 use crate::utils::errors::Result;
 
+#[cfg(target_os = "linux")]
+pub const LINUX_APPLICATION_ID: &str = "bexplorer";
+
 #[cfg(target_os = "windows")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriveKind {
@@ -82,6 +85,31 @@ pub struct NativeIconImage {
     pub rgba: Vec<u8>,
     pub width: usize,
     pub height: usize,
+}
+
+pub fn storage_change_receiver() -> std::sync::mpsc::Receiver<()> {
+    #[cfg(target_os = "windows")]
+    return windows::storage_change_receiver();
+
+    #[cfg(target_os = "linux")]
+    return linux::storage_change_receiver();
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        receiver
+    }
+}
+
+pub fn prepare_storage_change_notifications(window: &WindowHandle<'_>) -> Result<()> {
+    #[cfg(target_os = "windows")]
+    return windows::install_storage_change_notifications(window);
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window;
+        Ok(())
+    }
 }
 
 /// Initializes the native drag-and-drop bridge for a window. This is a no-op
@@ -255,10 +283,10 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        // KWin exposes blur through an optional Wayland protocol. If it is not
-        // present (GNOME, wlroots, X11, or a KWin instance without the effect),
-        // report that fact so the UI can use its opaque, readable fallback
-        // instead of pretending that transparency is a blur effect.
+        // KWin exposes blur through an optional Wayland protocol. GNOME uses
+        // Blur My Shell because Mutter has no client-facing blur protocol.
+        // Unsupported backends report an inactive result so the UI retains its
+        // opaque, readable fallback.
         let _ = (intensity, dark);
         if mode == VibrancyMode::Blur {
             match linux::ensure_kwin_blur_effect() {
@@ -272,7 +300,7 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
             }
         }
         match linux::apply_window_blur(window, mode == VibrancyMode::Blur) {
-            Ok(()) => Ok(mode == VibrancyMode::Blur),
+            Ok(active) => Ok(active),
             Err(error) => {
                 crate::utils::log::info(format!(
                     "Native Wayland blur unavailable; using opaque fallback: {error}"

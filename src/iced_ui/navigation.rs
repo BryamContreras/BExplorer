@@ -41,6 +41,13 @@ impl BExplorerIced {
         )
     }
 
+    pub(in crate::iced_ui) fn refresh_sidebar_storage(&self) -> Task<Message> {
+        Task::perform(
+            run_blocking_file_operation(explorer::list_this_pc_entries),
+            Message::SidebarStorageLoaded,
+        )
+    }
+
     pub(in crate::iced_ui) fn refresh_panes_for_directories(
         &mut self,
         fallback: PaneId,
@@ -442,6 +449,7 @@ impl BExplorerIced {
         if self.tabs.len() <= 1 {
             return;
         }
+        let was_split = self.split.is_some();
         let pane_tabs = self.tab_indices_for_pane(pane);
         let Some(&removed) = pane_tabs.get(slot) else {
             return;
@@ -503,6 +511,9 @@ impl BExplorerIced {
                 .and_then(|index| rebase_tab_index(index, removed))
                 .unwrap_or(0)
                 .min(last);
+        }
+        if was_split && self.split.is_none() {
+            self.collapse_transfer_ownership_to_primary();
         }
     }
 

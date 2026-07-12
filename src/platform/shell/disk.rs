@@ -199,12 +199,19 @@ pub(super) fn mount_disk_image(path: &Path) -> Result<()> {
     if mounted_disk_image_root(&canonical).is_ok() {
         return Ok(());
     }
-    for loop_device in linux_loop_devices_for_file(&canonical) {
-        if mount_linux_block_or_partition(&loop_device).is_ok()
+    let existing_loops = linux_loop_devices_for_file(&canonical);
+    for loop_device in &existing_loops {
+        if mount_linux_block_or_partition(loop_device).is_ok()
             && mounted_disk_image_root(&canonical).is_ok()
         {
             return Ok(());
         }
+    }
+    if !existing_loops.is_empty() {
+        return Err(BExplorerError::Shell(format!(
+            "Could not mount the primary volume from {}",
+            path.display()
+        )));
     }
 
     let output = Command::new("udisksctl")
@@ -218,8 +225,17 @@ pub(super) fn mount_disk_image(path: &Path) -> Result<()> {
 
     let block = parse_udisks_block_device(&udisks_output_text(&output))
         .ok_or_else(|| BExplorerError::Shell("udisksctl did not report a loop device".into()))?;
-    mount_linux_block_or_partition(&block)?;
-    wait_for_mounted_disk_image_root(&canonical).map(|_| ())
+    let result = mount_linux_block_or_partition(&block)
+        .and_then(|_| wait_for_mounted_disk_image_root(&canonical).map(|_| ()));
+    if result.is_err() {
+        let _ = run_udisks_status(
+            Command::new("udisksctl")
+                .args(["loop-delete", "--block-device"])
+                .arg(&block),
+            "Could not clean up loop device",
+        );
+    }
+    result
 }
 
 #[cfg(target_os = "macos")]
@@ -539,7 +555,7 @@ fn linux_block_partitions(block: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(sys_block) else {
         return Vec::new();
     };
-    let mut partitions = entries
+    let partitions = entries
         .flatten()
         .filter_map(|entry| {
             let child = entry.file_name().to_string_lossy().to_string();
@@ -548,8 +564,40 @@ fn linux_block_partitions(block: &Path) -> Vec<PathBuf> {
                 .then(|| PathBuf::from("/dev").join(child))
         })
         .collect::<Vec<_>>();
-    partitions.sort();
+    preferred_linux_partition_paths(
+        partitions
+            .into_iter()
+            .map(|path| {
+                let size = linux_block_size_sectors(&path).unwrap_or(0);
+                (path, size)
+            })
+            .collect(),
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_block_size_sectors(block: &Path) -> Option<u64> {
+    let name = block.file_name()?.to_str()?;
+    std::fs::read_to_string(Path::new("/sys/class/block").join(name).join("size"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn preferred_linux_partition_paths(mut partitions: Vec<(PathBuf, u64)>) -> Vec<PathBuf> {
+    partitions.sort_by(|(left_path, left_size), (right_path, right_size)| {
+        right_size
+            .cmp(left_size)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    let largest = partitions.first().map(|(_, size)| *size).unwrap_or(0);
     partitions
+        .into_iter()
+        .filter(|(_, size)| largest == 0 || *size == 0 || size.saturating_mul(100) >= largest)
+        .map(|(path, _)| path)
+        .collect()
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -656,6 +704,16 @@ mod tests {
             parse_udisks_block_device("Mapped file image.iso as /dev/loop7."),
             Some(PathBuf::from("/dev/loop7"))
         );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn disk_image_partition_selection_ignores_tiny_auxiliary_volume() {
+        let partitions = preferred_linux_partition_paths(vec![
+            (PathBuf::from("/dev/loop7p2"), 256),
+            (PathBuf::from("/dev/loop7p1"), 1_662_912),
+        ]);
+        assert_eq!(partitions, vec![PathBuf::from("/dev/loop7p1")]);
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

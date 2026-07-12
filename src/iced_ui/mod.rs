@@ -159,6 +159,9 @@ enum ScrollbarAxis {
 #[derive(Clone, Debug)]
 enum Message {
     Loaded(PaneId, u64, Result<Vec<FileEntry>, String>),
+    SidebarStorageLoaded(Result<Vec<FileEntry>, String>),
+    StorageDevicesChanged,
+    RefreshStorageAfterDeviceChange,
     CloseTab(PaneId, usize),
     NewTab(PaneId),
     StartTabDrag(PaneId, usize),
@@ -180,6 +183,8 @@ enum Message {
     ToggleSplitPaneMenus,
     ToggleSplitPreviewPanels,
     ToggleSidebar,
+    SidebarPointerEntered,
+    SidebarPointerExited,
     SidebarAnimationTick,
     PreviewPanelAnimationTick,
     PopupFadeAnimationTick,
@@ -191,6 +196,7 @@ enum Message {
     AddressChanged(String),
     SubmitAddress(PaneId),
     RowPressed(PaneId, usize),
+    OpenSidebarDriveContext(PaneId, usize),
     Back(PaneId),
     Forward(PaneId),
     Up(PaneId),
@@ -282,7 +288,7 @@ enum Message {
     PermanentDeleteFinished(PaneId, Result<usize, String>),
     CancelPermanentDelete,
     DiskImageMounted(PaneId, PathBuf, Result<PathBuf, String>),
-    DriveEjected(PaneId, Result<(), String>),
+    DriveEjected(PaneId, PathBuf, Result<(), String>),
     CancelDefenderScan,
     CloseDefenderPanel,
     RemoveDefenderThreats,
@@ -358,6 +364,7 @@ enum Message {
 enum ContextTarget {
     Background,
     Entry(usize),
+    SidebarDrive(usize),
 }
 
 /// A floating in-window surface that needs a cached blurred backdrop.
@@ -1013,6 +1020,7 @@ struct SidebarItem {
     label: String,
     target: SidebarTarget,
     icon: &'static str,
+    context_drive_index: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -1028,6 +1036,8 @@ struct BExplorerIced {
     split: Option<SplitRuntime>,
     primary: PaneState,
     secondary: PaneState,
+    sidebar_storage_entries: Vec<FileEntry>,
+    storage_refresh_scheduled: bool,
     search_mode_menu_open: Option<PaneId>,
     new_menu_open: Option<PaneId>,
     title_menu_open: bool,
@@ -1070,6 +1080,7 @@ struct BExplorerIced {
     transfer_queue: VecDeque<QueuedTransferState>,
     active_transfers: HashMap<u64, ActiveTransferState>,
     transfer_progress: HashMap<u64, TransferProgress>,
+    transfer_batch_totals: HashMap<PaneId, (u64, u64)>,
     transfer_history: VecDeque<TransferHistoryState>,
     active_archives: HashMap<u64, ActiveArchiveState>,
     archive_history: VecDeque<ArchiveHistoryState>,
@@ -1083,6 +1094,7 @@ struct BExplorerIced {
     transfer_conflict_dialog: Option<PendingTransferConflict>,
     pending_new_folder_rename: Option<(PaneId, PathBuf)>,
     pending_file_operations: HashSet<PaneId>,
+    mounting_disk_images: HashSet<PathBuf>,
     // A text-input submit and the global key listener can observe the same
     // Enter in either order. Keep Enter from opening the just-renamed item
     // while that event finishes propagating.
@@ -1110,6 +1122,7 @@ struct BExplorerIced {
     shortcuts_open: bool,
     shortcut_capture: Option<ShortcutAction>,
     sidebar_visible: bool,
+    sidebar_pointer_inside: bool,
     window_maximized: bool,
     main_window_id: Option<window::Id>,
     transfer_window_id: Option<window::Id>,
@@ -1356,6 +1369,7 @@ impl BExplorerIced {
         let preview_panel_progress = if config.show_preview_panel { 1.0 } else { 0.0 };
         let mut app = Self {
             sidebar_visible: config.sidebar_visible,
+            sidebar_pointer_inside: false,
             sidebar_progress: if config.sidebar_visible { 1.0 } else { 0.0 },
             preview_panel_progress,
             window_size: initial_size,
@@ -1367,6 +1381,8 @@ impl BExplorerIced {
             split,
             primary: PaneState::default(),
             secondary: PaneState::default(),
+            sidebar_storage_entries: Vec::new(),
+            storage_refresh_scheduled: false,
             search_mode_menu_open: None,
             new_menu_open: None,
             title_menu_open: false,
@@ -1409,6 +1425,7 @@ impl BExplorerIced {
             transfer_queue: VecDeque::new(),
             active_transfers: HashMap::new(),
             transfer_progress: HashMap::new(),
+            transfer_batch_totals: HashMap::new(),
             transfer_history: VecDeque::new(),
             active_archives: HashMap::new(),
             archive_history: VecDeque::new(),
@@ -1422,6 +1439,7 @@ impl BExplorerIced {
             transfer_conflict_dialog: None,
             pending_new_folder_rename: None,
             pending_file_operations: HashSet::new(),
+            mounting_disk_images: HashSet::new(),
             suppress_open_after_rename_until: None,
             rubber_band: None,
             file_drag: None,
@@ -1459,6 +1477,7 @@ impl BExplorerIced {
         let mut tasks = vec![
             open_main_window.map(Message::MainWindowOpened),
             app.start_load(PaneId::Primary),
+            app.refresh_sidebar_storage(),
             sidebar_icons,
         ];
         if matches!(app.config.theme, ThemePreference::System) {
@@ -1717,6 +1736,7 @@ impl BExplorerIced {
                 if cancel_autoplay {
                     #[cfg(target_os = "windows")]
                     let _ = crate::platform::install_autoplay_cancel(&window_handle);
+                    let _ = crate::platform::prepare_storage_change_notifications(&window_handle);
                 }
             }
             if apply_vibrancy {
@@ -1796,6 +1816,11 @@ impl BExplorerIced {
         } else {
             Subscription::none()
         };
+        let storage_changes = if cfg!(any(target_os = "windows", target_os = "linux")) {
+            Subscription::run(storage_change_stream)
+        } else {
+            Subscription::none()
+        };
 
         Subscription::batch([
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
@@ -1810,6 +1835,7 @@ impl BExplorerIced {
             external_drag_tick,
             search_tick,
             system_theme_changes,
+            storage_changes,
         ])
     }
 }
