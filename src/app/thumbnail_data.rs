@@ -362,9 +362,8 @@ fn render_svg_image(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
     let options = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_data(&bytes, &options).ok()?;
     let base_size = tree.size().to_int_size();
-    let scale = (max_edge as f32 / base_size.width().max(base_size.height()) as f32)
-        .min(1.0)
-        .max(0.01);
+    let scale =
+        (max_edge as f32 / base_size.width().max(base_size.height()) as f32).clamp(0.01, 1.0);
     let width = ((base_size.width() as f32 * scale).round() as u32).max(1);
     let height = ((base_size.height() as f32 * scale).round() as u32).max(1);
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;

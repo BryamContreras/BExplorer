@@ -43,15 +43,14 @@ impl BExplorerIced {
                     self.queue_visible_images(pane),
                     scroll_pane_to_top_task(pane),
                 ];
-                if let Some((_, path)) = pending_new_folder {
-                    if let Some(index) = self
+                if let Some((_, path)) = pending_new_folder
+                    && let Some(index) = self
                         .pane(pane)
                         .entries
                         .iter()
                         .position(|entry| entry.path == path)
-                    {
-                        tasks.push(self.context_begin_rename(pane, ContextTarget::Entry(index)));
-                    }
+                {
+                    tasks.push(self.context_begin_rename(pane, ContextTarget::Entry(index)));
                 }
                 if !self.pane(pane).search_text.trim().is_empty() {
                     tasks.push(self.start_recursive_search(pane));
@@ -2155,18 +2154,17 @@ impl BExplorerIced {
                     .transfer_queue
                     .iter()
                     .position(|queued| queued.job.id == id)
+                    && let Some(queued) = self.transfer_queue.remove(index)
                 {
-                    if let Some(queued) = self.transfer_queue.remove(index) {
-                        let mut progress = self
-                            .transfer_progress
-                            .remove(&id)
-                            .unwrap_or_else(|| TransferProgress::pending(&queued.job));
-                        progress.state = TransferState::Cancelled;
-                        self.transfer_history.push_back(TransferHistoryState {
-                            progress,
-                            finished_at: Instant::now(),
-                        });
-                    }
+                    let mut progress = self
+                        .transfer_progress
+                        .remove(&id)
+                        .unwrap_or_else(|| TransferProgress::pending(&queued.job));
+                    progress.state = TransferState::Cancelled;
+                    self.transfer_history.push_back(TransferHistoryState {
+                        progress,
+                        finished_at: Instant::now(),
+                    });
                 }
                 self.sync_transfer_window_size_task()
             }

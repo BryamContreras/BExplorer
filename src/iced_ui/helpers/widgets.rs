@@ -1,13 +1,19 @@
 use super::*;
 use iced::widget::row;
+
+#[derive(Clone, Copy)]
+pub(in crate::iced_ui) struct TableHeaderConfig {
+    pub pane: PaneId,
+    pub column: TableColumn,
+    pub resizable: bool,
+    pub sort_active: bool,
+    pub sort_ascending: bool,
+}
+
 pub(in crate::iced_ui) fn table_header(
     label: &'static str,
     width: f32,
-    pane: PaneId,
-    column: TableColumn,
-    resizable: bool,
-    sort_active: bool,
-    sort_ascending: bool,
+    config: TableHeaderConfig,
     palette: Palette,
     font_size: f32,
 ) -> Element<'static, Message> {
@@ -23,8 +29,8 @@ pub(in crate::iced_ui) fn table_header(
         mix_color(palette.header_bg, Color::BLACK, 0.12)
     };
     let header_background = chrome_glass_background(palette, header_background);
-    let indicator = if sort_active {
-        if sort_ascending { "▲" } else { "▼" }
+    let indicator = if config.sort_active {
+        if config.sort_ascending { "▲" } else { "▼" }
     } else {
         ""
     };
@@ -45,10 +51,10 @@ pub(in crate::iced_ui) fn table_header(
     .width(Length::Fill)
     .height(DETAIL_HEADER_HEIGHT)
     .padding([0, 8])
-    .on_press(Message::SortColumn(pane, column))
+    .on_press(Message::SortColumn(config.pane, config.column))
     .style(move |_, status| button_style(palette, false, status));
 
-    let content: Element<'static, Message> = if resizable {
+    let content: Element<'static, Message> = if config.resizable {
         row![
             label_button,
             mouse_area(
@@ -63,7 +69,7 @@ pub(in crate::iced_ui) fn table_header(
                 .height(Length::Fill)
                 .width(DETAIL_COLUMN_HANDLE_WIDTH)
             )
-            .on_press(Message::StartColumnResize(pane, column))
+            .on_press(Message::StartColumnResize(config.pane, config.column))
             .interaction(mouse::Interaction::ResizingColumn),
         ]
         .align_y(Alignment::Center)
@@ -157,10 +163,10 @@ pub(in crate::iced_ui) fn format_size(size: Option<u64>) -> String {
 #[cfg(test)]
 pub(in crate::iced_ui) fn tile_metadata_label(entry: &FileEntry) -> String {
     let type_label = entry.type_label();
-    if matches!(&entry.kind, EntryKind::File | EntryKind::Other) {
-        if let Some(size) = entry.size {
-            return format!("{type_label} · {}", format_size(Some(size)));
-        }
+    if matches!(&entry.kind, EntryKind::File | EntryKind::Other)
+        && let Some(size) = entry.size
+    {
+        return format!("{type_label} · {}", format_size(Some(size)));
     }
     type_label
 }

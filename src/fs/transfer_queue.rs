@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -15,6 +15,7 @@ use crate::utils::errors::{BExplorerError, Result};
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
 static RESERVED_TARGETS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+static TRANSFER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum TransferKind {
@@ -264,13 +265,22 @@ fn run_transfer_inner(
                 mark_source_skipped(job, source, &mut runtime, tx);
                 continue;
             }
-            if job.conflict_policy == ConflictPolicy::Replace && target.exists() {
-                remove_source(&target)?;
-            }
             runtime.track_reserved(&target);
-            match job.kind {
-                TransferKind::Copy => copy_path(job, source, &target, tx, control, &mut runtime)?,
-                TransferKind::Move => move_path(job, source, &target, tx, control, &mut runtime)?,
+            let replacing = job.conflict_policy == ConflictPolicy::Replace && target.exists();
+            match (job.kind, replacing) {
+                (TransferKind::Copy, true) => {
+                    replace_path_staged(job, source, &target, tx, control, &mut runtime)?
+                }
+                (TransferKind::Move, true) => {
+                    replace_path_staged(job, source, &target, tx, control, &mut runtime)?;
+                    remove_source(source)?;
+                }
+                (TransferKind::Copy, false) => {
+                    copy_path(job, source, &target, tx, control, &mut runtime)?
+                }
+                (TransferKind::Move, false) => {
+                    move_path(job, source, &target, tx, control, &mut runtime)?
+                }
             }
             runtime.track_completed_root(source, &target);
         }
@@ -410,17 +420,31 @@ fn run_portable_to_local_transfer(
                 mark_portable_source_skipped(job, source, runtime, tx);
                 continue;
             };
-            if job.conflict_policy == ConflictPolicy::Replace && target.exists() {
-                remove_source(&target)?;
-            }
             runtime.track_reserved(&target);
-            if !target.exists() {
+            let replacing = job.conflict_policy == ConflictPolicy::Replace && target.exists();
+            if replacing {
+                let staging = unused_transfer_sibling(&target, "staging");
+                let mut event = |event: portable::PortableTransferEvent<'_>| {
+                    handle_portable_event(job, event, runtime, tx, control)
+                };
+                let export_result = portable::export_to_local(source, &staging, &mut event);
+                if let Err(error) = export_result {
+                    let _ = remove_source(&staging);
+                    return Err(error);
+                }
+                sync_copied_path(&staging)?;
+                if let Err(error) = commit_staged_path(&staging, &target) {
+                    let _ = remove_source(&staging);
+                    return Err(error);
+                }
+            } else {
                 runtime.track_created(&target);
+                let mut event = |event: portable::PortableTransferEvent<'_>| {
+                    handle_portable_event(job, event, runtime, tx, control)
+                };
+                portable::export_to_local(source, &target, &mut event)?;
+                sync_copied_path(&target)?;
             }
-            let mut event = |event: portable::PortableTransferEvent<'_>| {
-                handle_portable_event(job, event, runtime, tx, control)
-            };
-            portable::export_to_local(source, &target, &mut event)?;
             continue;
         }
 
@@ -447,13 +471,18 @@ fn run_portable_to_local_transfer(
             mark_source_skipped(job, source, runtime, tx);
             continue;
         }
-        if job.conflict_policy == ConflictPolicy::Replace && target.exists() {
-            remove_source(&target)?;
-        }
         runtime.track_reserved(&target);
-        match job.kind {
-            TransferKind::Copy => copy_path(job, source, &target, tx, control, runtime)?,
-            TransferKind::Move => move_path(job, source, &target, tx, control, runtime)?,
+        let replacing = job.conflict_policy == ConflictPolicy::Replace && target.exists();
+        match (job.kind, replacing) {
+            (TransferKind::Copy, true) => {
+                replace_path_staged(job, source, &target, tx, control, runtime)?
+            }
+            (TransferKind::Move, true) => {
+                replace_path_staged(job, source, &target, tx, control, runtime)?;
+                remove_source(source)?;
+            }
+            (TransferKind::Copy, false) => copy_path(job, source, &target, tx, control, runtime)?,
+            (TransferKind::Move, false) => move_path(job, source, &target, tx, control, runtime)?,
         }
         runtime.track_completed_root(source, &target);
     }
@@ -524,6 +553,91 @@ fn move_path(
     Ok(())
 }
 
+/// Copies an entire top-level item beside its final destination and commits it
+/// only after every file has been flushed. The existing destination remains
+/// untouched if copying, pausing, cancellation, or syncing fails.
+fn replace_path_staged(
+    job: &TransferJob,
+    source: &Path,
+    target: &Path,
+    tx: &Sender<TransferMessage>,
+    control: &TransferControl,
+    runtime: &mut TransferRuntime,
+) -> Result<()> {
+    let staging = unused_transfer_sibling(target, "staging");
+    let result = (|| {
+        copy_path(job, source, &staging, tx, control, runtime)?;
+        sync_copied_path(&staging)?;
+        commit_staged_path(&staging, target)
+    })();
+    if result.is_err() {
+        let _ = remove_source(&staging);
+    }
+    result
+}
+
+fn commit_staged_path(staging: &Path, target: &Path) -> Result<()> {
+    let staging_metadata = fs::symlink_metadata(staging)?;
+    let target_metadata = fs::symlink_metadata(target)?;
+    if staging_metadata.is_file() && target_metadata.is_file() {
+        crate::utils::atomic_file::replace_file(staging, target)?;
+        crate::utils::atomic_file::sync_parent(target);
+        return Ok(());
+    }
+
+    let backup = unused_transfer_sibling(target, "backup");
+    fs::rename(target, &backup)?;
+    if let Err(commit_error) = fs::rename(staging, target) {
+        if let Err(rollback_error) = fs::rename(&backup, target) {
+            return Err(BExplorerError::Operation(format!(
+                "Could not install the completed replacement ({commit_error}); the original remains at {} because restoring it also failed: {rollback_error}",
+                backup.display()
+            )));
+        }
+        return Err(commit_error.into());
+    }
+    crate::utils::atomic_file::sync_parent(target);
+    if let Err(error) = remove_source(&backup) {
+        crate::utils::log::error(format!(
+            "Replacement completed but its backup could not be removed at {}: {error}",
+            backup.display()
+        ));
+    }
+    Ok(())
+}
+
+fn unused_transfer_sibling(target: &Path, purpose: &str) -> PathBuf {
+    let parent = target.parent().unwrap_or_else(|| Path::new(""));
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("item");
+    loop {
+        let sequence = TRANSFER_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(
+            ".{name}.bexplorer-{purpose}-{}-{sequence}",
+            std::process::id()
+        ));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+}
+
+fn sync_copied_path(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.is_file() {
+        fs::File::open(path)?.sync_all()?;
+    } else if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            sync_copied_path(&entry?.path())?;
+        }
+        #[cfg(unix)]
+        fs::File::open(path)?.sync_all()?;
+    }
+    Ok(())
+}
+
 fn copy_path(
     job: &TransferJob,
     source: &Path,
@@ -582,7 +696,7 @@ fn copy_path(
             runtime.last_emit = Instant::now();
         }
     }
-    output.flush()?;
+    output.sync_all()?;
     runtime.files_done = runtime.files_done.saturating_add(1);
     emit_progress(job, &current_name, TransferState::Copying, runtime, tx);
     Ok(())
@@ -874,6 +988,16 @@ mod tests {
             .completed_files
     }
 
+    fn assert_no_transfer_artifacts(directory: &Path) {
+        let artifacts = fs::read_dir(directory)
+            .expect("read transfer directory")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().contains(".bexplorer-"))
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        assert!(artifacts.is_empty(), "temporary artifacts: {artifacts:?}");
+    }
+
     #[test]
     fn keep_both_creates_numbered_copy_on_conflict() {
         let root = temp_transfer_dir("keep-both");
@@ -954,6 +1078,7 @@ mod tests {
             b"new"
         );
         assert!(!destination.join("report (2).txt").exists());
+        assert_no_transfer_artifacts(&destination);
         fs::remove_dir_all(root).expect("cleanup temp transfer dir");
     }
 
@@ -977,6 +1102,41 @@ mod tests {
             b"new"
         );
         assert!(!existing.join("stale.txt").exists());
+        assert_no_transfer_artifacts(&destination);
+        fs::remove_dir_all(root).expect("cleanup temp transfer dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_staged_directory_copy_preserves_the_existing_destination() {
+        use std::os::unix::net::UnixListener;
+
+        let root = temp_transfer_dir("replace-failure");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        let source = source_dir.join("project");
+        let existing = destination.join("project");
+        fs::create_dir_all(&source).expect("create source project");
+        fs::create_dir_all(&existing).expect("create destination project");
+        fs::write(existing.join("important.txt"), b"keep me").expect("write existing file");
+        let _socket = UnixListener::bind(source.join("not-a-regular-file"))
+            .expect("create unsupported source socket");
+
+        let (tx, _rx) = mpsc::channel();
+        let job = TransferJob {
+            id: 1,
+            sources: vec![source],
+            destination: destination.clone(),
+            kind: TransferKind::Copy,
+            conflict_policy: ConflictPolicy::Replace,
+        };
+        assert!(run_transfer_inner(&job, &tx, &TransferControl::new()).is_err());
+
+        assert_eq!(
+            fs::read(existing.join("important.txt")).expect("read preserved destination"),
+            b"keep me"
+        );
+        assert_no_transfer_artifacts(&destination);
         fs::remove_dir_all(root).expect("cleanup temp transfer dir");
     }
 

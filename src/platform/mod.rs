@@ -138,7 +138,7 @@ pub fn start_external_file_drag(
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return linux::start_file_drag(paths, display, window).map(|_| ());
+        linux::start_file_drag(paths, display, window).map(|_| ())
     }
 
     #[cfg(target_os = "macos")]
@@ -155,7 +155,7 @@ pub fn start_external_file_drag(
 pub fn poll_external_file_drag(display: RawDisplayHandle, window: RawWindowHandle) -> Result<bool> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return linux::poll_native_file_drag(display, window);
+        linux::poll_native_file_drag(display, window)
     }
 
     #[cfg(not(all(unix, not(target_os = "macos"))))]
@@ -175,7 +175,7 @@ pub fn take_external_file_drops(
 ) -> Vec<Vec<PathBuf>> {
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return linux::take_native_file_drops(display, window).0;
+        linux::take_native_file_drops(display, window).0
     }
 
     #[cfg(not(all(unix, not(target_os = "macos"))))]
@@ -196,7 +196,7 @@ pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     {
-        return linux::mounted_network_path(path);
+        linux::mounted_network_path(path)
     }
 
     #[cfg(target_os = "macos")]

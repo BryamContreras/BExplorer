@@ -311,8 +311,7 @@ impl AppConfig {
     pub fn save(&self) -> Result<()> {
         let path = crate::utils::paths::config_file()?;
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, text)?;
-        Ok(())
+        crate::utils::atomic_file::write(&path, text.as_bytes())
     }
 
     pub fn remember_recent(&mut self, path: PathBuf) {

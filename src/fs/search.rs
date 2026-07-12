@@ -152,13 +152,15 @@ where
                 && crate::fs::archive_listing::has_browsable_archive_extension(&path)
                 && !search_archive_entries(
                     &path,
-                    &matcher,
-                    cancelled,
-                    &mut batch,
-                    &mut matched_count,
-                    &mut truncated,
-                    &mut last_batch,
-                    &mut on_batch,
+                    &mut ArchiveSearchContext {
+                        matcher: &matcher,
+                        cancelled,
+                        batch: &mut batch,
+                        matched_count: &mut matched_count,
+                        truncated: &mut truncated,
+                        last_batch: &mut last_batch,
+                        on_batch: &mut on_batch,
+                    },
                 )
             {
                 pending.clear();
@@ -172,16 +174,17 @@ where
     SearchOutput { truncated }
 }
 
-fn search_archive_entries<F>(
-    archive_path: &Path,
-    matcher: &NameMatcher,
-    cancelled: &AtomicBool,
-    batch: &mut Vec<FileEntry>,
-    matched_count: &mut usize,
-    truncated: &mut bool,
-    last_batch: &mut Instant,
-    on_batch: &mut F,
-) -> bool
+struct ArchiveSearchContext<'a, F> {
+    matcher: &'a NameMatcher,
+    cancelled: &'a AtomicBool,
+    batch: &'a mut Vec<FileEntry>,
+    matched_count: &'a mut usize,
+    truncated: &'a mut bool,
+    last_batch: &'a mut Instant,
+    on_batch: &'a mut F,
+}
+
+fn search_archive_entries<F>(archive_path: &Path, context: &mut ArchiveSearchContext<'_, F>) -> bool
 where
     F: FnMut(Vec<FileEntry>) -> bool,
 {
@@ -200,7 +203,7 @@ where
         if index > 0 && index.is_multiple_of(SEARCH_YIELD_INTERVAL) {
             std::thread::sleep(SEARCH_COOPERATIVE_PAUSE);
         }
-        if cancelled.load(Ordering::Relaxed) {
+        if context.cancelled.load(Ordering::Relaxed) {
             return false;
         }
 
@@ -209,7 +212,7 @@ where
             continue;
         };
 
-        if !matcher.matches(&name) && !matcher.matches(&internal_name) {
+        if !context.matcher.matches(&name) && !context.matcher.matches(&internal_name) {
             continue;
         }
 
@@ -242,15 +245,15 @@ where
 
         if !push_search_entry(
             result,
-            batch,
-            matched_count,
-            truncated,
-            last_batch,
-            on_batch,
+            context.batch,
+            context.matched_count,
+            context.truncated,
+            context.last_batch,
+            context.on_batch,
         ) {
             return false;
         }
-        if *truncated {
+        if *context.truncated {
             return false;
         }
     }
@@ -363,12 +366,12 @@ where
                     pending.clear();
                     break;
                 }
-                if batch.len() >= SEARCH_BATCH_SIZE || last_batch.elapsed() >= SEARCH_BATCH_INTERVAL
+                if (batch.len() >= SEARCH_BATCH_SIZE
+                    || last_batch.elapsed() >= SEARCH_BATCH_INTERVAL)
+                    && !flush_search_batch(&mut batch, &mut last_batch, &mut on_batch)
                 {
-                    if !flush_search_batch(&mut batch, &mut last_batch, &mut on_batch) {
-                        pending.clear();
-                        break;
-                    }
+                    pending.clear();
+                    break;
                 }
             }
         }

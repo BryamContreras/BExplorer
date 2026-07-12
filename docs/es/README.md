@@ -13,6 +13,9 @@ trabajo futuro.
 
 BExplorer esta en fase beta.
 
+La fase actual se concentra en endurecimiento, pruebas en instalaciones limpias
+y distribucion; las funciones principales del explorador ya estan conectadas.
+
 La version actual ya es usable para pruebas internas en Windows, especialmente
 para gestion de archivos, comprimidos, vista dividida, red, dispositivos MTP y
 operaciones comunes como copiar, mover, eliminar y renombrar. En Linux ya hay
@@ -33,11 +36,12 @@ La busqueda completa, vistas previas, comprimidos, Defender, MTP, montaje de
 imagenes, red y arrastrar y soltar nativo estan conectados a la interfaz.
 
 La interfaz `iced` esta organizada por responsabilidad en `src/iced_ui`:
-`mod.rs` contiene el estado y los mensajes; `update.rs` procesa eventos;
-`interaction.rs`, `navigation.rs` y `search_state.rs` gestionan entrada,
-navegacion y busqueda; `view.rs` y `view/` contienen la composicion visual;
-`file_actions.rs` las operaciones y transferencias; `advanced.rs` conecta
-Defender, MTP y unidades; y `helpers/` agrupa presentacion y persistencia.
+`mod.rs` coordina la aplicacion, `state.rs` contiene mensajes y estado, y
+`update.rs` conserva el despacho exhaustivo de eventos. `interaction/` separa
+contexto, seleccion, arrastre y geometria; `view/` separa paneles, menus,
+dialogos, tablas y cuadriculas; `file_actions.rs` gestiona operaciones y
+transferencias; `advanced.rs` conecta Defender, MTP y unidades; y `helpers/`
+agrupa componentes compartidos.
 
 En KDE Plasma/Wayland el difuminado usa el protocolo nativo opcional de KWin.
 GNOME/Mutter no publica el efecto interno de GNOME Shell como protocolo para
@@ -73,6 +77,10 @@ Antes de una beta publica conviene seguir probando:
 - Arrastrar y soltar dentro de BExplorer y entre BExplorer y Windows.
 - Cola de transferencias con progreso, pausa, cancelacion y manejo de
   conflictos.
+- Reemplazos locales preparados: primero se copia y sincroniza el archivo o
+  directorio completo junto al destino y solo entonces se sustituye el
+  elemento anterior. Si la preparacion falla, el destino previo permanece
+  intacto.
 - Compresiones concurrentes con ventana propia de progreso, que vuelve a primer
   plano al iniciar una transferencia o compresion nueva.
 - Acciones elevadas de remediacion y exclusiones de Microsoft Defender.
@@ -126,7 +134,8 @@ Comandos recomendados:
 
 ```bash
 cargo check
-cargo test
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
 cargo run
 ```
 
@@ -158,13 +167,14 @@ El motor 7-Zip incluido en `vendor/7zip-src/` mantiene sus propias licencias.
 Consulta `THIRD_PARTY_NOTICES.md` y los archivos originales en
 `vendor/7zip-src/DOC/`.
 
-## Beta Interna
+## Fiabilidad de datos
 
-La primera beta interna esta marcada como:
+La configuracion y la sesion se escriben en archivos temporales hermanos, se
+sincronizan y se reemplazan atomicamente. Las copias con conflicto `Reemplazar`
+tambien usan una copia preparada y sincronizada antes de modificar el destino.
+La suite actual en Linux ejecuta 78 pruebas, incluyendo una regresion que fuerza
+un fallo durante un reemplazo y verifica que el destino original se conserva.
 
-```text
-v0.1.0-beta.1
-```
-
-Esta version sirve para pruebas controladas. Todavia no esta firmada, por lo que
-Windows puede mostrar advertencias al ejecutar el archivo.
+Las compilaciones de desarrollo siguen sin firma; Windows puede mostrar una
+advertencia al ejecutar binarios distribuidos manualmente. Este documento no
+representa una nueva version ni un release.
