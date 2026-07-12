@@ -558,13 +558,61 @@ pub(in crate::iced_ui) fn selected_button_style(
     }
 }
 
+pub(in crate::iced_ui) fn file_item_button_style(
+    palette: Palette,
+    selected: bool,
+    status: button::Status,
+) -> button::Style {
+    if selected && is_light_palette(palette) {
+        return button::Style {
+            background: Some(mix_color(palette.hover, palette.accent, 0.34).into()),
+            text_color: palette.text,
+            border: border::rounded(4),
+            ..button::Style::default()
+        };
+    }
+    selected_button_style(palette, selected, status)
+}
+
+pub(in crate::iced_ui) fn dialog_button_style(
+    palette: Palette,
+    selected: bool,
+    status: button::Status,
+) -> button::Style {
+    let mut style = selected_button_style(palette, selected, status);
+    if selected {
+        style.background = Some(accent_gradient(palette).into());
+        style.text_color = palette.accent_text;
+    }
+    if !selected {
+        style.background = match status {
+            button::Status::Hovered => Some(translucent_color(palette.accent, 0.07).into()),
+            button::Status::Pressed => Some(translucent_color(palette.accent, 0.11).into()),
+            _ => Some(Color::TRANSPARENT.into()),
+        };
+    }
+    let border_color = if selected {
+        translucent_color(palette.accent_text, 0.72)
+    } else {
+        palette.strong_border
+    };
+    button::Style {
+        border: border::rounded(4).color(border_color).width(1),
+        ..style
+    }
+}
+
 pub(in crate::iced_ui) fn row_background_style(
     palette: Palette,
     selected: bool,
 ) -> container::Style {
     let style = container::Style::default().border(border::rounded(4));
     if selected {
-        style.background(accent_gradient(palette))
+        if is_light_palette(palette) {
+            style.background(mix_color(palette.hover, palette.accent, 0.34))
+        } else {
+            style.background(accent_gradient(palette))
+        }
     } else {
         style.background(Color::TRANSPARENT)
     }

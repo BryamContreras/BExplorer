@@ -18,7 +18,23 @@ pub(in crate::iced_ui) fn mix_color(color: Color, target: Color, amount: f32) ->
 }
 
 pub(in crate::iced_ui) fn hover_tint(palette: Palette) -> Color {
-    mix_color(palette.hover, palette.accent, 0.32)
+    mix_color(palette.hover, palette.accent, 0.22)
+}
+
+pub(in crate::iced_ui) fn is_light_palette(palette: Palette) -> bool {
+    palette.page_bg.r + palette.page_bg.g + palette.page_bg.b > 1.8
+}
+
+pub(in crate::iced_ui) fn selected_item_text_color(palette: Palette, secondary: bool) -> Color {
+    if is_light_palette(palette) {
+        if secondary {
+            palette.muted_text
+        } else {
+            palette.text
+        }
+    } else {
+        palette.accent_text
+    }
 }
 
 /// Keeps chrome such as the address field and detail headers visibly glassy

@@ -110,33 +110,38 @@ impl BExplorerIced {
             row![
                 Space::new().width(Length::Fill),
                 Button::new(text(self.localized("Cancelar", "Cancel")))
+                    .padding([6, 10])
                     .on_press(Message::CancelDefenderScan)
-                    .style(move |_, status| button_style(palette, false, status)),
+                    .style(move |_, status| dialog_button_style(palette, false, status)),
             ]
         } else {
             let remove = Button::new(text(self.localized("Eliminar amenazas", "Remove threats")))
+                .padding([6, 10])
                 .on_press_maybe((threats > 0).then_some(Message::RemoveDefenderThreats))
-                .style(move |_, status| button_style(palette, false, status));
+                .style(move |_, status| dialog_button_style(palette, false, status));
             let exclude = Button::new(text(self.localized("Añadir exclusión", "Add exclusion")))
+                .padding([6, 10])
                 .on_press_maybe(
                     summary
                         .is_some_and(|item| !item.paths.is_empty())
                         .then_some(Message::ExcludeDefenderPaths),
                 )
-                .style(move |_, status| button_style(palette, false, status));
+                .style(move |_, status| dialog_button_style(palette, false, status));
             let security = Button::new(text(
                 self.localized("Seguridad de Windows", "Windows Security"),
             ))
+            .padding([6, 10])
             .on_press(Message::OpenWindowsSecurity)
-            .style(move |_, status| button_style(palette, false, status));
+            .style(move |_, status| dialog_button_style(palette, false, status));
             row![
                 remove,
                 exclude,
                 security,
                 Space::new().width(Length::Fill),
                 Button::new(text(self.localized("Cerrar", "Close")))
+                    .padding([6, 10])
                     .on_press(Message::CloseDefenderPanel)
-                    .style(move |_, status| selected_button_style(palette, true, status)),
+                    .style(move |_, status| dialog_button_style(palette, true, status)),
             ]
             .spacing(8)
         };

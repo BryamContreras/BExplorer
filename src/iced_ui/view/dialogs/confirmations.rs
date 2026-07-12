@@ -43,7 +43,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 14])
                 .on_press(Message::CancelPermanentDelete)
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| dialog_button_style(palette, false, status)),
                 Button::new(
                     text(self.localized("Eliminar", "Delete"))
                         .size(self.font_size())
@@ -51,7 +51,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 14])
                 .on_press(Message::ConfirmPermanentDelete)
-                .style(move |_, status| selected_button_style(palette, true, status)),
+                .style(move |_, status| dialog_button_style(palette, true, status)),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -140,7 +140,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 12])
                 .on_press(Message::CancelTransferConflict)
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| dialog_button_style(palette, false, status)),
                 Button::new(
                     text(self.localized("Omitir", "Skip"))
                         .size(self.font_size())
@@ -148,7 +148,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 12])
                 .on_press(Message::ResolveTransferConflict(ConflictPolicy::Skip))
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| dialog_button_style(palette, false, status)),
                 Button::new(
                     text(self.localized("Reemplazar", "Replace"))
                         .size(self.font_size())
@@ -156,7 +156,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 12])
                 .on_press(Message::ResolveTransferConflict(ConflictPolicy::Replace))
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| dialog_button_style(palette, false, status)),
                 Button::new(
                     text(self.localized("Conservar ambos", "Keep both"))
                         .size(self.font_size())
@@ -164,7 +164,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 12])
                 .on_press(Message::ResolveTransferConflict(ConflictPolicy::KeepBoth))
-                .style(move |_, status| selected_button_style(palette, true, status)),
+                .style(move |_, status| dialog_button_style(palette, true, status)),
             ]
             .spacing(7)
             .align_y(Alignment::Center),

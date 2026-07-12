@@ -121,12 +121,12 @@ impl BExplorerIced {
             self.pane(pane).selected.contains(&entry.path) || self.is_file_drag_target(pane, index);
         let presentation_opacity = self.entry_presentation_opacity(entry, selected);
         let color = if selected {
-            palette.accent_text
+            selected_item_text_color(palette, false)
         } else {
             translucent_color(palette.text, presentation_opacity)
         };
         let secondary = if selected {
-            palette.accent_text
+            selected_item_text_color(palette, true)
         } else {
             translucent_color(palette.muted_text, presentation_opacity)
         };
@@ -305,7 +305,7 @@ impl BExplorerIced {
             .height(metrics.cell_height)
             .padding(if metrics.tile { 6 } else { 8 })
             .on_press(Message::RowPressed(pane, index))
-            .style(move |_, status| selected_button_style(palette, selected, status))
+            .style(move |_, status| file_item_button_style(palette, selected, status))
             .into()
         };
 

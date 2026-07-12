@@ -271,9 +271,9 @@ pub(in crate::iced_ui) fn drive_capacity_bar(
 ) -> Element<'static, Message> {
     const HEIGHT: f32 = 10.0;
     const RADIUS: f32 = 2.0;
-    let inset = if selected { 1.0 } else { 0.0 };
-    let inner_height = HEIGHT - inset * 2.0;
     let light_theme = palette.page_bg.r + palette.page_bg.g + palette.page_bg.b > 1.8;
+    let inset = if selected && !light_theme { 1.0 } else { 0.0 };
+    let inner_height = HEIGHT - inset * 2.0;
 
     let filled = ((progress.clamp(0.0, 1.0) * 1000.0).round() as u16).min(1000);
     let empty = 1000_u16.saturating_sub(filled);
@@ -309,15 +309,7 @@ pub(in crate::iced_ui) fn drive_capacity_bar(
         .padding(inset)
         .clip(true)
         .style(move |_| {
-            let border_color = if selected {
-                if light_theme {
-                    Color::WHITE
-                } else {
-                    Color::BLACK
-                }
-            } else {
-                palette.border
-            };
+            let border_color = palette.border;
             let background = if selected {
                 if light_theme {
                     mix_color(palette.input_bg, Color::WHITE, 0.28)
@@ -378,7 +370,7 @@ pub(in crate::iced_ui) fn transfer_control_button(
 ) -> Button<'static, Message> {
     Button::new(text(label).size(font_size).color(palette.text))
         .padding([4, 9])
-        .style(move |_, status| button_style(palette, false, status))
+        .style(move |_, status| dialog_button_style(palette, false, status))
         .on_press(message)
 }
 

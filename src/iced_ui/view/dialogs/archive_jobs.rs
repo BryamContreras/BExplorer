@@ -25,10 +25,10 @@ impl BExplorerIced {
                         palette.text
                     }),
             )
-            .width(Length::Fill)
+            .width(Length::Fixed(88.0))
             .padding([7, 12])
             .on_press(Message::SetArchiveFormat(format))
-            .style(move |_, status| selected_button_style(palette, dialog.format == format, status))
+            .style(move |_, status| dialog_button_style(palette, dialog.format == format, status))
         };
         let method_choice = |label: &'static str, method: ArchiveCompressionMethod| {
             Button::new(
@@ -43,7 +43,7 @@ impl BExplorerIced {
             .width(Length::Fill)
             .padding([7, 10])
             .on_press(Message::SetArchiveCompressionMethod(method))
-            .style(move |_, status| selected_button_style(palette, dialog.method == method, status))
+            .style(move |_, status| dialog_button_style(palette, dialog.method == method, status))
         };
 
         let password_visibility_button = |shown: bool, message_down, message_up| {
@@ -139,7 +139,7 @@ impl BExplorerIced {
         )
         .padding([4, 0])
         .on_press(Message::ToggleArchivePassword)
-        .style(move |_, status| button_style(palette, false, status));
+        .style(move |_, status| dialog_button_style(palette, false, status));
 
         let panel = column![
             row![
@@ -221,7 +221,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 14])
                 .on_press(Message::CancelArchiveDialog)
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| dialog_button_style(palette, false, status)),
                 Button::new(
                     text(self.localized("Comprimir", "Compress"))
                         .size(font_size)
@@ -229,7 +229,7 @@ impl BExplorerIced {
                 )
                 .padding([7, 14])
                 .on_press(Message::ConfirmArchiveDialog)
-                .style(move |_, status| selected_button_style(palette, true, status)),
+                .style(move |_, status| dialog_button_style(palette, true, status)),
             ]
             .spacing(8)
             .align_y(Alignment::Center),

@@ -28,7 +28,7 @@ impl BExplorerIced {
         }
 
         let color = if selected {
-            palette.accent_text
+            selected_item_text_color(palette, false)
         } else if matches!(&entry.kind, EntryKind::Folder | EntryKind::Drive) {
             palette.folder
         } else {
@@ -65,7 +65,7 @@ impl BExplorerIced {
         }
 
         let color = if selected {
-            palette.accent_text
+            selected_item_text_color(palette, false)
         } else if matches!(&entry.kind, EntryKind::Folder | EntryKind::Drive) {
             palette.folder
         } else {
@@ -274,12 +274,12 @@ impl BExplorerIced {
         let presentation_opacity = self.entry_presentation_opacity(entry, selected);
         let table_font_size = (self.font_size() - 0.5).max(11.0);
         let text_color = if selected {
-            palette.accent_text
+            selected_item_text_color(palette, false)
         } else {
             translucent_color(palette.text, presentation_opacity)
         };
         let meta_color = if selected {
-            palette.accent_text
+            selected_item_text_color(palette, true)
         } else {
             translucent_color(palette.muted_text, presentation_opacity)
         };
@@ -376,7 +376,7 @@ impl BExplorerIced {
             .padding(0)
             .width(Length::Fixed(widths.total_width()))
             .on_press(Message::RowPressed(pane, index))
-            .style(move |_, status| selected_button_style(palette, selected, status))
+            .style(move |_, status| file_item_button_style(palette, selected, status))
             .into()
         };
 

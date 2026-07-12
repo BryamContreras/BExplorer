@@ -16,7 +16,7 @@ impl BExplorerIced {
         ))
         .padding(2)
         .on_press(Message::ToggleColorPicker)
-        .style(move |_, status| button_style(palette, color_picker_open, status));
+        .style(move |_, status| dialog_button_style(palette, color_picker_open, status));
 
         let header = container(
             row![
