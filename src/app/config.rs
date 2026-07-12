@@ -254,14 +254,14 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            theme: ThemePreference::Dark,
+            theme: ThemePreference::System,
             language: "en".into(),
             font_size: 12.5,
-            accent_color: [0, 170, 215],
+            accent_color: [3, 117, 172],
             window_size: [1280.0, 760.0],
             favorites: Vec::new(),
             recent_paths: Vec::new(),
-            show_hidden: false,
+            show_hidden: true,
             show_extensions: true,
             show_icon_borders: true,
             show_action_bar: true,
@@ -372,4 +372,19 @@ fn try_load() -> Result<AppConfig> {
     }
     let text = std::fs::read_to_string(path)?;
     Ok(serde_json::from_str(&text)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn new_install_defaults_follow_system_and_show_all_file_names() {
+        let config = AppConfig::default();
+        assert_eq!(config.theme, ThemePreference::System);
+        assert_eq!(config.accent_color, [3, 117, 172]);
+        assert_eq!(config.vibrancy, VibrancyMode::None);
+        assert!(config.show_extensions);
+        assert!(config.show_hidden);
+    }
 }
