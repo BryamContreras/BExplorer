@@ -300,6 +300,16 @@ mod tests {
     }
 
     #[test]
+    fn network_printers_use_the_printer_fallback_icon() {
+        let mut printer = test_entry("Office printer", EntryKind::Drive, None);
+        printer.drive_kind = Some(DriveKind::NetworkPrinter);
+        assert_eq!(fallback_icon_label(&printer), "printer");
+
+        printer.drive_kind = Some(DriveKind::NetworkComputer);
+        assert_eq!(fallback_icon_label(&printer), "pc");
+    }
+
+    #[test]
     fn address_breadcrumbs_include_this_pc_and_each_directory_level() {
         let path = filesystem_root_path().join("home").join("dev");
         let breadcrumbs = address_breadcrumbs(Some(&path));

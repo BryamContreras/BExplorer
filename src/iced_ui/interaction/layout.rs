@@ -60,6 +60,15 @@ impl BExplorerIced {
             })
     }
 
+    pub(in crate::iced_ui) fn async_progress_animation_active(&self) -> bool {
+        [PaneId::Primary, PaneId::Secondary]
+            .into_iter()
+            .any(|pane| {
+                let state = self.pane(pane);
+                state.loading || state.mounting_disk_image || state.search_receiver.is_some()
+            })
+    }
+
     pub(in crate::iced_ui) fn preview_panel_animation_target(&self) -> f32 {
         if self
             .preview_panel_target_pane

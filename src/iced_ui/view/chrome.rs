@@ -352,8 +352,8 @@ impl BExplorerIced {
                         .content_fit(ContentFit::Contain)
                         .into()
                 })
-                .unwrap_or_else(|| inline_icon(item.icon, palette.accent, 18.0)),
-            _ => inline_icon(item.icon, palette.accent, 18.0),
+                .unwrap_or_else(|| inline_icon(item.icon, palette.accent, 16.0)),
+            _ => inline_icon(item.icon, palette.accent, 16.0),
         };
         let label = if matches!(&item.target, SidebarTarget::Navigate(None)) {
             self.localized("Este equipo", "This PC").to_owned()
@@ -371,7 +371,12 @@ impl BExplorerIced {
         .align_y(Alignment::Center);
 
         let button = Button::new(row)
-            .padding([6, 14])
+            .padding(Padding {
+                top: 6.0,
+                right: 14.0,
+                bottom: 6.0,
+                left: 26.0,
+            })
             .width(Length::Fill)
             .height(SIDEBAR_ITEM_HEIGHT)
             .style(move |_, status| selected_button_style(palette, highlighted, status));

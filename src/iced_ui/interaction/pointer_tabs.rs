@@ -178,8 +178,8 @@ impl BExplorerIced {
         self.save_session();
 
         Task::batch([
-            self.start_load(PaneId::Primary),
-            self.start_load(PaneId::Secondary),
+            self.start_navigation_load(PaneId::Primary),
+            self.start_navigation_load(PaneId::Secondary),
         ])
     }
 

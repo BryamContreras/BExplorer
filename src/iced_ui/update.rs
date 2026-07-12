@@ -14,6 +14,7 @@ impl BExplorerIced {
                     return Task::none();
                 }
                 state.loading = false;
+                state.search_progress_phase = 0.0;
                 match result {
                     Ok(entries) => {
                         state.status = format!("{} elements", entries.len());
@@ -109,7 +110,7 @@ impl BExplorerIced {
                 self.tab_drag = None;
                 self.close_tab(pane, slot);
                 self.save_session();
-                self.start_load(pane)
+                self.start_navigation_load(pane)
             }
             Message::NewTab(pane) => self.open_path_in_new_tab(pane, paths::home_dir()),
             Message::StartTabDrag(pane, slot) => {
@@ -135,7 +136,7 @@ impl BExplorerIced {
                 if was_active {
                     Task::none()
                 } else {
-                    self.start_load(pane)
+                    self.start_navigation_load(pane)
                 }
             }
             Message::StartSidebarSectionDrag(section) => {
@@ -366,6 +367,18 @@ impl BExplorerIced {
                 }
                 Task::none()
             }
+            Message::AsyncProgressTick => {
+                for pane in [PaneId::Primary, PaneId::Secondary] {
+                    let state = self.pane_mut(pane);
+                    if state.loading || state.mounting_disk_image || state.search_receiver.is_some()
+                    {
+                        state.search_progress_phase =
+                            (state.progress_animation_started.elapsed().as_secs_f32() / 1.25)
+                                .rem_euclid(1.0);
+                    }
+                }
+                Task::none()
+            }
             Message::ToggleSplit => {
                 self.new_menu_open = None;
                 self.popup_backdrop = None;
@@ -400,7 +413,7 @@ impl BExplorerIced {
                 // tab highlighting, and preview ownership all move with it.
                 self.focus_pane(PaneId::Secondary);
                 self.save_session();
-                self.start_load(PaneId::Secondary)
+                self.start_navigation_load(PaneId::Secondary)
             }
             Message::Navigate(pane, path) => {
                 self.new_menu_open = None;
@@ -424,7 +437,7 @@ impl BExplorerIced {
                     save_config(&self.config);
                 }
                 self.save_session();
-                Task::batch([self.start_load(pane), sidebar_icon_task])
+                Task::batch([self.start_navigation_load(pane), sidebar_icon_task])
             }
             Message::BeginAddressEdit(pane) => {
                 self.focus_pane(pane);
@@ -533,7 +546,7 @@ impl BExplorerIced {
                         self.reset_fixed_root_presentation(pane);
                     }
                     self.save_session();
-                    self.start_load(pane)
+                    self.start_navigation_load(pane)
                 } else {
                     Task::none()
                 }
@@ -550,7 +563,7 @@ impl BExplorerIced {
                         self.reset_fixed_root_presentation(pane);
                     }
                     self.save_session();
-                    self.start_load(pane)
+                    self.start_navigation_load(pane)
                 } else {
                     Task::none()
                 }
@@ -1526,6 +1539,7 @@ impl BExplorerIced {
             }
             Message::DiskImageMounted(pane, source, result) => {
                 self.mounting_disk_images.remove(&source);
+                self.pane_mut(pane).mounting_disk_image = false;
                 match result {
                     Ok(root) => {
                         self.pane_mut(pane).status =

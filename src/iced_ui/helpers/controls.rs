@@ -273,10 +273,13 @@ pub(in crate::iced_ui) fn inline_icon<'a>(
     // lightweight line weight intact.
     const ICON_OPTICAL_SCALE: f32 = 1.12;
     let size = (size * ICON_OPTICAL_SCALE).round().max(1.0);
+    let preserves_native_colors = matches!(label, "pc" | "printer");
     let icon = svg::Svg::new(svg::Handle::from_memory(icon_svg(label)))
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
-        .style(move |_, _| svg::Style { color: Some(color) });
+        .style(move |_, _| svg::Style {
+            color: (!preserves_native_colors).then_some(color),
+        });
 
     container(icon)
         .width(Length::Fixed(size))
@@ -377,6 +380,7 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
 
 pub(in crate::iced_ui) fn fallback_icon_label(entry: &FileEntry) -> &'static str {
     match &entry.kind {
+        EntryKind::Drive if entry.drive_kind == Some(DriveKind::NetworkPrinter) => "printer",
         EntryKind::Drive => "pc",
         EntryKind::Folder => "folder",
         EntryKind::Symlink => "lnk",
@@ -419,6 +423,7 @@ pub(in crate::iced_ui) fn icon_svg(label: &'static str) -> &'static [u8] {
         "storage" => ICON_STORAGE,
         "file" => ICON_FILE,
         "pc" => ICON_PC,
+        "printer" => ICON_PRINTER,
         "lnk" => ICON_LINK,
         "rec" => ICON_RECENT,
         "net" => ICON_NETWORK,
@@ -472,7 +477,8 @@ const ICON_PLACES: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.or
 const ICON_BOOKMARK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 4.5h10v15l-5-3-5 3z" fill="none" stroke="#000" stroke-width="1.8" stroke-linejoin="round"/></svg>"##;
 const ICON_STORAGE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><ellipse cx="12" cy="6" rx="7" ry="2.8" fill="none" stroke="#000" stroke-width="1.7"/><path d="M5 6v9.5c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 11c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8" fill="none" stroke="#000" stroke-width="1.7"/></svg>"##;
 const ICON_FILE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/></svg>"##;
-const ICON_PC: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="5" width="16" height="11" rx="1.5" fill="none" stroke="#000" stroke-width="1.8"/><path d="M9 20h6M12 16v4" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
+const ICON_PC: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="1.1" y="2.15" width="21.8" height="15.35" rx="1.55" fill="#294b55" stroke="#f7fcff" stroke-width=".42" stroke-opacity=".72"/><rect x="1.5" y="2.55" width="21" height="14.55" rx="1.2" fill="none" stroke="#132f38" stroke-width=".72"/><rect x="2.85" y="3.65" width="18.3" height="11.75" rx=".38" fill="#08bfe8"/><path d="M2.85 3.65h18.3V15.4z" fill="#087fa7" opacity=".2"/><path d="M10.45 17.4h3.1v2.3h3.4c.6 0 1.1.48 1.1 1.08v.47H5.95v-.47c0-.6.5-1.08 1.1-1.08h3.4z" fill="#294b55" stroke="#f7fcff" stroke-width=".35" stroke-opacity=".6"/><path d="M5.95 21.25h12.1" fill="none" stroke="#132f38" stroke-width=".75" stroke-linecap="round"/></svg>"##;
+const ICON_PRINTER: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 3.2h10v5.1H7z" fill="#d9eef5" stroke="#031923" stroke-width="1.15" stroke-linejoin="round"/><rect x="3" y="7.2" width="18" height="9.4" rx="2" fill="#16779c" stroke="#031923" stroke-width="1.2"/><circle cx="18.1" cy="10.3" r=".75" fill="#8ce1f5"/><path d="M6.4 13.2h11.2v7.6H6.4z" fill="#eaf7fa" stroke="#031923" stroke-width="1.15" stroke-linejoin="round"/><path d="M8.4 16h7.2M8.4 18.2h5.2" fill="none" stroke="#52717d" stroke-width="1" stroke-linecap="round"/></svg>"##;
 const ICON_LINK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M10 8.5 11.5 7a4 4 0 0 1 5.7 5.7l-2 2a4 4 0 0 1-5.7 0" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/><path d="m14 15.5-1.5 1.5a4 4 0 0 1-5.7-5.7l2-2a4 4 0 0 1 5.7 0" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
 const ICON_RECENT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="7.5" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 7.5V12l3 2" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_NETWORK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="5.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><circle cx="6" cy="18.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><circle cx="18" cy="18.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 7.5v4.5M12 12 7.5 17M12 12l4.5 5" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round"/></svg>"##;

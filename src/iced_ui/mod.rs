@@ -462,7 +462,14 @@ impl BExplorerIced {
     fn new() -> (Self, Task<Message>) {
         let mut config = AppConfig::load();
         if !available_vibrancy_modes().contains(&config.vibrancy) {
-            config.vibrancy = VibrancyMode::None;
+            #[cfg(target_os = "windows")]
+            {
+                config.vibrancy = VibrancyMode::Acrylic;
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                config.vibrancy = VibrancyMode::None;
+            }
         }
         config.vibrancy_active = config.vibrancy != VibrancyMode::None;
         let session = AppSession::load();
@@ -922,6 +929,11 @@ impl BExplorerIced {
         } else {
             Subscription::none()
         };
+        let async_progress_tick = if self.async_progress_animation_active() {
+            Subscription::run(async_progress_tick_stream)
+        } else {
+            Subscription::none()
+        };
         // Wayland delivers file drops through the data-device queue instead
         // of Winit's `FileDropped` event. Pump it lightly while idle too.
         let external_drag_tick =
@@ -950,6 +962,7 @@ impl BExplorerIced {
             transfer_tick,
             animation_frame,
             scrollbar_tick,
+            async_progress_tick,
             external_drag_tick,
             search_tick,
             system_theme_changes,

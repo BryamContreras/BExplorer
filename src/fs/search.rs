@@ -8,8 +8,8 @@ use crate::fs::archive::{ArchiveListEntry, list_7z_entries, list_zip_entries};
 use crate::fs::explorer::{self, EntryKind, FileEntry};
 
 const MAX_SEARCH_RESULTS: usize = 20_000;
-const SEARCH_BATCH_SIZE: usize = 32;
-const SEARCH_BATCH_INTERVAL: Duration = Duration::from_millis(40);
+const SEARCH_BATCH_SIZE: usize = 256;
+const SEARCH_BATCH_INTERVAL: Duration = Duration::from_millis(120);
 const SEARCH_YIELD_INTERVAL: usize = 128;
 const SEARCH_COOPERATIVE_PAUSE: Duration = Duration::from_millis(1);
 

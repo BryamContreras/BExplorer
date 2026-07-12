@@ -154,6 +154,11 @@ pub(in crate::iced_ui) fn scrollbar_animation_tick_stream()
     periodic_message_stream(Duration::from_millis(16), Message::ScrollbarAnimationTick)
 }
 
+pub(in crate::iced_ui) fn async_progress_tick_stream() -> impl iced::futures::Stream<Item = Message>
+{
+    periodic_message_stream(Duration::from_millis(33), Message::AsyncProgressTick)
+}
+
 pub(in crate::iced_ui) fn external_drag_tick_stream(
     active: &bool,
 ) -> impl iced::futures::Stream<Item = Message> + use<> {

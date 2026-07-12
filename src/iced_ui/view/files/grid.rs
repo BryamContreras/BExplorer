@@ -183,7 +183,7 @@ impl BExplorerIced {
             };
             let metadata: Element<'_, Message> = if is_this_pc_drive {
                 column![
-                    drive_capacity_bar(entry.percent_full.unwrap_or(0.0), palette),
+                    drive_capacity_bar(entry.percent_full.unwrap_or(0.0), palette, selected),
                     text(ellipsize_to_width(
                         &self.localized_drive_capacity_label(entry),
                         text_width,

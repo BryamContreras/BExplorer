@@ -143,15 +143,11 @@ pub(in crate::iced_ui) fn sidebar_place_items() -> Vec<SidebarItem> {
 
 pub(in crate::iced_ui) fn sidebar_storage_items(
     storage_entries: &[FileEntry],
-    spanish: bool,
+    _spanish: bool,
 ) -> Vec<SidebarItem> {
     if storage_entries.is_empty() {
         return vec![SidebarItem {
-            label: if spanish {
-                String::from("Sistema de archivos")
-            } else {
-                String::from("Filesystem")
-            },
+            label: filesystem_root_label(),
             target: SidebarTarget::Navigate(Some(filesystem_root_path())),
             icon: "storage",
             context_drive_index: None,
@@ -162,11 +158,7 @@ pub(in crate::iced_ui) fn sidebar_storage_items(
         .iter()
         .enumerate()
         .map(|(index, entry)| SidebarItem {
-            label: if entry.path == filesystem_root_path() && spanish {
-                String::from("Sistema de archivos")
-            } else {
-                entry.name.clone()
-            },
+            label: entry.name.clone(),
             target: SidebarTarget::Navigate(Some(entry.path.clone())),
             icon: "storage",
             context_drive_index: entry
@@ -272,6 +264,27 @@ pub(in crate::iced_ui) fn filesystem_root_path() -> PathBuf {
     }
 }
 
+pub(in crate::iced_ui) fn filesystem_root_label() -> String {
+    let path = filesystem_root_path();
+    #[cfg(windows)]
+    {
+        let info = crate::platform::drive_info(&path);
+        let drive = path
+            .to_string_lossy()
+            .trim_end_matches(['\\', '/'])
+            .to_owned();
+        return info
+            .volume_label
+            .filter(|label| !label.trim().is_empty())
+            .map(|label| format!("{label} ({drive})"))
+            .unwrap_or(drive);
+    }
+    #[cfg(not(windows))]
+    {
+        display_label(&path)
+    }
+}
+
 pub(in crate::iced_ui) fn display_label(path: &Path) -> String {
     path.file_name()
         .and_then(|name| name.to_str())
@@ -317,12 +330,7 @@ pub(in crate::iced_ui) fn uses_fixed_root_presentation(path: Option<&Path>) -> b
 pub(in crate::iced_ui) fn available_vibrancy_modes() -> &'static [VibrancyMode] {
     #[cfg(target_os = "windows")]
     {
-        &[
-            VibrancyMode::None,
-            VibrancyMode::Mica,
-            VibrancyMode::Acrylic,
-            VibrancyMode::Blur,
-        ]
+        &[VibrancyMode::None, VibrancyMode::Acrylic]
     }
     #[cfg(target_os = "macos")]
     {

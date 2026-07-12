@@ -1,4 +1,4 @@
-﻿#[cfg(target_os = "windows")]
+#[cfg(target_os = "windows")]
 pub struct NativeIconImage {
     pub rgba: Vec<u8>,
     pub width: usize,
@@ -78,6 +78,55 @@ pub fn native_file_icon_highres(
     path: &std::path::Path,
     is_directory: bool,
 ) -> Option<NativeIconImage> {
+    shell_item_icon(path, 256)
+        .or_else(|| native_file_icon_highres_from_system_list(path, is_directory))
+}
+
+#[cfg(target_os = "windows")]
+fn shell_item_icon(path: &std::path::Path, size: u32) -> Option<NativeIconImage> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::Foundation::SIZE;
+    use windows::Win32::Graphics::Gdi::DeleteObject;
+    use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
+    use windows::Win32::UI::Shell::{
+        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
+        SIIGBF_SCALEUP,
+    };
+    use windows::core::PCWSTR;
+
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+
+    let image = (|| {
+        let factory: IShellItemImageFactory =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }.ok()?;
+        let bitmap = unsafe {
+            factory.GetImage(
+                SIZE {
+                    cx: size as i32,
+                    cy: size as i32,
+                },
+                SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK | SIIGBF_SCALEUP,
+            )
+        }
+        .ok()?;
+        let image = hbitmap_to_rgba(bitmap, size);
+        let _ = unsafe { DeleteObject(bitmap) };
+        image
+    })();
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    image
+}
+
+#[cfg(target_os = "windows")]
+fn native_file_icon_highres_from_system_list(
+    path: &std::path::Path,
+    is_directory: bool,
+) -> Option<NativeIconImage> {
     use std::mem::size_of;
     use std::os::windows::ffi::OsStrExt;
 
@@ -136,6 +185,58 @@ pub fn native_file_icon_highres(
     let image = hicon_to_rgba(hicon, 256);
     let _ = unsafe { DestroyIcon(hicon) };
     image
+}
+
+#[cfg(target_os = "windows")]
+fn hbitmap_to_rgba(
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+    size: u32,
+) -> Option<NativeIconImage> {
+    use std::mem::size_of;
+
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+        GetDIBits,
+    };
+
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: size as i32,
+            biHeight: -(size as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let mut bgra = vec![0_u8; (size * size * 4) as usize];
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.0.is_null() {
+        return None;
+    }
+    let rows = unsafe {
+        GetDIBits(
+            dc,
+            bitmap,
+            0,
+            size,
+            Some(bgra.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    let _ = unsafe { DeleteDC(dc) };
+    if rows != size as i32 {
+        return None;
+    }
+
+    let mut rgba = Vec::with_capacity(bgra.len());
+    for pixel in bgra.chunks_exact(4) {
+        rgba.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+    }
+    Some(normalize_native_icon_canvas(rgba, size as usize))
 }
 
 fn hicon_to_rgba(

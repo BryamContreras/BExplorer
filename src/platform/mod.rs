@@ -228,20 +228,14 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
 ) -> Result<bool> {
     #[cfg(target_os = "windows")]
     {
-        use window_vibrancy::{
-            apply_acrylic, apply_blur, apply_mica, clear_acrylic, clear_blur, clear_mica,
-        };
+        use window_vibrancy::{apply_acrylic, clear_acrylic, clear_blur, clear_mica};
 
         let _ = clear_mica(window);
         let _ = clear_acrylic(window);
         let _ = clear_blur(window);
         match mode {
             VibrancyMode::None => Ok(false),
-            VibrancyMode::Mica => apply_mica(window, Some(dark))
-                .map(|_| true)
-                .map_err(|error| {
-                    crate::utils::errors::BExplorerError::Operation(error.to_string())
-                }),
+            VibrancyMode::Mica | VibrancyMode::Blur => Ok(false),
             VibrancyMode::Acrylic => {
                 let alpha = (intensity.clamp(15, 90) as u16 * 2).min(220) as u8;
                 let color = if dark {
@@ -255,9 +249,6 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
                         crate::utils::errors::BExplorerError::Operation(error.to_string())
                     })
             }
-            VibrancyMode::Blur => apply_blur(window, None).map(|_| true).map_err(|error| {
-                crate::utils::errors::BExplorerError::Operation(error.to_string())
-            }),
         }
     }
 

@@ -248,24 +248,23 @@ impl BExplorerIced {
 
         let transfer_active = self.transfer_in_progress_for(pane);
         let search_active = self.pane(pane).search_receiver.is_some();
-        let progress_active = transfer_active || search_active;
-        let progress = if transfer_active {
-            self.transfer_progress_fraction_for(pane).unwrap_or(0.0)
-        } else {
-            self.pane(pane).search_progress_phase
-        };
-        let status: Element<'_, Message> = column![
+        let loading_active = self.pane(pane).loading || self.pane(pane).mounting_disk_image;
+        let progress_bar: Element<'_, Message> = if transfer_active {
+            let progress = self.transfer_progress_fraction_for(pane).unwrap_or(0.0);
             iced::widget::progress_bar(0.0..=1.0, progress)
-                .girth(if progress_active { 2.0 } else { 0.0 })
+                .girth(2.0)
                 .style(move |_| iced::widget::progress_bar::Style {
                     background: translucent_color(palette.border, 0.72).into(),
                     bar: accent_gradient(palette).into(),
                     border: border::rounded(0),
-                }),
-            status_content,
-        ]
-        .spacing(0)
-        .into();
+                })
+                .into()
+        } else if search_active || loading_active {
+            indeterminate_progress_bar(self.pane(pane).search_progress_phase, palette, 2.0)
+        } else {
+            Space::new().height(0).into()
+        };
+        let status: Element<'_, Message> = column![progress_bar, status_content].spacing(0).into();
 
         let pane_body = container(
             column![
@@ -373,13 +372,19 @@ impl BExplorerIced {
                 Button::new(
                     row![
                         storage_icon,
-                        text(self.localized("Sistema de archivos", "Filesystem"))
-                            .size(self.font_size())
-                            .color(if storage_active {
-                                palette.accent_text
-                            } else {
-                                palette.text
-                            }),
+                        text(
+                            self.sidebar_storage_entries
+                                .iter()
+                                .find(|entry| entry.path == filesystem)
+                                .map(|entry| entry.name.clone())
+                                .unwrap_or_else(filesystem_root_label),
+                        )
+                        .size(self.font_size())
+                        .color(if storage_active {
+                            palette.accent_text
+                        } else {
+                            palette.text
+                        }),
                     ]
                     .spacing(6)
                     .align_y(Alignment::Center),

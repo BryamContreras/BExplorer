@@ -135,9 +135,6 @@ impl BExplorerIced {
                 (events, disconnected)
             };
 
-            let state = self.pane_mut(pane);
-            state.search_progress_phase = (state.search_progress_phase + 0.045).rem_euclid(1.0);
-
             if events.is_empty() && !disconnected {
                 continue;
             }
@@ -201,6 +198,7 @@ impl BExplorerIced {
         let state = self.pane(pane);
         let signature = DisplayOrderSignature {
             entries_epoch: state.entries_epoch,
+            streaming_search: state.search_receiver.is_some(),
             group_mode: self.effective_group_mode(pane),
             group_ascending: self.effective_group_ascending(pane),
             sort_column: state.sort_column,
@@ -215,16 +213,18 @@ impl BExplorerIced {
 
         let mut indices = (0..state.entries.len()).collect::<Vec<_>>();
 
-        indices.sort_by(|left, right| {
-            compare_entries_for_view(
-                &state.entries[*left],
-                &state.entries[*right],
-                signature.group_mode,
-                signature.group_ascending,
-                state.sort_column,
-                state.sort_ascending,
-            )
-        });
+        if !signature.streaming_search {
+            indices.sort_by(|left, right| {
+                compare_entries_for_view(
+                    &state.entries[*left],
+                    &state.entries[*right],
+                    signature.group_mode,
+                    signature.group_ascending,
+                    state.sort_column,
+                    state.sort_ascending,
+                )
+            });
+        }
         let mut cache = state.display_order.borrow_mut();
         cache.signature = Some(signature);
         cache.indices = indices.clone();

@@ -135,7 +135,10 @@ impl BExplorerIced {
             self.pane_mut(pane).status = format!("Ya se está montando {}…", path.display());
             return Task::none();
         }
-        self.pane_mut(pane).status = format!("Montando {}…", path.display());
+        let state = self.pane_mut(pane);
+        state.mounting_disk_image = true;
+        state.search_progress_phase = 0.0;
+        state.status = format!("Montando {}…", path.display());
         let operation_path = path.clone();
         Task::perform(
             run_blocking_file_operation(move || {

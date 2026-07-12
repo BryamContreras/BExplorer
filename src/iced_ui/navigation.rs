@@ -1,6 +1,23 @@
 use super::*;
 
 impl BExplorerIced {
+    /// Start loading a different location without briefly rendering the
+    /// previous location under the new path and view settings.
+    pub(in crate::iced_ui) fn start_navigation_load(&mut self, pane: PaneId) -> Task<Message> {
+        self.pdf_previews.remove(&pane);
+        let state = self.pane_mut(pane);
+        state.entries.clear();
+        state.folder_entries = None;
+        state.selected.clear();
+        state.selection_anchor = None;
+        state.render_limit = INITIAL_RENDER_LIMIT;
+        state.scroll_offset_y = 0.0;
+        state.has_vertical_overflow = false;
+        state.text_preview = None;
+        state.mark_entries_changed();
+        self.start_load(pane)
+    }
+
     pub(in crate::iced_ui) fn apply_accent_plane_point(&mut self, point: Point) {
         let (hue, _, _) = accent_hsv_from_color(self.config.accent_color);
         let saturation = (point.x / COLOR_PICKER_PLANE_WIDTH).clamp(0.0, 1.0);
@@ -32,6 +49,7 @@ impl BExplorerIced {
             let state = self.pane_mut(pane);
             state.request_id += 1;
             state.loading = true;
+            state.search_progress_phase = 0.0;
             state.status = String::from("Loading...");
             state.request_id
         };
@@ -306,7 +324,7 @@ impl BExplorerIced {
             self.active_tab = index;
         }
         self.save_session();
-        self.start_load(pane)
+        self.start_navigation_load(pane)
     }
 
     pub(in crate::iced_ui) fn set_view_mode_for_pane(&mut self, pane: PaneId, mode: ViewMode) {

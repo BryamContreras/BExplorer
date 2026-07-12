@@ -225,23 +225,73 @@ pub(in crate::iced_ui) fn transfer_progress_bar(
         .into()
 }
 
+pub(in crate::iced_ui) fn indeterminate_progress_bar(
+    phase: f32,
+    palette: Palette,
+    height: f32,
+) -> Element<'static, Message> {
+    const SEGMENT: u16 = 220;
+    const TRAVEL: u16 = 1000 - SEGMENT;
+    let phase = phase.rem_euclid(1.0);
+    let position = if phase <= 0.5 {
+        phase * 2.0
+    } else {
+        (1.0 - phase) * 2.0
+    };
+    let leading = ((position * f32::from(TRAVEL)).round() as u16).min(TRAVEL);
+    let trailing = TRAVEL.saturating_sub(leading);
+    let mut segments = row![].spacing(0).height(height);
+    if leading > 0 {
+        segments = segments.push(Space::new().width(Length::FillPortion(leading)));
+    }
+    segments = segments.push(
+        container(Space::new())
+            .height(height)
+            .width(Length::FillPortion(SEGMENT))
+            .style(move |_| container::Style::default().background(accent_gradient(palette))),
+    );
+    if trailing > 0 {
+        segments = segments.push(Space::new().width(Length::FillPortion(trailing)));
+    }
+
+    container(segments)
+        .height(height)
+        .width(Length::Fill)
+        .clip(true)
+        .style(move |_| {
+            container::Style::default().background(translucent_color(palette.border, 0.72))
+        })
+        .into()
+}
+
 pub(in crate::iced_ui) fn drive_capacity_bar(
     progress: f32,
     palette: Palette,
+    selected: bool,
 ) -> Element<'static, Message> {
     const HEIGHT: f32 = 10.0;
     const RADIUS: f32 = 2.0;
+    let inset = if selected { 1.0 } else { 0.0 };
+    let inner_height = HEIGHT - inset * 2.0;
+    let light_theme = palette.page_bg.r + palette.page_bg.g + palette.page_bg.b > 1.8;
 
     let filled = ((progress.clamp(0.0, 1.0) * 1000.0).round() as u16).min(1000);
     let empty = 1000_u16.saturating_sub(filled);
-    let mut segments = row![].spacing(0).height(HEIGHT);
+    let mut segments = row![].spacing(0).height(inner_height);
+    let selected_fill = mix_color(palette.accent, Color::WHITE, 0.12);
 
     if filled > 0 {
         segments = segments.push(
             container(Space::new())
                 .height(Length::Fill)
                 .width(Length::FillPortion(filled))
-                .style(move |_| container::Style::default().background(accent_gradient(palette))),
+                .style(move |_| {
+                    container::Style::default().background(if selected {
+                        Background::Color(selected_fill)
+                    } else {
+                        Background::Gradient(accent_gradient(palette).into())
+                    })
+                }),
         );
     }
 
@@ -256,11 +306,30 @@ pub(in crate::iced_ui) fn drive_capacity_bar(
     container(segments)
         .height(HEIGHT)
         .width(Length::Fill)
+        .padding(inset)
         .clip(true)
         .style(move |_| {
+            let border_color = if selected {
+                if light_theme {
+                    Color::WHITE
+                } else {
+                    Color::BLACK
+                }
+            } else {
+                palette.border
+            };
+            let background = if selected {
+                if light_theme {
+                    mix_color(palette.input_bg, Color::WHITE, 0.28)
+                } else {
+                    Color::from_rgba8(3, 22, 30, 0.72)
+                }
+            } else {
+                mix_color(palette.input_bg, palette.border, 0.38)
+            };
             container::Style::default()
-                .background(mix_color(palette.input_bg, palette.border, 0.38))
-                .border(border::rounded(RADIUS).color(palette.border).width(1))
+                .background(background)
+                .border(border::rounded(RADIUS).color(border_color).width(1))
         })
         .into()
 }
