@@ -222,10 +222,27 @@ pub(super) fn mount_disk_image(path: &Path) -> Result<()> {
     wait_for_mounted_disk_image_root(&canonical).map(|_| ())
 }
 
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+pub(super) fn mount_disk_image(path: &Path) -> Result<()> {
+    if mounted_disk_image_root(path).is_ok() {
+        return Ok(());
+    }
+    let output = Command::new("hdiutil")
+        .args(["attach", "-readonly", "-nobrowse"])
+        .arg(path)
+        .output()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_error("Could not mount disk image", &output))
+    }
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 pub(super) fn mount_disk_image(_path: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
-        "Mounting disk images is currently available on Windows only".into(),
+        "Mounting disk images is not supported on this platform".into(),
     ))
 }
 
@@ -276,10 +293,61 @@ fn mounted_disk_image_root_once(canonical: &Path) -> Option<PathBuf> {
     None
 }
 
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+pub(super) fn mounted_disk_image_root(path: &Path) -> Result<PathBuf> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let output = Command::new("hdiutil")
+        .arg("info")
+        .output()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    if !output.status.success() {
+        return Err(command_error(
+            "Could not inspect mounted disk images",
+            &output,
+        ));
+    }
+    parse_hdiutil_mount_root(&String::from_utf8_lossy(&output.stdout), &canonical).ok_or_else(
+        || {
+            BExplorerError::Shell(format!(
+                "Could not locate mounted disk image volume for {}",
+                path.display()
+            ))
+        },
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn parse_hdiutil_mount_root(text: &str, image_path: &Path) -> Option<PathBuf> {
+    let expected = image_path.to_string_lossy();
+    let mut matching_image = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(value) = trimmed.strip_prefix("image-path") {
+            let value = value.trim_start_matches([' ', ':']).trim();
+            let candidate = PathBuf::from(value);
+            matching_image = candidate == image_path
+                || candidate
+                    .canonicalize()
+                    .is_ok_and(|path| path == image_path)
+                || value == expected;
+            continue;
+        }
+        if matching_image && trimmed.starts_with("/dev/") {
+            let mount = trimmed
+                .split('\t')
+                .next_back()
+                .map(str::trim)
+                .filter(|value| value.starts_with('/'))?;
+            return Some(PathBuf::from(mount));
+        }
+    }
+    None
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 pub(super) fn mounted_disk_image_root(_path: &Path) -> Result<PathBuf> {
     Err(BExplorerError::Shell(
-        "Resolving mounted disk images is currently available on Windows only".into(),
+        "Resolving mounted disk images is not supported on this platform".into(),
     ))
 }
 
@@ -325,10 +393,24 @@ pub(super) fn eject_drive(path: &Path) -> Result<()> {
     }
 }
 
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+#[cfg(target_os = "macos")]
+pub(super) fn eject_drive(path: &Path) -> Result<()> {
+    let output = Command::new("diskutil")
+        .arg("eject")
+        .arg(path)
+        .output()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(command_error("Could not eject drive", &output))
+    }
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
 pub(super) fn eject_drive(_path: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
-        "Ejecting drives is currently available on Windows only".into(),
+        "Ejecting drives is not supported on this platform".into(),
     ))
 }
 
@@ -388,7 +470,7 @@ fn udisks_output_text(output: &std::process::Output) -> String {
     text
 }
 
-#[cfg(all(unix, not(target_os = "macos")))]
+#[cfg(unix)]
 fn command_error(context: &str, output: &std::process::Output) -> BExplorerError {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -563,7 +645,7 @@ fn decode_mountinfo_field(value: &str) -> String {
     output
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix, not(target_os = "macos")))]
 mod tests {
     use super::*;
 

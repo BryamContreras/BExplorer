@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::fd::AsFd;
@@ -32,11 +32,6 @@ thread_local! {
     static CONTEXT: RefCell<Option<WaylandDragContext>> = const { RefCell::new(None) };
 }
 
-#[derive(Clone, Debug)]
-pub struct WaylandDragResult {
-    pub paths: Vec<PathBuf>,
-}
-
 struct WaylandDragContext {
     display_ptr: usize,
     surface_ptr: usize,
@@ -51,6 +46,7 @@ struct WaylandDragState {
     _registry: Option<WlRegistry>,
     data_device_manager: Option<WlDataDeviceManager>,
     seats: HashMap<u32, WlSeat>,
+    keyboard_capable_seats: HashSet<u32>,
     pointers: HashMap<u32, WlPointer>,
     data_devices: HashMap<u32, WlDataDevice>,
     active_sources: Vec<WlDataSource>,
@@ -122,7 +118,18 @@ pub fn prepare(raw_display_handle: RawDisplayHandle, raw_window_handle: RawWindo
             context.display_ptr != display_ptr || context.surface_ptr != surface_ptr
         });
         if needs_new {
-            *context = WaylandDragContext::new(display_ptr, surface_ptr).ok();
+            match WaylandDragContext::new(display_ptr, surface_ptr) {
+                Ok(new_context) => {
+                    crate::utils::log::info("Wayland native drag bridge prepared");
+                    *context = Some(new_context);
+                }
+                Err(error) => {
+                    crate::utils::log::error(format!(
+                        "Wayland native drag bridge could not be prepared: {error}"
+                    ));
+                    *context = None;
+                }
+            }
         }
         if let Some(context) = context.as_mut() {
             let _ = context.dispatch_pending();
@@ -134,7 +141,7 @@ pub fn start_file_drag(
     paths: Vec<PathBuf>,
     raw_display_handle: RawDisplayHandle,
     raw_window_handle: RawWindowHandle,
-) -> Result<WaylandDragResult> {
+) -> Result<()> {
     let (display_ptr, surface_ptr) = wayland_handles(raw_display_handle, raw_window_handle)
         .ok_or_else(|| BExplorerError::Shell("This Linux session is not Wayland".into()))?;
 
@@ -154,26 +161,26 @@ pub fn start_file_drag(
     })
 }
 
-pub fn take_received_file_drops(
+/// Pumps Wayland events for an outbound drag. The destination asks the source
+/// for `text/uri-list` asynchronously, so this has to continue after
+/// `start_drag` returns.
+pub fn poll_active_file_drag(
     raw_display_handle: RawDisplayHandle,
     raw_window_handle: RawWindowHandle,
-) -> Result<(Vec<Vec<PathBuf>>, bool)> {
+) -> Result<bool> {
     let (display_ptr, surface_ptr) = wayland_handles(raw_display_handle, raw_window_handle)
         .ok_or_else(|| BExplorerError::Shell("This Linux session is not Wayland".into()))?;
 
     CONTEXT.with(|cell| {
         let mut context = cell.borrow_mut();
-        let needs_new = context.as_ref().is_none_or(|context| {
-            context.display_ptr != display_ptr || context.surface_ptr != surface_ptr
-        });
-        if needs_new {
-            *context = Some(WaylandDragContext::new(display_ptr, surface_ptr)?);
-        }
-        let context = context
-            .as_mut()
-            .ok_or_else(|| BExplorerError::Shell("Wayland drag context is not available".into()))?;
+        let Some(context) = context.as_mut().filter(|context| {
+            context.display_ptr == display_ptr && context.surface_ptr == surface_ptr
+        }) else {
+            return Ok(false);
+        };
         context.dispatch_pending()?;
-        Ok(context.take_received_file_drops())
+        context.state.retain_active_sources();
+        Ok(!context.state.active_sources.is_empty())
     })
 }
 
@@ -229,17 +236,7 @@ impl WaylandDragContext {
         Ok(())
     }
 
-    fn take_received_file_drops(&mut self) -> (Vec<Vec<PathBuf>>, bool) {
-        if self.state.poll_pending_reads() {
-            let _ = self.connection.flush();
-        }
-        (
-            std::mem::take(&mut self.state.pending_drops),
-            self.state.has_pending_reads(),
-        )
-    }
-
-    fn start_file_drag(&mut self, paths: Vec<PathBuf>) -> Result<WaylandDragResult> {
+    fn start_file_drag(&mut self, paths: Vec<PathBuf>) -> Result<()> {
         let payload = DragPayload::from_paths(&paths)?;
         let (seat_name, serial) = self.state.last_button_serial.ok_or_else(|| {
             BExplorerError::Shell("Wayland has not provided a mouse drag serial yet".into())
@@ -264,7 +261,11 @@ impl WaylandDragContext {
         self.connection.flush().map_err(|error| {
             BExplorerError::Shell(format!("Wayland drag flush failed: {error}"))
         })?;
-        Ok(WaylandDragResult { paths })
+        crate::utils::log::info(format!(
+            "Wayland native external drag started for {} path(s)",
+            paths.len()
+        ));
+        Ok(())
     }
 }
 
@@ -467,12 +468,10 @@ impl WaylandDragState {
         finalized_offer
     }
 
-    fn has_pending_reads(&self) -> bool {
-        !self.pending_reads.is_empty()
-    }
-
     fn ensure_data_device(&mut self, seat_name: u32, qh: &QueueHandle<Self>) {
-        if self.data_devices.contains_key(&seat_name) {
+        if self.data_devices.contains_key(&seat_name)
+            || !self.keyboard_capable_seats.contains(&seat_name)
+        {
             return;
         }
         let (Some(manager), Some(seat)) = (
@@ -483,6 +482,9 @@ impl WaylandDragState {
         };
         let device = manager.get_data_device(seat, qh, SeatData { name: seat_name });
         self.data_devices.insert(seat_name, device);
+        crate::utils::log::info(format!(
+            "Wayland data device ready for keyboard-capable seat {seat_name}"
+        ));
     }
 }
 
@@ -536,7 +538,6 @@ impl Dispatch<WlRegistry, ()> for WaylandDragState {
                         SeatData { name },
                     );
                     state.seats.insert(name, seat);
-                    state.ensure_data_device(name, qh);
                 }
                 "wl_data_device_manager" => {
                     let manager = registry.bind::<WlDataDeviceManager, _, _>(
@@ -576,7 +577,13 @@ impl Dispatch<WlSeat, SeatData> for WaylandDragState {
                 let pointer = seat.get_pointer(qh, *data);
                 state.pointers.insert(data.name, pointer);
             }
-            state.ensure_data_device(data.name, qh);
+            if capabilities.contains(wl_seat::Capability::Keyboard) {
+                state.keyboard_capable_seats.insert(data.name);
+                state.ensure_data_device(data.name, qh);
+            } else {
+                state.keyboard_capable_seats.remove(&data.name);
+                state.data_devices.remove(&data.name);
+            }
         }
     }
 }
@@ -731,16 +738,25 @@ impl Dispatch<WlDataSource, DragPayload> for WaylandDragState {
         _qh: &QueueHandle<Self>,
     ) {
         match event {
+            wl_data_source::Event::Target { mime_type } => {
+                crate::utils::log::info(format!(
+                    "Wayland external drag target requested {:?}",
+                    mime_type
+                ));
+            }
             wl_data_source::Event::Send { mime_type, fd } => {
+                crate::utils::log::info(format!("Wayland external drag is sending {mime_type}"));
                 if let Some(text) = data.data_for_mime(&mime_type) {
                     let mut file = fs::File::from(fd);
                     let _ = file.write_all(text.as_bytes());
                 }
             }
             wl_data_source::Event::Cancelled => {
+                crate::utils::log::info("Wayland external drag cancelled");
                 state.finish_source(source);
             }
             wl_data_source::Event::DndFinished => {
+                crate::utils::log::info("Wayland external drag finished");
                 state.finish_source(source);
             }
             _ => {}

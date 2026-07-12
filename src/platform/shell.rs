@@ -2,17 +2,21 @@ use std::ffi::OsString;
 #[cfg(not(target_os = "windows"))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(not(target_os = "windows"))]
+use std::process::Stdio;
+#[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicBool;
 
 use crate::utils::errors::{BExplorerError, Result};
 
 mod defender;
 mod disk;
+#[cfg(target_os = "windows")]
 mod elevation;
 
-#[allow(unused_imports)]
-pub use defender::{WindowsDefenderScanResult, WindowsDefenderThreat};
+#[cfg(target_os = "windows")]
+pub use defender::WindowsDefenderScanResult;
 
 #[cfg_attr(test, allow(dead_code))]
 #[derive(Clone, Debug)]
@@ -21,7 +25,8 @@ pub struct ClipboardFiles {
     pub cut: bool,
 }
 
-pub fn copy_text(text: &str) -> Result<()> {
+#[cfg(not(target_os = "windows"))]
+fn copy_text(text: &str) -> Result<()> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
     clipboard
@@ -29,7 +34,8 @@ pub fn copy_text(text: &str) -> Result<()> {
         .map_err(|error| BExplorerError::Clipboard(error.to_string()))
 }
 
-pub fn read_text() -> Result<String> {
+#[cfg(not(target_os = "windows"))]
+fn read_text() -> Result<String> {
     let mut clipboard =
         arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
     clipboard
@@ -67,6 +73,7 @@ pub fn show_properties(path: &Path) -> Result<()> {
     show_properties_platform(path)
 }
 
+#[cfg(target_os = "windows")]
 pub fn scan_path_with_windows_defender(
     path: &Path,
     cancel: &AtomicBool,
@@ -74,10 +81,12 @@ pub fn scan_path_with_windows_defender(
     defender::scan_path_with_windows_defender(path, cancel)
 }
 
+#[cfg(target_os = "windows")]
 pub fn remove_windows_defender_threats() -> Result<()> {
     defender::remove_windows_defender_threats()
 }
 
+#[cfg(target_os = "windows")]
 pub fn exclude_windows_defender_paths(paths: &[PathBuf]) -> Result<()> {
     defender::exclude_windows_defender_paths(paths)
 }
@@ -102,6 +111,7 @@ pub fn eject_drive(path: &Path) -> Result<()> {
     disk::eject_drive(path)
 }
 
+#[cfg(target_os = "windows")]
 pub fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
     elevation::run_elevated_current_exe(args)
 }
@@ -338,12 +348,16 @@ fn copy_files_platform(paths: &[PathBuf], cut: bool) -> Result<()> {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // A file list is the portable native representation on X11, Wayland, and
+    // macOS. It avoids relying on helper executables such as wl-copy/xclip.
+    // GNOME's private MIME retains the distinction between Copy and Cut when
+    // such a helper is available.
     #[cfg(all(unix, not(target_os = "macos")))]
-    if copy_files_linux_mime(&text).is_ok() {
+    if cut && copy_files_linux_mime(&text).is_ok() {
         return Ok(());
     }
 
-    copy_text(&text)
+    copy_file_list(paths).or_else(|_| copy_text(&text))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -353,8 +367,41 @@ fn read_files_platform() -> Result<ClipboardFiles> {
         return Ok(files);
     }
 
+    if let Ok(paths) = read_file_list() {
+        return Ok(ClipboardFiles { paths, cut: false });
+    }
+
     let text = read_text()?;
     clipboard_files_from_text(&text)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn copy_file_list(paths: &[PathBuf]) -> Result<()> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+    clipboard
+        .set()
+        .file_list(paths)
+        .map_err(|error| BExplorerError::Clipboard(error.to_string()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn read_file_list() -> Result<Vec<PathBuf>> {
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+    let paths = clipboard
+        .get()
+        .file_list()
+        .map_err(|error| BExplorerError::Clipboard(error.to_string()))?
+        .into_iter()
+        .filter(|path| path.exists())
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return Err(BExplorerError::Clipboard(
+            "No file paths in clipboard".into(),
+        ));
+    }
+    Ok(paths)
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -527,7 +574,7 @@ fn file_uri_from_path(path: &Path) -> Option<String> {
     Some(uri)
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_os = "windows")))]
 fn file_uri_from_path(path: &Path) -> Option<String> {
     path.to_str().map(|path| format!("file://{path}"))
 }
@@ -545,7 +592,7 @@ pub(crate) fn path_from_file_uri(uri: &str) -> Option<PathBuf> {
     Some(OsString::from_vec(bytes).into())
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, target_os = "windows")))]
 pub(crate) fn path_from_file_uri(uri: &str) -> Option<PathBuf> {
     let path = uri.strip_prefix("file://")?;
     Some(PathBuf::from(path))
@@ -696,10 +743,33 @@ fn open_with_platform(_path: &Path) -> Result<()> {
     ))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn show_properties_platform(path: &Path) -> Result<()> {
+    // KiO owns Plasma's native Properties dialog. Prefer the KDE 6 client,
+    // but retain the KDE 5 name for distributions that still ship it.
+    let Some(client) = ["kioclient6", "kioclient5"]
+        .into_iter()
+        .find(|candidate| command_exists(candidate))
+    else {
+        return Err(BExplorerError::Shell(
+            "No native properties client is available on this Linux desktop".into(),
+        ));
+    };
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    Command::new(client)
+        .arg("openProperties")
+        .arg(target)
+        .spawn()
+        .map_err(|error| {
+            BExplorerError::Shell(format!("Could not open native properties: {error}"))
+        })?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 fn show_properties_platform(_path: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
-        "Properties are currently available on Windows only".into(),
+        "Properties are not available on this platform yet".into(),
     ))
 }
 
@@ -743,7 +813,7 @@ fn open_terminal_platform(_directory: &Path) -> Result<()> {
     ))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

@@ -14,6 +14,7 @@ pub enum VibrancyMode {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ThemePreference {
+    System,
     Dark,
     Light,
     Gray,
@@ -45,6 +46,7 @@ pub enum ShortcutAction {
     Copy,
     Cut,
     Paste,
+    Undo,
     SelectAll,
     Refresh,
     Rename,
@@ -54,6 +56,7 @@ pub enum ShortcutAction {
     GoUp,
     GoBack,
     GoForward,
+    EditAddress,
     Open,
     MoveUp,
     MoveDown,
@@ -92,6 +95,8 @@ pub struct ShortcutConfig {
     pub copy: ShortcutBinding,
     pub cut: ShortcutBinding,
     pub paste: ShortcutBinding,
+    #[serde(default = "default_undo_shortcut")]
+    pub undo: ShortcutBinding,
     pub select_all: ShortcutBinding,
     pub refresh: ShortcutBinding,
     pub rename: ShortcutBinding,
@@ -101,6 +106,8 @@ pub struct ShortcutConfig {
     pub go_up: ShortcutBinding,
     pub go_back: ShortcutBinding,
     pub go_forward: ShortcutBinding,
+    #[serde(default = "default_edit_address_shortcut")]
+    pub edit_address: ShortcutBinding,
     pub open: ShortcutBinding,
     pub move_up: ShortcutBinding,
     pub move_down: ShortcutBinding,
@@ -113,6 +120,7 @@ impl ShortcutConfig {
             ShortcutAction::Copy => &self.copy,
             ShortcutAction::Cut => &self.cut,
             ShortcutAction::Paste => &self.paste,
+            ShortcutAction::Undo => &self.undo,
             ShortcutAction::SelectAll => &self.select_all,
             ShortcutAction::Refresh => &self.refresh,
             ShortcutAction::Rename => &self.rename,
@@ -122,6 +130,7 @@ impl ShortcutConfig {
             ShortcutAction::GoUp => &self.go_up,
             ShortcutAction::GoBack => &self.go_back,
             ShortcutAction::GoForward => &self.go_forward,
+            ShortcutAction::EditAddress => &self.edit_address,
             ShortcutAction::Open => &self.open,
             ShortcutAction::MoveUp => &self.move_up,
             ShortcutAction::MoveDown => &self.move_down,
@@ -134,6 +143,7 @@ impl ShortcutConfig {
             ShortcutAction::Copy => self.copy = binding,
             ShortcutAction::Cut => self.cut = binding,
             ShortcutAction::Paste => self.paste = binding,
+            ShortcutAction::Undo => self.undo = binding,
             ShortcutAction::SelectAll => self.select_all = binding,
             ShortcutAction::Refresh => self.refresh = binding,
             ShortcutAction::Rename => self.rename = binding,
@@ -143,6 +153,7 @@ impl ShortcutConfig {
             ShortcutAction::GoUp => self.go_up = binding,
             ShortcutAction::GoBack => self.go_back = binding,
             ShortcutAction::GoForward => self.go_forward = binding,
+            ShortcutAction::EditAddress => self.edit_address = binding,
             ShortcutAction::Open => self.open = binding,
             ShortcutAction::MoveUp => self.move_up = binding,
             ShortcutAction::MoveDown => self.move_down = binding,
@@ -157,6 +168,7 @@ impl Default for ShortcutConfig {
             copy: ShortcutBinding::new("C", true, false, false),
             cut: ShortcutBinding::new("X", true, false, false),
             paste: ShortcutBinding::new("V", true, false, false),
+            undo: ShortcutBinding::new("Z", true, false, false),
             select_all: ShortcutBinding::new("A", true, false, false),
             refresh: ShortcutBinding::new("F5", false, false, false),
             rename: ShortcutBinding::new("F2", false, false, false),
@@ -166,11 +178,20 @@ impl Default for ShortcutConfig {
             go_up: ShortcutBinding::new("Backspace", false, false, false),
             go_back: ShortcutBinding::new("ArrowLeft", false, true, false),
             go_forward: ShortcutBinding::new("ArrowRight", false, true, false),
+            edit_address: ShortcutBinding::new("L", true, false, false),
             open: ShortcutBinding::new("Enter", false, false, false),
             move_up: ShortcutBinding::new("ArrowUp", false, false, false),
             move_down: ShortcutBinding::new("ArrowDown", false, false, false),
         }
     }
+}
+
+fn default_undo_shortcut() -> ShortcutBinding {
+    ShortcutBinding::new("Z", true, false, false)
+}
+
+fn default_edit_address_shortcut() -> ShortcutBinding {
+    ShortcutBinding::new("L", true, false, false)
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -184,23 +205,11 @@ pub enum SidebarSection {
 
 impl SidebarSection {
     pub const ALL: [Self; 5] = [
-        Self::Recents,
         Self::Favorites,
+        Self::Places,
         Self::Storage,
         Self::Network,
-        Self::Places,
-    ];
-}
-
-impl ViewMode {
-    pub const ALL: [Self; 7] = [
-        Self::Details,
-        Self::List,
-        Self::SmallIcons,
-        Self::MediumIcons,
-        Self::LargeIcons,
-        Self::ExtraLargeIcons,
-        Self::Tiles,
+        Self::Recents,
     ];
 }
 
@@ -220,6 +229,7 @@ pub struct AppConfig {
     pub show_action_bar: bool,
     pub show_bookmark_bar: bool,
     pub show_split_pane_menus: bool,
+    pub show_split_preview_panels: bool,
     pub show_preview_panel: bool,
     pub sidebar_visible: bool,
     pub default_view: ViewMode,
@@ -232,6 +242,7 @@ pub struct AppConfig {
     pub shortcuts: ShortcutConfig,
     pub sidebar_width: f32,
     pub sidebar_order: Vec<SidebarSection>,
+    pub sidebar_collapsed: Vec<SidebarSection>,
     pub preview_panel_width: f32,
     pub preview_limit_bytes: usize,
     pub vibrancy: VibrancyMode,
@@ -255,7 +266,8 @@ impl Default for AppConfig {
             show_icon_borders: true,
             show_action_bar: true,
             show_bookmark_bar: false,
-            show_split_pane_menus: true,
+            show_split_pane_menus: false,
+            show_split_preview_panels: false,
             show_preview_panel: false,
             sidebar_visible: true,
             default_view: ViewMode::Details,
@@ -268,6 +280,7 @@ impl Default for AppConfig {
             shortcuts: ShortcutConfig::default(),
             sidebar_width: 220.0,
             sidebar_order: SidebarSection::ALL.to_vec(),
+            sidebar_collapsed: Vec::new(),
             preview_panel_width: 320.0,
             preview_limit_bytes: 2 * 1024 * 1024,
             vibrancy: VibrancyMode::None,
@@ -282,6 +295,7 @@ impl AppConfig {
         match try_load() {
             Ok(mut config) => {
                 config.normalize_sidebar_order();
+                config.normalize_sidebar_collapsed();
                 config.normalize_preview_panel_width();
                 config
             }
@@ -323,7 +337,28 @@ impl AppConfig {
     }
 
     pub fn normalize_sidebar_order(&mut self) {
+        let legacy_default = vec![
+            SidebarSection::Recents,
+            SidebarSection::Favorites,
+            SidebarSection::Storage,
+            SidebarSection::Network,
+            SidebarSection::Places,
+        ];
+        if self.sidebar_order == legacy_default {
+            self.sidebar_order = SidebarSection::ALL.to_vec();
+            return;
+        }
         self.sidebar_order = self.normalized_sidebar_order();
+    }
+
+    pub fn normalize_sidebar_collapsed(&mut self) {
+        let mut collapsed = Vec::new();
+        for section in self.sidebar_collapsed.iter().copied() {
+            if SidebarSection::ALL.contains(&section) && !collapsed.contains(&section) {
+                collapsed.push(section);
+            }
+        }
+        self.sidebar_collapsed = collapsed;
     }
 
     pub fn normalize_preview_panel_width(&mut self) {

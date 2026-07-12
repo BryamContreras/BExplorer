@@ -40,9 +40,7 @@ pub fn resolve_archive(path: &Path) -> Option<(PathBuf, PathBuf)> {
     let mut tail = PathBuf::new();
 
     while let Some(p) = current {
-        if p.file_name().is_none() {
-            return None;
-        }
+        p.file_name()?;
         if is_browsable_extension(p) && p.is_file() {
             return Some((p.to_path_buf(), tail));
         }
@@ -173,6 +171,7 @@ pub fn list_archive_contents(path: &Path) -> Result<Vec<FileEntry>> {
             size: if is_dir { None } else { entry.size },
             percent_full: None,
             modified,
+            created: None,
             is_hidden: false,
         });
     }

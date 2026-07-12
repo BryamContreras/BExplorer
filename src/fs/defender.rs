@@ -1,22 +1,33 @@
+#[cfg(target_os = "windows")]
 use std::ffi::{OsStr, OsString};
+#[cfg(target_os = "windows")]
 use std::fs;
-use std::path::{Path, PathBuf};
+#[cfg(target_os = "windows")]
+use std::path::Path;
+use std::path::PathBuf;
+#[cfg(target_os = "windows")]
 use std::sync::Arc;
+#[cfg(target_os = "windows")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_os = "windows")]
 use std::sync::mpsc::Sender;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(target_os = "windows")]
 use crate::utils::errors::{BExplorerError, Result};
 
+#[cfg(target_os = "windows")]
 const ELEVATED_DEFENDER_HELPER_ARG: &str = "--bexplorer-elevated-defender-helper";
 
+#[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
 pub struct DefenderJob {
     pub paths: Vec<PathBuf>,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DefenderScanState {
     Running,
@@ -60,6 +71,7 @@ pub struct DefenderSummary {
     pub error: Option<String>,
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub enum DefenderMessage {
     Progress(DefenderProgress),
@@ -74,6 +86,7 @@ pub enum ElevatedDefenderAction {
     ExcludePaths { paths: Vec<PathBuf> },
 }
 
+#[cfg(target_os = "windows")]
 pub fn run_scan(job: DefenderJob, tx: Sender<DefenderMessage>, cancel: Arc<AtomicBool>) {
     let started = Instant::now();
     let total = job.paths.len();
@@ -168,6 +181,7 @@ pub fn run_scan(job: DefenderJob, tx: Sender<DefenderMessage>, cancel: Arc<Atomi
     let _ = tx.send(DefenderMessage::Finished(summary));
 }
 
+#[cfg(target_os = "windows")]
 pub fn run_elevated_defender_action(action: &ElevatedDefenderAction) -> Result<()> {
     let request_path = elevated_defender_request_path();
     let request_json = serde_json::to_string(action)?;
@@ -196,6 +210,7 @@ pub fn run_elevated_defender_action(action: &ElevatedDefenderAction) -> Result<(
     }
 }
 
+#[cfg(target_os = "windows")]
 pub fn try_run_elevated_defender_helper_from_args() -> Option<i32> {
     let mut args = std::env::args_os();
     let _exe = args.next();
@@ -214,6 +229,7 @@ pub fn try_run_elevated_defender_helper_from_args() -> Option<i32> {
     })
 }
 
+#[cfg(target_os = "windows")]
 fn run_elevated_defender_helper(request_path: &Path) -> Result<()> {
     let request_json = fs::read_to_string(request_path)?;
     let _ = fs::remove_file(request_path);
@@ -224,6 +240,7 @@ fn run_elevated_defender_helper(request_path: &Path) -> Result<()> {
     run_defender_action(&action)
 }
 
+#[cfg(target_os = "windows")]
 fn run_defender_action(action: &ElevatedDefenderAction) -> Result<()> {
     match action {
         ElevatedDefenderAction::RemoveThreats => {
@@ -235,6 +252,7 @@ fn run_defender_action(action: &ElevatedDefenderAction) -> Result<()> {
     }
 }
 
+#[cfg(target_os = "windows")]
 fn elevated_defender_request_path() -> PathBuf {
     let stamp = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -246,6 +264,7 @@ fn elevated_defender_request_path() -> PathBuf {
     ))
 }
 
+#[cfg(target_os = "windows")]
 fn summary(
     job: &DefenderJob,
     state: DefenderScanState,
@@ -266,6 +285,7 @@ fn summary(
     }
 }
 
+#[cfg(target_os = "windows")]
 fn dedupe_threats(threats: &mut Vec<DefenderThreat>) {
     let mut seen = std::collections::BTreeSet::new();
     threats.retain(|threat| {

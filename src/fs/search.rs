@@ -10,6 +10,8 @@ use crate::fs::explorer::{self, EntryKind, FileEntry};
 const MAX_SEARCH_RESULTS: usize = 20_000;
 const SEARCH_BATCH_SIZE: usize = 32;
 const SEARCH_BATCH_INTERVAL: Duration = Duration::from_millis(40);
+const SEARCH_YIELD_INTERVAL: usize = 128;
+const SEARCH_COOPERATIVE_PAUSE: Duration = Duration::from_millis(1);
 
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
@@ -52,6 +54,7 @@ where
     let mut matched_count = 0;
     let mut truncated = false;
     let mut last_batch = Instant::now();
+    let mut scanned_items = 0usize;
 
     while let Some(folder) = pending.pop_front() {
         if cancelled.load(Ordering::Relaxed) {
@@ -63,6 +66,10 @@ where
         };
 
         for item in read_dir {
+            scanned_items = scanned_items.saturating_add(1);
+            if scanned_items.is_multiple_of(SEARCH_YIELD_INTERVAL) {
+                std::thread::sleep(SEARCH_COOPERATIVE_PAUSE);
+            }
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }
@@ -124,6 +131,7 @@ where
                     },
                     percent_full: None,
                     modified: metadata.modified().ok().map(format_system_time),
+                    created: metadata.created().ok().map(format_system_time),
                     is_hidden: hidden,
                 };
                 if !push_search_entry(
@@ -188,7 +196,10 @@ where
         }
     };
 
-    for entry in entries {
+    for (index, entry) in entries.into_iter().enumerate() {
+        if index > 0 && index.is_multiple_of(SEARCH_YIELD_INTERVAL) {
+            std::thread::sleep(SEARCH_COOPERATIVE_PAUSE);
+        }
         if cancelled.load(Ordering::Relaxed) {
             return false;
         }
@@ -225,6 +236,7 @@ where
             size: if entry.is_dir { None } else { entry.size },
             percent_full: None,
             modified,
+            created: None,
             is_hidden: false,
         };
 
@@ -314,6 +326,7 @@ where
     let mut matched_count = 0;
     let mut truncated = false;
     let mut last_batch = Instant::now();
+    let mut scanned_items = 0usize;
 
     while let Some(folder) = pending.pop_front() {
         if cancelled.load(Ordering::Relaxed) {
@@ -325,6 +338,10 @@ where
         };
 
         for entry in children {
+            scanned_items = scanned_items.saturating_add(1);
+            if scanned_items.is_multiple_of(SEARCH_YIELD_INTERVAL) {
+                std::thread::sleep(SEARCH_COOPERATIVE_PAUSE);
+            }
             if cancelled.load(Ordering::Relaxed) {
                 break;
             }

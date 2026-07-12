@@ -1,6 +1,8 @@
+#[cfg(target_os = "windows")]
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "windows")]
 use std::process::{Command, Stdio};
+#[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicBool;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::Ordering;
@@ -9,6 +11,7 @@ use std::time::Duration;
 
 use crate::utils::errors::{BExplorerError, Result};
 
+#[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
 pub struct WindowsDefenderThreat {
     pub name: String,
@@ -16,6 +19,7 @@ pub struct WindowsDefenderThreat {
     pub status: String,
 }
 
+#[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
 pub struct WindowsDefenderScanResult {
     pub target: PathBuf,
@@ -422,31 +426,6 @@ fn windows_defender_command() -> Option<PathBuf> {
         );
     }
     candidates.into_iter().find(|path| path.is_file())
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(super) fn scan_path_with_windows_defender(
-    path: &Path,
-    _cancel: &AtomicBool,
-) -> Result<WindowsDefenderScanResult> {
-    Err(BExplorerError::Shell(format!(
-        "Windows Defender scan is only available on Windows: {}",
-        path.display()
-    )))
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(super) fn remove_windows_defender_threats() -> Result<()> {
-    Err(BExplorerError::Shell(
-        "Windows Defender threat removal is only available on Windows".into(),
-    ))
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(super) fn exclude_windows_defender_paths(_paths: &[PathBuf]) -> Result<()> {
-    Err(BExplorerError::Shell(
-        "Windows Defender exclusions are only available on Windows".into(),
-    ))
 }
 
 #[cfg(not(target_os = "windows"))]

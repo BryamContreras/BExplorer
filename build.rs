@@ -7,6 +7,7 @@ use std::process::Command;
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-env-changed=BEXPLORER_SKIP_7ZIP_BUILD");
     println!("cargo:rerun-if-changed=assets/windows/bexplorer.ico");
     println!("cargo:rerun-if-changed=assets/windows/bexplorer.rc");
     println!("cargo:rerun-if-changed=vendor/7zip-ffi/bexplorer_7zip.cpp");
@@ -20,14 +21,21 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/OpenCallbackConsole.h");
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/ExtractCallbackConsole.h");
 
+    // `cargo check` does not link the native archive library. This opt-in is
+    // useful for validating Windows Rust code from a host without a MinGW C++
+    // toolchain; release builds still compile and link 7-Zip normally.
+    let skip_7zip = env::var_os("BEXPLORER_SKIP_7ZIP_BUILD").is_some();
+
     if target_is_windows() {
         compile_windows_resources();
-        if target_env_is("msvc") {
+        if skip_7zip {
+            println!("cargo:warning=Skipping native 7-Zip build for cross-target cargo check");
+        } else if target_env_is("msvc") {
             build_7zip_lib("msvc");
         } else {
             build_7zip_lib("mingw");
         }
-    } else if target_is_unix() {
+    } else if target_is_unix() && !skip_7zip {
         build_7zip_lib("gcc");
     }
 }

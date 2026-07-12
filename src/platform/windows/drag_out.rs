@@ -2,21 +2,7 @@ use std::path::PathBuf;
 
 use crate::utils::errors::{BExplorerError, Result};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NativeDragEffect {
-    None,
-    Copy,
-    Move,
-    Link,
-}
-
-#[derive(Clone, Debug)]
-pub struct NativeDragResult {
-    pub effect: NativeDragEffect,
-    pub paths: Vec<PathBuf>,
-}
-
-pub fn start_file_drag(paths: Vec<PathBuf>) -> Result<NativeDragResult> {
+pub fn start_file_drag(paths: Vec<PathBuf>) -> Result<()> {
     run_file_drag(paths)
 }
 
@@ -26,30 +12,7 @@ pub fn release_mouse_capture() {
     }
 }
 
-pub fn cursor_is_outside_window(window: raw_window_handle::RawWindowHandle, margin: i32) -> bool {
-    use windows::Win32::Foundation::{HWND, POINT, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowRect};
-
-    let raw_window_handle::RawWindowHandle::Win32(handle) = window else {
-        return false;
-    };
-
-    let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
-    let mut cursor = POINT::default();
-    let mut rect = RECT::default();
-    if unsafe { GetCursorPos(&mut cursor) }.is_err()
-        || unsafe { GetWindowRect(hwnd, &mut rect) }.is_err()
-    {
-        return false;
-    }
-
-    cursor.x < rect.left - margin
-        || cursor.x > rect.right + margin
-        || cursor.y < rect.top - margin
-        || cursor.y > rect.bottom + margin
-}
-
-fn run_file_drag(paths: Vec<PathBuf>) -> Result<NativeDragResult> {
+fn run_file_drag(paths: Vec<PathBuf>) -> Result<()> {
     use windows::Win32::Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP};
     use windows::Win32::System::Com::IDataObject;
     use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource};
@@ -68,10 +31,7 @@ fn run_file_drag(paths: Vec<PathBuf>) -> Result<NativeDragResult> {
 
     let result = unsafe { DoDragDrop(&data_object, &drop_source, DROPEFFECT_COPY, &mut effect) };
     if result == DRAGDROP_S_CANCEL {
-        return Ok(NativeDragResult {
-            effect: NativeDragEffect::None,
-            paths,
-        });
+        return Ok(());
     }
     if result != DRAGDROP_S_DROP && result.is_err() {
         return Err(BExplorerError::Shell(format!(
@@ -80,10 +40,7 @@ fn run_file_drag(paths: Vec<PathBuf>) -> Result<NativeDragResult> {
         )));
     }
 
-    Ok(NativeDragResult {
-        effect: native_drag_effect_from_windows(effect),
-        paths,
-    })
+    Ok(())
 }
 
 #[windows::core::implement(windows::Win32::System::Com::IDataObject)]
@@ -334,21 +291,5 @@ impl Drop for OleDragGuard {
                 windows::Win32::System::Ole::OleUninitialize();
             }
         }
-    }
-}
-
-fn native_drag_effect_from_windows(
-    effect: windows::Win32::System::Ole::DROPEFFECT,
-) -> NativeDragEffect {
-    use windows::Win32::System::Ole::{DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE};
-
-    if effect.0 & DROPEFFECT_MOVE.0 != 0 {
-        NativeDragEffect::Move
-    } else if effect.0 & DROPEFFECT_COPY.0 != 0 {
-        NativeDragEffect::Copy
-    } else if effect.0 & DROPEFFECT_LINK.0 != 0 {
-        NativeDragEffect::Link
-    } else {
-        NativeDragEffect::None
     }
 }

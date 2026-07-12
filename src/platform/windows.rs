@@ -1,23 +1,17 @@
 mod drag_out;
 mod drives;
 mod icons;
-mod keyboard;
 mod network;
 mod portable;
 mod util;
 mod window;
 
 #[allow(unused_imports)]
-pub use drag_out::{
-    NativeDragEffect, NativeDragResult, cursor_is_outside_window, release_mouse_capture,
-    start_file_drag,
-};
+pub use drag_out::{release_mouse_capture, start_file_drag};
 #[allow(unused_imports)]
 pub use drives::{WindowsDriveInfo, WindowsDriveKind, drive_info, set_volume_label};
 #[allow(unused_imports)]
 pub use icons::{NativeIconImage, native_file_icon, native_file_icon_highres};
-#[allow(unused_imports)]
-pub use keyboard::file_paste_shortcut_down;
 #[allow(unused_imports)]
 pub use network::{
     NetworkComputerInfo, NetworkShareInfo, network_computer_netbios_at, network_computers,

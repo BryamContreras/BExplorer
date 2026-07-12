@@ -291,38 +291,6 @@ impl ArchiveCompressionMethod {
     }
 }
 
-pub fn default_archive_path(
-    sources: &[PathBuf],
-    current_dir: Option<&Path>,
-    format: ArchiveFormat,
-) -> Result<PathBuf> {
-    let Some(first) = sources.first() else {
-        return Err(BExplorerError::Operation(
-            "No items selected to compress".into(),
-        ));
-    };
-
-    let parent = current_dir
-        .filter(|path| path.is_dir())
-        .or_else(|| first.parent())
-        .unwrap_or_else(|| Path::new(""));
-    let stem = if sources.len() == 1 {
-        first
-            .file_stem()
-            .or_else(|| first.file_name())
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or("Archive")
-    } else {
-        "Archive"
-    };
-
-    Ok(unique_path(
-        &parent.join(format!("{stem}.{}", format.extension())),
-        false,
-    ))
-}
-
 #[allow(dead_code)]
 pub fn compress(paths: &[PathBuf], destination: &Path, format: ArchiveFormat) -> Result<PathBuf> {
     compress_with_method(
@@ -430,16 +398,6 @@ fn use_7zip_for_compression(format: ArchiveFormat, password: Option<&str>) -> bo
 
 fn password_has_value(password: Option<&str>) -> bool {
     password.is_some_and(|value| !value.is_empty())
-}
-
-pub fn archive_error_may_need_password(error: &str) -> bool {
-    let lower = error.to_ascii_lowercase();
-    lower.contains("password")
-        || lower.contains("encrypted")
-        || lower.contains("crc or size mismatch")
-        || lower.contains("data error")
-        || lower.contains("wrong password")
-        || lower.contains("embedded 7-zip operation failed")
 }
 
 fn archive_password_required_error() -> BExplorerError {

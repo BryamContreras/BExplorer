@@ -1,7 +1,11 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime};
 
 use fs2::free_space;
 
@@ -119,9 +123,11 @@ impl FileCategory {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DriveKind {
     Local,
+    External,
     Usb,
     Network,
     NetworkComputer,
@@ -139,6 +145,7 @@ impl DriveKind {
     pub fn label(self) -> &'static str {
         match self {
             Self::Local => "Local Disk",
+            Self::External => "External Drive",
             Self::Usb => "USB Drive",
             Self::Network => "Network Drive",
             Self::NetworkComputer => "Network Computer",
@@ -154,7 +161,7 @@ impl DriveKind {
     }
 
     pub fn is_ejectable(self) -> bool {
-        matches!(self, Self::Usb | Self::Optical)
+        matches!(self, Self::External | Self::Usb | Self::Optical)
     }
 }
 
@@ -170,6 +177,7 @@ pub struct FileEntry {
     pub size: Option<u64>,
     pub percent_full: Option<f32>,
     pub modified: Option<String>,
+    pub created: Option<String>,
     pub is_hidden: bool,
 }
 
@@ -226,6 +234,9 @@ const VIRTUAL_ROOT: &str = "__bexplorer_virtual__";
 const VIRTUAL_NETWORK: &str = "network";
 const VIRTUAL_PORTABLE: &str = "portable";
 const WPD_ROOT_OBJECT_ID: &str = "DEVICE";
+const NETWORK_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+static NETWORK_DISCOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
+static NETWORK_ROOT_CACHE: OnceLock<Mutex<Vec<FileEntry>>> = OnceLock::new();
 
 pub fn list_entries(path: Option<&Path>, show_hidden: bool) -> Result<Vec<FileEntry>> {
     match path {
@@ -291,37 +302,6 @@ pub fn portable_device_path(device_id: &str, name: &str) -> PathBuf {
     PathBuf::from(VIRTUAL_ROOT)
         .join(VIRTUAL_PORTABLE)
         .join(encoded_segment(device_id, name))
-}
-
-pub fn virtual_parent(path: &Path) -> Option<Option<PathBuf>> {
-    match virtual_location(path)? {
-        VirtualLocation::NetworkRoot => Some(None),
-        VirtualLocation::NetworkHost { .. } => Some(Some(network_root_path())),
-        VirtualLocation::PortableObject { .. } => {
-            let components = virtual_components(path);
-            if components.len() <= 3 {
-                Some(None)
-            } else {
-                path.parent().map(|parent| Some(parent.to_path_buf()))
-            }
-        }
-    }
-}
-
-pub fn unc_share_parent(path: &Path) -> Option<PathBuf> {
-    let display = path.display().to_string();
-    let trimmed = display.trim_start_matches('\\');
-    if trimmed.len() == display.len() {
-        return None;
-    }
-
-    let mut parts = trimmed.split('\\').filter(|part| !part.is_empty());
-    let host = parts.next()?;
-    let _share = parts.next()?;
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(network_host_path(host))
 }
 
 pub fn virtual_title(path: &Path) -> Option<String> {
@@ -428,6 +408,7 @@ pub fn list_storage_entries() -> Result<Vec<FileEntry>> {
             size: total,
             percent_full,
             modified: None,
+            created: None,
             is_hidden: false,
         });
     }
@@ -546,10 +527,121 @@ fn list_virtual_entries(path: &Path) -> Result<Vec<FileEntry>> {
 }
 
 fn list_network_computers() -> Vec<FileEntry> {
+    let cached = network_root_cached_entries();
+    if NETWORK_DISCOVERY_ACTIVE.swap(true, AtomicOrdering::AcqRel) {
+        return cached;
+    }
+
+    enum SourceMessage {
+        Entries(Vec<FileEntry>),
+        Finished,
+    }
+
+    let (sender, receiver) = mpsc::channel();
+    let sources: [fn() -> Vec<FileEntry>; 7] = [
+        list_network_computer_entries_default,
+        list_network_computer_entries_fast,
+        list_network_computer_entries_netbios_cached,
+        list_network_printer_entries,
+        list_network_function_device_entries,
+        list_network_computer_entries_wnet,
+        list_network_shell_entries,
+    ];
+    for source in sources {
+        let sender = sender.clone();
+        thread::spawn(move || {
+            let entries = source();
+            if !entries.is_empty() {
+                let _ = sender.send(SourceMessage::Entries(entries));
+            }
+            let _ = sender.send(SourceMessage::Finished);
+        });
+    }
+
+    let sender_for_netbios = sender.clone();
+    thread::spawn(move || {
+        let addresses = list_network_netbios_neighbor_addresses();
+        let (host_sender, host_receiver) = mpsc::channel();
+        for address in addresses {
+            let host_sender = host_sender.clone();
+            thread::spawn(move || {
+                let _ = host_sender.send(network_computer_entry_netbios_address(&address));
+            });
+        }
+        drop(host_sender);
+        for entry in host_receiver.into_iter().flatten() {
+            let _ = sender_for_netbios.send(SourceMessage::Entries(vec![entry]));
+        }
+        let _ = sender_for_netbios.send(SourceMessage::Finished);
+    });
+    drop(sender);
+
+    let mut entries = cached;
+    let mut pending_sources = 8_usize;
+    let deadline = Instant::now() + NETWORK_DISCOVERY_TIMEOUT;
+    while pending_sources > 0 && Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(remaining.min(Duration::from_millis(150))) {
+            Ok(SourceMessage::Entries(discovered)) => {
+                merge_network_entries(&mut entries, discovered);
+            }
+            Ok(SourceMessage::Finished) => pending_sources = pending_sources.saturating_sub(1),
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    NETWORK_DISCOVERY_ACTIVE.store(false, AtomicOrdering::Release);
+    sort_entries_by_name(&mut entries);
+    if let Ok(mut cache) = network_root_cache().lock() {
+        *cache = entries.clone();
+    }
+    entries
+}
+
+fn list_network_computer_entries_default() -> Vec<FileEntry> {
     crate::platform::network_computers()
         .into_iter()
         .map(network_computer_entry)
         .collect()
+}
+
+fn network_root_cache() -> &'static Mutex<Vec<FileEntry>> {
+    NETWORK_ROOT_CACHE.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn network_root_cached_entries() -> Vec<FileEntry> {
+    network_root_cache()
+        .lock()
+        .map(|entries| entries.clone())
+        .unwrap_or_default()
+}
+
+fn merge_network_entries(target: &mut Vec<FileEntry>, entries: Vec<FileEntry>) {
+    for entry in entries {
+        if let Some(existing) = target
+            .iter_mut()
+            .find(|existing| existing.path == entry.path)
+        {
+            if network_entry_priority(&entry) >= network_entry_priority(existing) {
+                *existing = entry;
+            }
+        } else {
+            target.push(entry);
+        }
+    }
+}
+
+fn network_entry_priority(entry: &FileEntry) -> u8 {
+    match entry.drive_kind {
+        Some(DriveKind::NetworkMultifunction) => 70,
+        Some(DriveKind::NetworkPrinter | DriveKind::NetworkScanner) => 65,
+        Some(DriveKind::NetworkComputer) => 60,
+        Some(DriveKind::NetworkDevice) => 40,
+        Some(DriveKind::Network) => 30,
+        Some(_) => 20,
+        None => 10,
+    }
 }
 
 pub fn list_network_computer_entries_fast() -> Vec<FileEntry> {
@@ -638,6 +730,7 @@ fn network_computer_entry(computer: crate::platform::NetworkComputerInfo) -> Fil
         size: None,
         percent_full: None,
         modified: None,
+        created: None,
         is_hidden: false,
     }
 }
@@ -657,6 +750,7 @@ fn list_network_shares(host: &str) -> Vec<FileEntry> {
             size: None,
             percent_full: None,
             modified: None,
+            created: None,
             is_hidden: false,
         })
         .collect()
@@ -688,6 +782,7 @@ fn list_portable_objects(
                     size: object.size,
                     percent_full: None,
                     modified: None,
+                    created: None,
                     is_hidden: false,
                 }
             })
@@ -707,6 +802,7 @@ fn portable_device_entry(device: &PortableDevice) -> FileEntry {
         size: None,
         percent_full: None,
         modified: None,
+        created: None,
         is_hidden: false,
     }
 }
@@ -759,6 +855,7 @@ fn list_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>> {
             },
             percent_full: None,
             modified: metadata.modified().ok().map(format_system_time),
+            created: metadata.created().ok().map(format_system_time),
             is_hidden,
         });
     }
@@ -768,6 +865,9 @@ fn list_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>> {
 }
 
 fn list_unc_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>> {
+    if let Some(mounted_path) = crate::platform::mounted_network_path(path) {
+        return list_directory(&mounted_path, show_hidden);
+    }
     match list_directory(path, show_hidden) {
         Err(BExplorerError::Io(error))
             if error.kind() == std::io::ErrorKind::PermissionDenied
@@ -785,8 +885,14 @@ pub fn sort_entries_by_name(entries: &mut [FileEntry]) {
             .kind
             .is_container()
             .cmp(&left.kind.is_container())
-            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| compare_names_case_insensitive(&left.name, &right.name))
     });
+}
+
+pub fn compare_names_case_insensitive(left: &str, right: &str) -> std::cmp::Ordering {
+    left.chars()
+        .flat_map(char::to_lowercase)
+        .cmp(right.chars().flat_map(char::to_lowercase))
 }
 
 fn virtual_location(path: &Path) -> Option<VirtualLocation> {
@@ -931,7 +1037,16 @@ fn storage_devices() -> Vec<StorageDevice> {
     let mut roots = vec![storage_device_from_path(PathBuf::from("/"))];
     if let Ok(volumes) = fs::read_dir("/Volumes") {
         for volume in volumes.flatten() {
-            roots.push(storage_device_from_path(volume.path()));
+            let path = volume.path();
+            if path
+                .canonicalize()
+                .is_ok_and(|canonical| canonical == Path::new("/"))
+            {
+                continue;
+            }
+            let mut device = storage_device_from_path(path);
+            device.drive_kind = DriveKind::External;
+            roots.push(device);
         }
     }
     roots
@@ -1351,6 +1466,7 @@ mod tests {
             size: None,
             percent_full: None,
             modified: None,
+            created: None,
             is_hidden: false,
         }
     }
@@ -1421,18 +1537,22 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_unc_paths() {
-        assert!(is_unc_path(Path::new(r"\\SERVER\Share")));
-        assert!(!is_unc_path(Path::new(r"C:\Users")));
+    fn merges_network_sources_without_duplicates_and_keeps_richer_kind() {
+        let mut entries = vec![storage_entry("Office host", DriveKind::NetworkComputer)];
+        let mut printer = storage_entry("Office printer", DriveKind::NetworkPrinter);
+        printer.path = entries[0].path.clone();
+
+        merge_network_entries(&mut entries, vec![printer]);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "Office printer");
+        assert_eq!(entries[0].drive_kind, Some(DriveKind::NetworkPrinter));
     }
 
     #[test]
-    fn maps_unc_share_to_network_host_parent() {
-        assert_eq!(
-            unc_share_parent(Path::new(r"\\SERVER\Share")),
-            Some(network_host_path("SERVER"))
-        );
-        assert_eq!(unc_share_parent(Path::new(r"\\SERVER\Share\Folder")), None);
+    fn recognizes_unc_paths() {
+        assert!(is_unc_path(Path::new(r"\\SERVER\Share")));
+        assert!(!is_unc_path(Path::new(r"C:\Users")));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
