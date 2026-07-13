@@ -21,7 +21,7 @@ fs2 = "0.4"
 hayro = { version = "0.7", features = ["embed-fonts"] }
 iced = { version = "0.14.0", features = ["svg", "image"] }
 image = { version = "0.25", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
-md5 = "0.7"
+md5 = "0.8"
 open = "5"
 raw-window-handle = "0.6"
 resvg = "0.45"
