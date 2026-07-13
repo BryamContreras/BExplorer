@@ -2,26 +2,29 @@
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Status](https://img.shields.io/badge/status-beta-yellow)
+![Version](https://img.shields.io/badge/version-1.0.0-brightgreen)
+![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-BExplorer is a Windows-first desktop file explorer written in Rust with
-`iced`. It focuses on fast file management, split-pane workflows,
+BExplorer is a stable desktop file explorer for Windows and Linux written in
+Rust with `iced`. It focuses on fast file management, split-pane workflows,
 archive handling, preview support, and a modern compact interface without
 turning into a heavy system shell replacement.
 
 Spanish documentation is available in [docs/es/README.md](docs/es/README.md).
 
-The project is designed so platform-specific code stays isolated. Windows is
-currently the primary target, Linux has an initial desktop-neutral backend, and
-macOS support is kept behind separate platform modules for future work.
+The project keeps platform-specific code isolated behind a shared facade.
+Windows and Linux are supported targets with native integrations appropriate to
+each system. macOS remains an experimental future target behind separate
+platform modules.
 
 ## Status
 
-BExplorer is in active beta development. Its desktop interface has been migrated
-from `egui` to `iced` and the superseded UI implementation has been removed.
-The current development phase focuses on reliability and clean-machine testing
-rather than adding another broad set of file-manager features.
+BExplorer 1.0 is the first stable Windows and Linux version. Its desktop
+interface, file-operation engine, archive workflows, platform integrations,
+configuration format, and session format form the supported 1.x baseline.
+Development now prioritizes compatibility fixes, reliability, and focused
+improvements over broad rewrites.
 
 The current `iced` interface covers local browsing, tabs, split panes, view
 modes, filtering, grouping and column sorting, rename, background file deletion,
@@ -31,10 +34,11 @@ truncated. Complete search, previews, archive jobs, Microsoft Defender actions,
 MTP transfers, disk-image mounting, network discovery, and native drag-and-drop
 are connected to the `iced` interface.
 
-Linux builds and covers core local browsing/file operations with
-Freedesktop/XDG-style integration, but still needs broader runtime testing
-across distributions, Wayland/X11 sessions, portals, network mounts, USB
-drives, and desktop clipboard implementations.
+Linux provides local and removable storage, file operations, archives,
+previews, search, GVfs/FUSE portable devices, network discovery, UDisks2,
+Polkit, Freedesktop/XDG icons and thumbnails, clipboard interoperability, and
+Wayland/X11 support. Integrations that depend on desktop services degrade to a
+readable fallback when those optional services are unavailable.
 
 ## Highlights
 
@@ -80,7 +84,8 @@ explorer:
 - copy from and to Windows Explorer through the system clipboard;
 - copy, paste, and delete files on supported MTP devices;
 - copy and move across local drives, removable drives, and UNC shares;
-- retry supported operations through UAC when Windows denies access.
+- retry supported operations through UAC on Windows or Polkit on Linux when
+  access is denied.
 
 Conflict resolution is available for copy and move operations:
 
@@ -132,15 +137,15 @@ blocking the UI.
 
 | Feature | Windows | Linux | macOS |
 | --- | --- | --- | --- |
-| Local file browsing | Supported | Initial | Planned |
-| Tabs and split view | Supported | Initial | Planned |
-| File transfers | Supported | Initial | Planned |
-| Archive browsing/extraction | Supported | Initial | Planned |
-| Native icons/thumbnails | Supported | Initial | Planned |
-| MTP portable devices | Supported | Mounted GVfs/FUSE devices | Stub |
-| Network discovery | Supported | Best effort | Planned |
-| ISO mount/eject | Supported | Initial via UDisks2 | Planned |
-| Acrylic/Mica/blur effects | Supported | N/A | N/A |
+| Local file browsing | Supported | Supported | Experimental |
+| Tabs and split view | Supported | Supported | Experimental |
+| File transfers | Supported | Supported | Experimental |
+| Archive browsing/extraction | Supported | Supported | Experimental |
+| Native icons/thumbnails | Supported | Supported | Experimental |
+| MTP portable devices | WPD/MTP | Mounted GVfs/FUSE devices | Not supported |
+| Network discovery | Native providers | GVfs/Samba/Avahi | Mounted SMB only |
+| ISO mount/eject | Supported | UDisks2 | Experimental |
+| Window blur | Native Windows effects | KWin / Blur My Shell | Experimental |
 | Windows Defender scan | Supported | N/A | N/A |
 
 The platform facade lives in `src/platform/mod.rs`. Windows-specific logic is
@@ -181,13 +186,15 @@ KDE Plasma/Wayland uses KWin's optional native blur protocol. GNOME/Mutter does
 not expose its Shell blur actor as a Wayland client protocol, so BExplorer uses
 the optional [Blur My Shell](https://extensions.gnome.org/extension/3193/blur-my-shell/)
 extension for GNOME application blur. Selecting Blur registers the `bexplorer`
-application ID with that extension; disabling it removes BExplorer's entry
-again. If the extension is unavailable, BExplorer keeps an opaque readable
-background.
+application ID with that extension and disables its focused-window opacity
+override so the active explorer remains blurred; disabling the effect removes
+BExplorer's entry again. If the extension is unavailable, BExplorer keeps an
+opaque readable background.
 
 ## Known Limitations
 
-- Linux support is initial and not yet at Windows feature parity.
+- Windows and Linux use different native facilities, so a few integrations are
+  intentionally platform-specific rather than identical.
 - Direct WPD/MTP sessions and Microsoft Defender are Windows-only. Linux exposes
   portable devices mounted by GVfs as regular storage paths.
 - macOS has initial storage, disk-image, eject, and mounted-SMB adapters but
@@ -213,8 +220,8 @@ background.
   numbered names.
 - Network discovery depends on Windows services, providers, credentials, and
   the local network. Devices may appear progressively.
-- Public distribution still needs installer polish, signing, and clean-machine
-  testing.
+- Distributed Windows builds may show a SmartScreen warning until a signed
+  installer is provided; the portable archive includes a SHA-256 checksum.
 
 ## Build Requirements
 
@@ -282,7 +289,25 @@ cargo build --release
 
 BExplorer currently builds as a mostly self-contained executable.
 
-For a simple internal beta installer, the installer can copy:
+Windows portable packages and the graphical installer can be built with:
+
+```powershell
+scripts/windows/package.ps1
+```
+
+This requires Inno Setup 6 or 7 to be installed. The script creates a versioned
+portable ZIP, a bilingual Inno Setup installer, and SHA-256 checksums under
+`dist/`. The installer:
+
+- lets the user choose English or Spanish;
+- installs BExplorer under Program Files;
+- creates its Start Menu entry by default;
+- offers an optional Desktop shortcut;
+- offers adding BExplorer to the system `PATH`, enabled by default;
+- removes only its own `PATH` entry during uninstall.
+
+Use `-SkipInstaller` to create only the portable ZIP. A manual portable
+installation can copy:
 
 ```text
 BExplorer.exe
@@ -308,15 +333,29 @@ should also include the 7-Zip license information from
 `vendor/7zip-src/DOC/unRarLicense.txt`, or otherwise provide equivalent
 third-party notices.
 
-Linux packages can be staged with:
+Linux packages can be built with:
 
 ```bash
-tools/package_linux.sh
+scripts/linux/package.sh
 ```
 
-The script creates a tarball under `dist/` and, when `dpkg-deb` is installed, a
-basic `.deb` package with the desktop entry, app icon, metainfo, license, and
-third-party notices.
+The script creates a tarball and SHA-256 checksum under `dist/` and, when
+`dpkg-deb` is installed, a basic `.deb` package and checksum with the desktop
+entry, app icon, metainfo, license, third-party notices, and original 7-Zip
+license texts. The package installs the executable as `/usr/bin/bexplorer` and
+registers the Desktop entry and application icon. Install the generated package
+with:
+
+```bash
+scripts/linux/install-deb.sh
+```
+
+Both legacy commands under `tools/` remain as compatibility wrappers.
+
+Every pull request and `master` update is checked on Windows and Linux through
+the workflow in `.github/workflows/ci.yml`. It runs formatting, Clippy, tests,
+optimized builds, platform metadata validation, and package generation without
+publishing a release.
 
 ## Local Data
 
@@ -381,6 +420,9 @@ src/
 vendor/
   7zip-src/
   7zip-ffi/
+scripts/
+  linux/                     # Debian/tar packaging and local .deb install
+  windows/                   # Portable ZIP and Inno Setup installer
 ```
 
 ## Tests
@@ -405,6 +447,8 @@ The current test suite covers:
 - clipboard and paste shortcut behavior;
 - Linux mountinfo parsing, MIME/file URI clipboard helpers, UDisks parsing,
   network helper parsing, and XDG thumbnail/icon metadata.
+- Linux elevated-operation response handling with `fs.protected_regular`.
+- GNOME/KDE blur selection and readable fallbacks.
 
 Run:
 
@@ -414,24 +458,25 @@ cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 ```
 
-## Roadmap
+## Post-1.0 roadmap
 
-Near-term focus:
+Planned 1.x improvements:
 
-- internal beta hardening on Windows;
-- installer and update flow;
-- code signing;
-- broader clean-machine testing;
-- stronger network and MTP edge-case coverage;
-- additional preview formats;
-- continued separation of Windows/Linux/macOS platform layers.
+- signed Windows installer and update flow;
+- broader distribution and clean-machine compatibility coverage;
+- stronger network, MTP, and portal edge-case handling;
+- additional preview formats and native property integrations;
+- continued separation and testing of platform layers.
 
-Longer-term:
+Longer-term exploration:
 
 - Linux runtime testing, drag-out, deeper portal integration, and richer MTP;
 - macOS file-management backend;
 - platform-native preview/icon integrations outside Windows;
 - optional plugin or extension points.
+
+Release history is recorded in [CHANGELOG.md](CHANGELOG.md). Security issues
+should be reported according to [SECURITY.md](SECURITY.md).
 
 ## License
 

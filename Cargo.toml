@@ -1,9 +1,14 @@
 [package]
 name = "bexplorer"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
-description = "BExplorer, a native Rust desktop file explorer MVP."
+description = "A native Rust file explorer for Windows and Linux."
 license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/BryamContreras/BExplorer"
+repository = "https://github.com/BryamContreras/BExplorer"
+keywords = ["file-manager", "explorer", "desktop", "windows", "linux"]
+categories = ["filesystem", "gui"]
 
 [dependencies]
 arboard = { version = "3", features = ["wayland-data-control"] }

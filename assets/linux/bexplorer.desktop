@@ -1,11 +1,16 @@
 [Desktop Entry]
 Type=Application
 Name=BExplorer
-Comment=Native Rust file explorer
+GenericName=File Manager
+GenericName[es]=Explorador de archivos
+Comment=Browse and manage files with tabs and split panes
+Comment[es]=Navega y gestiona archivos con pestañas y panel dividido
 Exec=bexplorer
 Icon=bexplorer
 Terminal=false
 Categories=System;FileTools;FileManager;
 MimeType=inode/directory;
+Keywords=files;folders;explorer;manager;archive;
+Keywords[es]=archivos;carpetas;explorador;gestor;comprimidos;
 StartupNotify=true
 StartupWMClass=bexplorer

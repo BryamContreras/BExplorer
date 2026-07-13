@@ -1,30 +1,25 @@
 # BExplorer
 
-BExplorer es un explorador de archivos avanzado y liviano escrito en Rust. Su
-objetivo es mejorar la gestion diaria de archivos sin intentar reemplazar todo
-el shell del sistema.
+BExplorer 1.0 es un explorador de archivos estable y liviano para Windows y
+Linux, escrito en Rust. Su objetivo es mejorar la gestion diaria de archivos
+sin intentar reemplazar todo el shell del sistema.
 
-La prioridad historica ha sido Windows, pero el proyecto esta organizado para
-que la logica especifica de cada sistema operativo quede separada. Linux ya
-compila y tiene una primera base neutral para escritorio; macOS sigue como
-trabajo futuro.
+El proyecto esta organizado para que la logica especifica de cada sistema
+operativo quede separada. Windows y Linux son plataformas soportadas con
+integraciones nativas propias; macOS sigue siendo un objetivo experimental.
 
 ## Estado
 
-BExplorer esta en fase beta.
+BExplorer 1.0 es la primera version estable para Windows y Linux. La interfaz,
+el motor de operaciones, los formatos de configuracion y sesion, los flujos de
+comprimidos y las integraciones de plataforma forman la base compatible de la
+serie 1.x.
 
-La fase actual se concentra en endurecimiento, pruebas en instalaciones limpias
-y distribucion; las funciones principales del explorador ya estan conectadas.
-
-La version actual ya es usable para pruebas internas en Windows, especialmente
-para gestion de archivos, comprimidos, vista dividida, red, dispositivos MTP y
-operaciones comunes como copiar, mover, eliminar y renombrar. En Linux ya hay
-soporte inicial para compilar, navegar archivos locales, detectar montajes desde
-`/proc/self/mountinfo`, clasificar unidades USB/red/opticas cuando el sistema
-lo expone, usar terminales comunes y registrar la app como gestor de carpetas
-con un archivo `.desktop`. La ventana la maneja `iced`/`winit`, asi que la app
-puede ejecutarse tanto en Wayland como en X11 cuando las librerias de runtime
-estan disponibles.
+Windows incluye integracion con WPD/MTP, Microsoft Defender, recursos nativos,
+red, portapapeles, montaje de imagenes y UAC. Linux incluye navegacion y
+operaciones completas, montajes desde `/proc/self/mountinfo`, unidades USB,
+red, dispositivos GVfs/FUSE, UDisks2, Polkit, iconos y miniaturas XDG,
+portapapeles nativo y soporte Wayland/X11 mediante `iced`/`winit`.
 
 La interfaz ya se ha migrado de `egui` a `iced` y se ha eliminado la
 implementacion visual sustituida. Cubre navegacion local, pestanas, panel
@@ -49,15 +44,17 @@ clientes Wayland, por lo que BExplorer se integra con la extension opcional
 Blur My Shell. Al activar Difuminado se registra el identificador `bexplorer`
 en la lista de aplicaciones de la extension y al desactivarlo se retira. Si la
 extension no esta instalada o habilitada, se conserva un fondo opaco legible.
+BExplorer tambien desactiva automaticamente la opacidad dinamica de la
+extension para que la ventana enfocada siga realmente difuminada.
 
-Antes de una beta publica conviene seguir probando:
+La compatibilidad continua se valida especialmente en:
 
 - instalaciones limpias de Windows;
 - redes con diferentes permisos y credenciales;
 - dispositivos USB, discos externos y celulares MTP;
 - carpetas que requieren permisos de administrador;
 - archivos comprimidos grandes o protegidos con contrasena;
-- escenarios de arrastrar y soltar dentro y fuera de la aplicacion.
+- escenarios de arrastrar y soltar dentro y fuera de la aplicacion;
 - distribuciones Linux con Wayland/X11, portales, montajes de red, USB y
   diferentes implementaciones de portapapeles.
 
@@ -70,11 +67,12 @@ Antes de una beta publica conviene seguir probando:
 - Vistas de detalles, lista, iconos, iconos grandes, iconos extra grandes y
   mosaicos.
 - Soporte para unidades locales, extraibles, ISO montadas, rutas UNC, red,
-  montajes Linux y dispositivos portatiles MTP en Windows.
+  montajes Linux, WPD/MTP en Windows y dispositivos GVfs/FUSE en Linux.
 - Descubrimiento progresivo de red con cache.
 - Copiar, cortar y pegar compatible con el portapapeles de Windows; en Linux se
   usan helpers MIME nativos cuando existen, con fallback de texto.
-- Arrastrar y soltar dentro de BExplorer y entre BExplorer y Windows.
+- Arrastrar y soltar dentro de BExplorer y hacia otras aplicaciones compatibles
+  en Windows y Linux.
 - Cola de transferencias con progreso, pausa, cancelacion y manejo de
   conflictos.
 - Reemplazos locales preparados: primero se copia y sincroniza el archivo o
@@ -87,7 +85,7 @@ Antes de una beta publica conviene seguir probando:
 - Busqueda rapida y busqueda completa, incluyendo archivos dentro de
   comprimidos soportados.
 - Panel de vista previa para imagenes, texto, SVG y PDF.
-- Integracion con Windows Defender.
+- Integracion con Windows Defender en Windows.
 - Personalizacion de tema, color, bordes de iconos, efectos de ventana, atajos
   y distribucion de la interfaz.
 
@@ -109,7 +107,7 @@ actual usa piezas comunes del sistema:
 - `xdg-terminal-exec` y terminales comunes como fallback;
 - `assets/linux/bexplorer.desktop` con `MimeType=inode/directory`.
 
-Limitaciones actuales en Linux:
+Diferencias e integraciones opcionales en Linux:
 
 - arrastrar archivos desde BExplorer hacia otros gestores usa helpers nativos
   compatibles con Wayland como `ripdrag`, `dragon-drag-and-drop`, `dragon` o
@@ -138,6 +136,21 @@ cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo run
 ```
+
+Los paquetes Linux se generan con `scripts/linux/package.sh`; el tarball, el
+paquete `.deb` y sus checksums incluyen los avisos y textos de licencia. El
+`.deb` instala el ejecutable en `/usr/bin/bexplorer`, registra la aplicacion en
+el menu del escritorio y puede instalarse con `scripts/linux/install-deb.sh`.
+
+En Windows, `scripts/windows/package.ps1` crea un ZIP portable y un instalador
+Inno Setup con checksum SHA-256. El instalador permite elegir espanol o ingles,
+crea por defecto una entrada en el menu Inicio y ofrece casillas para crear un
+acceso directo en el escritorio y agregar BExplorer al `PATH`. Al desinstalar
+retira solamente su propia entrada del `PATH`. Los comandos antiguos de
+`tools/` se conservan como wrappers compatibles.
+
+La CI comprueba formato, Clippy, pruebas, builds optimizados y empaquetado en
+ambas plataformas sin publicar releases automaticamente.
 
 ## Comprimidos
 
@@ -172,9 +185,10 @@ Consulta `THIRD_PARTY_NOTICES.md` y los archivos originales en
 La configuracion y la sesion se escriben en archivos temporales hermanos, se
 sincronizan y se reemplazan atomicamente. Las copias con conflicto `Reemplazar`
 tambien usan una copia preparada y sincronizada antes de modificar el destino.
-La suite actual en Linux ejecuta 78 pruebas, incluyendo una regresion que fuerza
+La suite actual ejecuta 98 pruebas, incluyendo una regresion que fuerza
 un fallo durante un reemplazo y verifica que el destino original se conserva.
 
-Las compilaciones de desarrollo siguen sin firma; Windows puede mostrar una
-advertencia al ejecutar binarios distribuidos manualmente. Este documento no
-representa una nueva version ni un release.
+Los paquetes portables de Windows incluyen checksum, pero pueden mostrar una
+advertencia de SmartScreen hasta que exista un instalador firmado. Consulta
+`CHANGELOG.md` para el historial de versiones y `SECURITY.md` para reportar
+vulnerabilidades de forma privada.

@@ -39,6 +39,8 @@ static void bfp_flush_streams()
     g_ErrStream->Flush();
 }
 
+#ifdef _WIN32
+
 static int bfp_call_7z_main2()
 {
   NConsoleClose::g_BreakCounter = 0;
@@ -52,11 +54,7 @@ static int bfp_call_7z_main2()
 
     try
     {
-      #ifdef _WIN32
       result = Main2();
-      #else
-      // POSIX uses bfp_7zr_run_argv() instead
-      #endif
     }
     catch (const CNewException &)
     {
@@ -124,6 +122,8 @@ static int bfp_call_7z_main2()
   bfp_flush_streams();
   return result;
 }
+
+#endif
 
 // ---- Progress callback & cancel (platform-independent) ----
 
