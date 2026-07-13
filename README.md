@@ -352,11 +352,6 @@ scripts/linux/install-deb.sh
 
 Both legacy commands under `tools/` remain as compatibility wrappers.
 
-Every pull request and `master` update is checked on Windows and Linux through
-the workflow in `.github/workflows/ci.yml`. It runs formatting, Clippy, tests,
-optimized builds, platform metadata validation, and package generation without
-publishing a release.
-
 ## Local Data
 
 BExplorer uses the `directories` crate for user configuration paths.

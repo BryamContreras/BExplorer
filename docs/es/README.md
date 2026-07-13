@@ -149,9 +149,6 @@ acceso directo en el escritorio y agregar BExplorer al `PATH`. Al desinstalar
 retira solamente su propia entrada del `PATH`. Los comandos antiguos de
 `tools/` se conservan como wrappers compatibles.
 
-La CI comprueba formato, Clippy, pruebas, builds optimizados y empaquetado en
-ambas plataformas sin publicar releases automaticamente.
-
 ## Comprimidos
 
 BExplorer usa un motor 7-Zip integrado para abrir, listar y extraer muchos
