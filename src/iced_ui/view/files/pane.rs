@@ -369,54 +369,36 @@ impl BExplorerIced {
         &self,
         pane: PaneId,
         palette: Palette,
-        include_storage_shortcut: bool,
+        include_storage_shortcuts: bool,
     ) -> Element<'_, Message> {
         let mut bookmarks = row![]
             .spacing(6)
             .align_y(Alignment::Center)
             .height(Length::Fill);
-        let filesystem = filesystem_root_path();
-        if include_storage_shortcut {
-            let storage_active =
-                self.tab_for_pane(pane).path.as_deref() == Some(filesystem.as_path());
-            let storage_icon: Element<'_, Message> = self
-                .sidebar_directory_icon_handle(&filesystem)
-                .map(|handle| {
-                    iced_image::Image::new(handle)
-                        .width(18)
-                        .height(18)
-                        .content_fit(ContentFit::Contain)
-                        .into()
-                })
-                .unwrap_or_else(|| inline_icon("storage", palette.accent, 18.0));
-            bookmarks = bookmarks.push(
-                Button::new(
-                    row![
-                        storage_icon,
-                        text(
-                            self.sidebar_storage_entries
-                                .iter()
-                                .find(|entry| entry.path == filesystem)
-                                .map(|entry| entry.name.clone())
-                                .unwrap_or_else(filesystem_root_label),
-                        )
-                        .size(self.font_size())
-                        .color(if storage_active {
-                            palette.accent_text
-                        } else {
-                            palette.text
-                        }),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                )
-                .padding([7, 10])
-                .on_press(Message::Navigate(pane, Some(filesystem.clone())))
-                .style(move |_, status| selected_button_style(palette, storage_active, status)),
-            );
+        if include_storage_shortcuts {
+            if self.sidebar_storage_entries.is_empty() {
+                let filesystem = filesystem_root_path();
+                bookmarks = bookmarks.push(self.bookmark_storage_button(
+                    pane,
+                    palette,
+                    filesystem,
+                    filesystem_root_label(),
+                    "storage",
+                ));
+            } else {
+                for entry in &self.sidebar_storage_entries {
+                    bookmarks = bookmarks.push(self.bookmark_storage_button(
+                        pane,
+                        palette,
+                        entry.path.clone(),
+                        entry.name.clone(),
+                        fallback_icon_label(entry),
+                    ));
+                }
+            }
         }
 
-        if self.config.favorites.is_empty() && !include_storage_shortcut {
+        if self.config.favorites.is_empty() && !include_storage_shortcuts {
             bookmarks = bookmarks.push(
                 text(self.localized("Marcadores", "Bookmarks"))
                     .size(self.font_size())
@@ -425,7 +407,12 @@ impl BExplorerIced {
         }
 
         for path in self.config.favorites.iter().take(6) {
-            if include_storage_shortcut && path == &filesystem {
+            if include_storage_shortcuts
+                && self
+                    .sidebar_storage_entries
+                    .iter()
+                    .any(|entry| entry.path == *path)
+            {
                 continue;
             }
             let label = path
@@ -452,6 +439,14 @@ impl BExplorerIced {
             );
         }
 
+        let bookmarks = scrollable(bookmarks)
+            .direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::default(),
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(move |theme, status| explorer_scrollable_style(palette, theme, status, 0.0));
+
         container(bookmarks)
             .width(Length::Fill)
             .height(46)
@@ -463,6 +458,46 @@ impl BExplorerIced {
                     .border(border::color(palette.border).width(1))
             })
             .into()
+    }
+
+    fn bookmark_storage_button(
+        &self,
+        pane: PaneId,
+        palette: Palette,
+        path: PathBuf,
+        label: String,
+        fallback_icon: &'static str,
+    ) -> Element<'_, Message> {
+        let active = self.tab_for_pane(pane).path.as_ref() == Some(&path);
+        let storage_icon: Element<'_, Message> = self
+            .sidebar_directory_icon_handle(&path)
+            .map(|handle| {
+                iced_image::Image::new(handle)
+                    .width(18)
+                    .height(18)
+                    .content_fit(ContentFit::Contain)
+                    .into()
+            })
+            .unwrap_or_else(|| inline_icon(fallback_icon, palette.accent, 18.0));
+
+        Button::new(
+            row![
+                storage_icon,
+                text(ellipsize_text(&label, 22))
+                    .size(self.font_size())
+                    .color(if active {
+                        palette.accent_text
+                    } else {
+                        palette.text
+                    }),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center),
+        )
+        .padding([7, 10])
+        .on_press(Message::Navigate(pane, Some(path)))
+        .style(move |_, status| selected_button_style(palette, active, status))
+        .into()
     }
 
     pub(in crate::iced_ui) fn preview_panel_visible(&self, pane: PaneId) -> bool {
