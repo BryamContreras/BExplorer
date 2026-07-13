@@ -446,7 +446,11 @@ fn visible_icon_bounds(
             let Some(pixel) = rgba.get(index..index + 4) else {
                 continue;
             };
-            if pixel[3] <= 8 {
+            // Shell icon providers can leave a very wide, faint alpha halo
+            // across the 256 px canvas. It is not part of the icon's visible
+            // artwork; using a stronger alpha cutoff lets small legacy icons
+            // be cropped and enlarged for large-icon views.
+            if pixel[3] <= 96 {
                 continue;
             }
             left = left.min(x);

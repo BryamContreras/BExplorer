@@ -254,6 +254,20 @@ pub(in crate::iced_ui) fn view_menu_modes() -> [ViewMode; 6] {
     ]
 }
 
+pub(in crate::iced_ui) fn adjacent_view_mode(mode: ViewMode, larger: bool) -> ViewMode {
+    let modes = view_menu_modes();
+    let index = modes
+        .iter()
+        .position(|candidate| *candidate == mode)
+        .unwrap_or(0);
+    let next = if larger {
+        (index + 1).min(modes.len() - 1)
+    } else {
+        index.saturating_sub(1)
+    };
+    modes[next]
+}
+
 pub(in crate::iced_ui) fn view_mode_label(mode: ViewMode) -> &'static str {
     match mode {
         ViewMode::Details => "Detalles",

@@ -310,9 +310,8 @@ impl BExplorerIced {
             );
             row![
                 self.detail_file_entry_icon(entry, palette, selected, DETAIL_ICON_SIZE),
-                text(name)
+                highlighted_search_text(self.pane(pane).search_text.as_str(), &name, text_color,)
                     .size(table_font_size)
-                    .color(text_color)
                     .width(Length::Fill)
                     .wrapping(iced::widget::text::Wrapping::None),
             ]

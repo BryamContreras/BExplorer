@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -18,6 +19,238 @@ pub struct TrashDeleteOutcome {
     pub undo_records: Vec<TrashUndoRecord>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub enum ElevatedDeleteKind {
+    Trash,
+    Permanent,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ElevatedFileAction {
+    CreateFolder { parent: PathBuf, name: String },
+    CreateFile { parent: PathBuf, name: String },
+    Rename { path: PathBuf, name: String },
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ElevatedDeleteRequest {
+    paths: Vec<PathBuf>,
+    kind: ElevatedDeleteKind,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct ElevatedFileActionRequest {
+    action: ElevatedFileAction,
+}
+
+pub fn error_message_is_permission_denied(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("access is denied")
+        || message.contains("acceso denegado")
+        || message.contains("permission denied")
+        // Windows IFileOperation deliberately hides the HRESULT for a
+        // rejected recycle operation and reports only that it was aborted.
+        // The normal trash attempt has already failed, so offer the same
+        // explicit elevation retry used for a regular access-denied error.
+        || message.contains("some operations were aborted")
+        || message.contains("os error 5")
+        || message.contains("0x80070005")
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const ELEVATED_DELETE_HELPER_ARG: &str = "--bexplorer-elevated-delete-helper";
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn run_elevated_delete(paths: &[PathBuf], kind: ElevatedDeleteKind) -> Result<usize> {
+    let (request_path, result_path) = elevated_delete_paths();
+    let request = ElevatedDeleteRequest {
+        paths: paths.to_vec(),
+        kind,
+    };
+    crate::utils::atomic_file::write(&request_path, &serde_json::to_vec(&request)?)?;
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&result_path)?;
+    let exit_code = crate::platform::shell::run_elevated_current_exe(&[
+        OsString::from(ELEVATED_DELETE_HELPER_ARG),
+        request_path.clone().into_os_string(),
+        result_path.clone().into_os_string(),
+    ]);
+    let _ = fs::remove_file(&request_path);
+    let decoded = fs::read(&result_path).ok().and_then(|bytes| {
+        serde_json::from_slice::<std::result::Result<usize, String>>(&bytes).ok()
+    });
+    let _ = fs::remove_file(&result_path);
+    if let Some(result) = decoded {
+        return result.map_err(BExplorerError::Operation);
+    }
+    match exit_code {
+        Ok(code) => Err(BExplorerError::Operation(format!(
+            "Elevated delete failed with exit code {code}"
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn run_elevated_delete(_paths: &[PathBuf], _kind: ElevatedDeleteKind) -> Result<usize> {
+    Err(BExplorerError::Operation(
+        "Elevated deletion is currently available on Windows and Linux only".into(),
+    ))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const ELEVATED_FILE_ACTION_HELPER_ARG: &str = "--bexplorer-elevated-file-action-helper";
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn run_elevated_file_action(action: &ElevatedFileAction) -> Result<PathBuf> {
+    let (request_path, result_path) = elevated_file_action_paths();
+    let request = ElevatedFileActionRequest {
+        action: action.clone(),
+    };
+    crate::utils::atomic_file::write(&request_path, &serde_json::to_vec(&request)?)?;
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&result_path)?;
+    let exit_code = crate::platform::shell::run_elevated_current_exe(&[
+        OsString::from(ELEVATED_FILE_ACTION_HELPER_ARG),
+        request_path.clone().into_os_string(),
+        result_path.clone().into_os_string(),
+    ]);
+    let _ = fs::remove_file(&request_path);
+    let decoded = fs::read(&result_path).ok().and_then(|bytes| {
+        serde_json::from_slice::<std::result::Result<PathBuf, String>>(&bytes).ok()
+    });
+    let _ = fs::remove_file(&result_path);
+    if let Some(result) = decoded {
+        return result.map_err(BExplorerError::Operation);
+    }
+    match exit_code {
+        Ok(code) => Err(BExplorerError::Operation(format!(
+            "Elevated file action failed with exit code {code}"
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn run_elevated_file_action(_action: &ElevatedFileAction) -> Result<PathBuf> {
+    Err(BExplorerError::Operation(
+        "Elevated file actions are currently available on Windows and Linux only".into(),
+    ))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn try_run_elevated_file_action_helper_from_args() -> Option<i32> {
+    let mut args = std::env::args_os();
+    let _exe = args.next();
+    if args.next()?.as_os_str() != OsStr::new(ELEVATED_FILE_ACTION_HELPER_ARG) {
+        return None;
+    }
+    let request_path = PathBuf::from(args.next()?);
+    let result_path = PathBuf::from(args.next()?);
+    Some(run_elevated_file_action_helper(&request_path, &result_path))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn run_elevated_file_action_helper(request_path: &Path, result_path: &Path) -> i32 {
+    let result = (|| -> Result<PathBuf> {
+        let request: ElevatedFileActionRequest = serde_json::from_slice(&fs::read(request_path)?)?;
+        match request.action {
+            ElevatedFileAction::CreateFolder { parent, name } => {
+                create_folder_named(&parent, &name)
+            }
+            ElevatedFileAction::CreateFile { parent, name } => {
+                create_empty_file_named(&parent, &name)
+            }
+            ElevatedFileAction::Rename { path, name } => rename_path(&path, &name),
+        }
+    })();
+    let _ = fs::remove_file(request_path);
+    let serialized: std::result::Result<PathBuf, String> =
+        result.map_err(|error| error.to_string());
+    let wrote_result = serde_json::to_vec(&serialized)
+        .ok()
+        .and_then(|bytes| fs::write(result_path, bytes).ok())
+        .is_some();
+    if !wrote_result {
+        2
+    } else if serialized.is_ok() {
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn elevated_file_action_paths() -> (PathBuf, PathBuf) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let base = format!(
+        "bexplorer-elevated-file-action-{}-{stamp}",
+        std::process::id()
+    );
+    let temp = std::env::temp_dir();
+    (
+        temp.join(format!("{base}.request.json")),
+        temp.join(format!("{base}.result.json")),
+    )
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn try_run_elevated_delete_helper_from_args() -> Option<i32> {
+    let mut args = std::env::args_os();
+    let _exe = args.next();
+    if args.next()?.as_os_str() != OsStr::new(ELEVATED_DELETE_HELPER_ARG) {
+        return None;
+    }
+    let request_path = PathBuf::from(args.next()?);
+    let result_path = PathBuf::from(args.next()?);
+    Some(run_elevated_delete_helper(&request_path, &result_path))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn run_elevated_delete_helper(request_path: &Path, result_path: &Path) -> i32 {
+    let result = (|| -> Result<usize> {
+        let request: ElevatedDeleteRequest = serde_json::from_slice(&fs::read(request_path)?)?;
+        match request.kind {
+            ElevatedDeleteKind::Trash => delete_to_trash(&request.paths),
+            ElevatedDeleteKind::Permanent => delete_permanently(&request.paths),
+        }
+    })();
+    let _ = fs::remove_file(request_path);
+    let serialized: std::result::Result<usize, String> = result.map_err(|error| error.to_string());
+    let wrote_result = serde_json::to_vec(&serialized)
+        .ok()
+        .and_then(|bytes| fs::write(result_path, bytes).ok())
+        .is_some();
+    if !wrote_result {
+        2
+    } else if serialized.is_ok() {
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn elevated_delete_paths() -> (PathBuf, PathBuf) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let base = format!("bexplorer-elevated-delete-{}-{stamp}", std::process::id());
+    let temp = std::env::temp_dir();
+    (
+        temp.join(format!("{base}.request.json")),
+        temp.join(format!("{base}.result.json")),
+    )
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PasteMode {
@@ -26,9 +259,7 @@ pub enum PasteMode {
 }
 
 pub fn open_path(path: &Path) -> Result<()> {
-    open::that(path).map_err(|error| {
-        BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
-    })
+    crate::platform::shell::open_path(path)
 }
 
 pub fn can_mount_disk_image(path: &Path) -> bool {
@@ -424,6 +655,47 @@ mod tests {
             std::env::temp_dir().join(format!("bexplorer-{name}-{}-{stamp}", std::process::id()));
         fs::create_dir_all(&dir).expect("create temp test dir");
         dir
+    }
+
+    #[test]
+    fn permission_errors_are_recognized_for_delete_elevation() {
+        assert!(error_message_is_permission_denied(
+            "I/O error: Acceso denegado. (os error 5)"
+        ));
+        assert!(error_message_is_permission_denied("Permission denied"));
+        assert!(error_message_is_permission_denied(
+            "Could not move item to trash: Some operations were aborted"
+        ));
+        assert!(!error_message_is_permission_denied("File not found"));
+    }
+
+    #[test]
+    fn elevated_delete_requests_preserve_the_delete_kind() {
+        let request = ElevatedDeleteRequest {
+            paths: vec![PathBuf::from("protected.txt")],
+            kind: ElevatedDeleteKind::Permanent,
+        };
+        let restored: ElevatedDeleteRequest =
+            serde_json::from_slice(&serde_json::to_vec(&request).expect("serialize request"))
+                .expect("deserialize request");
+        assert!(matches!(restored.kind, ElevatedDeleteKind::Permanent));
+        assert_eq!(restored.paths, request.paths);
+    }
+
+    #[test]
+    fn elevated_file_actions_preserve_the_requested_operation() {
+        let action = ElevatedFileAction::Rename {
+            path: PathBuf::from("protected.txt"),
+            name: "renamed.txt".into(),
+        };
+        let request = ElevatedFileActionRequest {
+            action: action.clone(),
+        };
+        let restored: ElevatedFileActionRequest =
+            serde_json::from_slice(&serde_json::to_vec(&request).expect("serialize request"))
+                .expect("deserialize request");
+        assert!(matches!(restored.action, ElevatedFileAction::Rename { .. }));
+        assert!(matches!(action, ElevatedFileAction::Rename { .. }));
     }
 
     #[test]

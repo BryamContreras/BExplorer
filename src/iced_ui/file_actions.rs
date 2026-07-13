@@ -1,6 +1,6 @@
 use super::*;
 
-fn transfer_refresh_directories(job: &TransferJob) -> Vec<PathBuf> {
+pub(in crate::iced_ui) fn transfer_refresh_directories(job: &TransferJob) -> Vec<PathBuf> {
     let mut directories = vec![job.destination.clone()];
     for source in &job.sources {
         if let Some(parent) = source.parent().map(Path::to_path_buf)
@@ -355,6 +355,17 @@ impl BExplorerIced {
         task.map(Message::TransferWindowOpened)
     }
 
+    pub(super) fn close_transfer_window_if_idle_task(&mut self) -> Task<Message> {
+        if self.transfer_active() {
+            return self.sync_transfer_window_size_task();
+        }
+        let Some(id) = self.transfer_window_id.take() else {
+            return Task::none();
+        };
+        self.transfer_window_item_count = 0;
+        window::close(id)
+    }
+
     pub(super) fn reopen_transfer_window_task(
         &mut self,
         old_id: window::Id,
@@ -477,9 +488,16 @@ impl BExplorerIced {
                     }
                     self.start_next_transfers();
                 }
-                TransferMessage::Failed { job_id, error } => {
+                TransferMessage::Failed {
+                    job_id,
+                    error,
+                    permission_denied,
+                } => {
                     let active = self.active_transfers.remove(&job_id);
-                    if let Some(mut progress) = self.transfer_progress.remove(&job_id) {
+                    let can_elevate =
+                        permission_denied && cfg!(any(target_os = "windows", target_os = "linux"));
+                    let progress = self.transfer_progress.remove(&job_id);
+                    if !can_elevate && let Some(mut progress) = progress {
                         progress.state = TransferState::Failed;
                         self.transfer_history.push_back(TransferHistoryState {
                             progress,
@@ -487,7 +505,20 @@ impl BExplorerIced {
                         });
                     }
                     if let Some(active) = active {
-                        self.pane_mut(active.pane).status = error;
+                        if can_elevate {
+                            self.pane_mut(active.pane).status = if cfg!(target_os = "linux") {
+                                "Esta acción requiere permisos de root".into()
+                            } else {
+                                "Esta acción requiere permisos de administrador".into()
+                            };
+                            self.elevated_transfer_dialog = Some(PendingElevatedTransfer {
+                                pane: active.pane,
+                                job: active.job.clone(),
+                                error,
+                            });
+                        } else {
+                            self.pane_mut(active.pane).status = error;
+                        }
                         tasks.push(self.refresh_panes_for_directories(
                             active.pane,
                             &transfer_refresh_directories(&active.job),
@@ -524,7 +555,7 @@ impl BExplorerIced {
         while self
             .transfer_history
             .front()
-            .is_some_and(|item| item.finished_at.elapsed() > Duration::from_secs(3))
+            .is_some_and(|item| item.finished_at.elapsed() > Duration::from_secs(1))
         {
             self.transfer_history.pop_front();
         }
@@ -550,6 +581,33 @@ impl BExplorerIced {
                 history.progress.clone(),
             ));
         }
+        for deletion in self.active_deletes.values() {
+            let total_files = deletion.paths.len();
+            let current_name = if total_files == 1 {
+                deletion.paths[0]
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default()
+                    .to_owned()
+            } else {
+                format!("{total_files} elementos")
+            };
+            items.push(TransferDisplayState {
+                id: deletion.id,
+                kind: if deletion.permanent {
+                    TransferDisplayKind::PermanentDelete
+                } else {
+                    TransferDisplayKind::Trash
+                },
+                state: TransferState::Copying,
+                current_name,
+                copied_bytes: 0,
+                total_bytes: 0,
+                files_done: 0,
+                total_files,
+                bytes_per_second: 0.0,
+            });
+        }
         items.sort_by_key(|item| match item.state {
             TransferState::Copying | TransferState::Paused => (0, item.id),
             TransferState::Pending => (1, item.id),
@@ -564,6 +622,7 @@ impl BExplorerIced {
         !self.active_transfers.is_empty()
             || !self.transfer_queue.is_empty()
             || !self.transfer_history.is_empty()
+            || !self.active_deletes.is_empty()
     }
 
     pub(super) fn transfer_window_size(&self) -> Size {
@@ -814,10 +873,23 @@ impl BExplorerIced {
         }
         let pane = pending.pane;
         let paths = pending.paths;
-        Task::perform(
-            run_blocking_file_operation(move || operations::delete_permanently(&paths)),
-            move |result| Message::PermanentDeleteFinished(pane, result),
-        )
+        self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        let transfer_id = self.next_transfer_id;
+        self.active_deletes.insert(
+            transfer_id,
+            ActiveDeleteState {
+                id: transfer_id,
+                pane,
+                paths: paths.clone(),
+                permanent: true,
+            },
+        );
+        let worker_paths = paths.clone();
+        let delete_task = Task::perform(
+            run_blocking_file_operation(move || operations::delete_permanently(&worker_paths)),
+            move |result| Message::PermanentDeleteFinished(pane, paths, result),
+        );
+        Task::batch([self.ensure_transfer_window_task(), delete_task])
     }
 
     pub(super) fn context_begin_rename(
@@ -885,10 +957,25 @@ impl BExplorerIced {
             return Task::none();
         }
         self.last_undo_action = None;
-        Task::perform(
-            run_blocking_file_operation(move || operations::delete_to_trash_with_undo(&paths)),
-            move |result| Message::TrashFinished(pane, result),
-        )
+        self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        let transfer_id = self.next_transfer_id;
+        self.active_deletes.insert(
+            transfer_id,
+            ActiveDeleteState {
+                id: transfer_id,
+                pane,
+                paths: paths.clone(),
+                permanent: false,
+            },
+        );
+        let worker_paths = paths.clone();
+        let delete_task = Task::perform(
+            run_blocking_file_operation(move || {
+                operations::delete_to_trash_with_undo(&worker_paths)
+            }),
+            move |result| Message::TrashFinished(pane, paths, result),
+        );
+        Task::batch([self.ensure_transfer_window_task(), delete_task])
     }
 
     pub(super) fn open_archive_dialog(&mut self, pane: PaneId) -> Task<Message> {

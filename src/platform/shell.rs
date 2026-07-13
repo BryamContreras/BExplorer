@@ -77,8 +77,27 @@ pub fn open_terminal_at(path: &Path) -> Result<()> {
     open_terminal_platform(directory)
 }
 
+pub fn open_path(path: &Path) -> Result<()> {
+    open_path_platform(path)
+}
+
 pub fn open_with(path: &Path) -> Result<()> {
     open_with_platform(path)
+}
+
+#[derive(Clone, Debug)]
+pub struct OpenWithApplication {
+    pub name: String,
+    pub(crate) id: String,
+    pub(crate) icon_path: Option<PathBuf>,
+}
+
+pub fn open_with_applications(path: &Path) -> Result<Vec<OpenWithApplication>> {
+    open_with_applications_platform(path)
+}
+
+pub fn open_with_application(path: &Path, index: usize) -> Result<()> {
+    open_with_application_platform(path, index)
 }
 
 pub fn show_properties(path: &Path) -> Result<()> {
@@ -700,13 +719,340 @@ fn open_terminal_platform(directory: &Path) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
+fn open_path_platform(path: &Path) -> Result<()> {
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    let file = path
+        .as_os_str()
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    let working_directory = windows_launch_working_directory(path).map(|directory| {
+        directory
+            .as_os_str()
+            .encode_wide()
+            .chain([0])
+            .collect::<Vec<_>>()
+    });
+
+    let mut info = SHELLEXECUTEINFOW::default();
+    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.lpFile = PCWSTR(file.as_ptr());
+    info.lpDirectory = working_directory
+        .as_ref()
+        .map_or(PCWSTR::null(), |directory| PCWSTR(directory.as_ptr()));
+    info.nShow = SW_SHOWNORMAL.0;
+
+    unsafe { ShellExecuteExW(&mut info) }.map_err(|error| {
+        BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_launch_working_directory(path: &Path) -> Option<&Path> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    if extension.eq_ignore_ascii_case("lnk") || extension.eq_ignore_ascii_case("url") {
+        // A shortcut can define its own `Start in` directory. Passing one here
+        // would override the launch context stored by the Windows shell.
+        None
+    } else {
+        path.parent()
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_path_platform(path: &Path) -> Result<()> {
+    open::that(path).map_err(|error| {
+        BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
+    })
+}
+
+#[cfg(target_os = "windows")]
 fn open_with_platform(path: &Path) -> Result<()> {
-    Command::new("rundll32.exe")
-        .arg("shell32.dll,OpenAs_RunDLL")
+    // Use the system copy explicitly. Packaged applications can inherit a
+    // reduced PATH where System32 is not listed, even though it is available
+    // to the Windows shell.
+    let open_with = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .map(|root| root.join("System32").join("OpenWith.exe"))
+        .filter(|candidate| candidate.is_file())
+        .unwrap_or_else(|| PathBuf::from("OpenWith.exe"));
+    Command::new(open_with)
         .arg(path)
         .spawn()
         .map_err(|error| BExplorerError::Shell(error.to_string()))?;
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_applications_platform(path: &Path) -> Result<Vec<OpenWithApplication>> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{ASSOC_FILTER_RECOMMENDED, IAssocHandler, SHAssocEnumHandlers};
+    use windows::core::PCWSTR;
+
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!(".{extension}"));
+    let Some(extension) = extension else {
+        return Ok(Vec::new());
+    };
+    let extension = extension.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| -> Result<Vec<OpenWithApplication>> {
+        let handlers =
+            unsafe { SHAssocEnumHandlers(PCWSTR(extension.as_ptr()), ASSOC_FILTER_RECOMMENDED) }
+                .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+        let mut applications = Vec::new();
+        loop {
+            let mut item: [Option<IAssocHandler>; 1] = [None];
+            let mut fetched = 0;
+            if unsafe { handlers.Next(&mut item, Some(&mut fetched)) }.is_err() || fetched == 0 {
+                break;
+            }
+            let Some(handler) = item[0].take() else {
+                continue;
+            };
+            let handler_id_ptr = unsafe { handler.GetName() }
+                .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+            let handler_id = unsafe { handler_id_ptr.to_string() }
+                .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+            unsafe { CoTaskMemFree(Some(handler_id_ptr.0.cast())) };
+            let name = unsafe { handler.GetUIName() }
+                .ok()
+                .map(|value| {
+                    let text = unsafe { value.to_string() }.unwrap_or_default();
+                    unsafe { CoTaskMemFree(Some(value.0.cast())) };
+                    text
+                })
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| "Aplicación".into());
+            if !applications
+                .iter()
+                .any(|application: &OpenWithApplication| {
+                    application.id.eq_ignore_ascii_case(&handler_id)
+                })
+            {
+                let mut icon_location = windows::core::PWSTR::null();
+                let mut icon_index = 0;
+                let icon_path = unsafe {
+                    handler
+                        .GetIconLocation(&mut icon_location, &mut icon_index)
+                        .ok()
+                        .and_then(|_| {
+                            let path = icon_location.to_string().ok();
+                            CoTaskMemFree(Some(icon_location.0.cast()));
+                            path
+                        })
+                }
+                .filter(|path| !path.trim().is_empty())
+                .map(|path| {
+                    path.rsplit_once(',')
+                        .filter(|(_, index)| index.trim().parse::<i32>().is_ok())
+                        .map(|(path, _)| path.to_owned())
+                        .unwrap_or(path)
+                })
+                .map(PathBuf::from)
+                .filter(|path| path.is_file())
+                .or_else(|| {
+                    Path::new(&handler_id)
+                        .is_file()
+                        .then(|| PathBuf::from(&handler_id))
+                })
+                .or_else(|| Some(path.to_path_buf()));
+                applications.push(OpenWithApplication {
+                    name,
+                    id: handler_id,
+                    icon_path,
+                });
+            }
+        }
+        Ok(applications)
+    })();
+    if initialized {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn open_with_application_platform(path: &Path, index: usize) -> Result<()> {
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{ASSOC_FILTER_RECOMMENDED, IAssocHandler, SHAssocEnumHandlers};
+    use windows::core::PCWSTR;
+
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!(".{extension}"))
+        .ok_or_else(|| BExplorerError::Shell("El archivo no tiene extensión".into()))?;
+    let extension = extension.encode_utf16().chain([0]).collect::<Vec<_>>();
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    let result = (|| -> Result<()> {
+        let handlers =
+            unsafe { SHAssocEnumHandlers(PCWSTR(extension.as_ptr()), ASSOC_FILTER_RECOMMENDED) }
+                .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+        let mut selected: Option<IAssocHandler> = None;
+        let mut unique_index = 0;
+        let mut seen_ids = Vec::<String>::new();
+        loop {
+            let mut item: [Option<IAssocHandler>; 1] = [None];
+            let mut fetched = 0;
+            if unsafe { handlers.Next(&mut item, Some(&mut fetched)) }.is_err() || fetched == 0 {
+                break;
+            }
+            let Some(candidate) = item[0].take() else {
+                continue;
+            };
+            let id_ptr = unsafe { candidate.GetName() }
+                .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+            let id = unsafe { id_ptr.to_string() }
+                .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+            unsafe { CoTaskMemFree(Some(id_ptr.0.cast())) };
+            if seen_ids.iter().any(|seen| seen.eq_ignore_ascii_case(&id)) {
+                continue;
+            }
+            seen_ids.push(id);
+            if unique_index == index {
+                selected = Some(candidate);
+                break;
+            }
+            unique_index += 1;
+        }
+        let Some(handler) = selected else {
+            return Err(BExplorerError::Shell(
+                "La aplicación seleccionada ya no está disponible".into(),
+            ));
+        };
+        let handler_name_ptr = unsafe { handler.GetName() }
+            .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+        let handler_name = unsafe { handler_name_ptr.to_string() }
+            .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+        unsafe { CoTaskMemFree(Some(handler_name_ptr.0.cast())) };
+        if Path::new(&handler_name).is_file() {
+            return launch_association_command(&format!("\"{handler_name}\" \"%1\""), path);
+        }
+        match query_association_command(&handler_name) {
+            Ok(command) => launch_association_command(&command, path),
+            // Packaged/UWP handlers such as Fotos expose no Win32 command.
+            // Let the Windows shell resolve those handlers instead of
+            // reporting a misleading “command not found” error.
+            Err(_) => open_path_platform(path),
+        }
+    })();
+    if initialized {
+        unsafe { windows::Win32::System::Com::CoUninitialize() };
+    }
+    result
+}
+
+#[cfg(target_os = "windows")]
+fn query_association_command(progid: &str) -> Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::UI::Shell::{ASSOCF_NONE, ASSOCSTR_COMMAND, AssocQueryStringW};
+    use windows::core::{PCWSTR, PWSTR};
+
+    let progid = std::ffi::OsStr::new(progid)
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    let mut length = 0_u32;
+    unsafe {
+        let _ = AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_COMMAND,
+            PCWSTR(progid.as_ptr()),
+            PCWSTR::null(),
+            PWSTR::null(),
+            &mut length,
+        );
+    }
+    if length == 0 {
+        return Err(BExplorerError::Shell(
+            "La aplicación no tiene un comando de apertura".into(),
+        ));
+    }
+    let mut command = vec![0_u16; length as usize + 1];
+    unsafe {
+        AssocQueryStringW(
+            ASSOCF_NONE,
+            ASSOCSTR_COMMAND,
+            PCWSTR(progid.as_ptr()),
+            PCWSTR::null(),
+            PWSTR(command.as_mut_ptr()),
+            &mut length,
+        )
+        .ok()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    }
+    Ok(String::from_utf16_lossy(
+        &command[..length.saturating_sub(1) as usize],
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn launch_association_command(command: &str, path: &Path) -> Result<()> {
+    let path_argument = format!("\"{}\"", path.to_string_lossy().replace('"', "\\\""));
+    let mut command = command.to_owned();
+    for placeholder in ["%1", "%L", "%l", "%*", "%~1"] {
+        // Handle both `%1` and `"%1"` association templates without creating
+        // doubled quotes for applications that already quote the argument.
+        command = command.replace(&format!("\"{placeholder}\""), &path_argument);
+        command = command.replace(placeholder, &path_argument);
+    }
+    let (program, parameters) = split_association_command(&command)?;
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::UI::Shell::{SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::PCWSTR;
+
+    let program = std::ffi::OsStr::new(&program)
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    let parameters = std::ffi::OsStr::new(&parameters)
+        .encode_wide()
+        .chain([0])
+        .collect::<Vec<_>>();
+    let mut info = SHELLEXECUTEINFOW::default();
+    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.lpFile = PCWSTR(program.as_ptr());
+    info.lpParameters = PCWSTR(parameters.as_ptr());
+    info.nShow = SW_SHOWNORMAL.0;
+    unsafe { ShellExecuteExW(&mut info) }
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn split_association_command(command: &str) -> Result<(String, String)> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err(BExplorerError::Shell("Comando de apertura vacío".into()));
+    }
+    if let Some(rest) = command.strip_prefix('"') {
+        let end = rest
+            .find('"')
+            .ok_or_else(|| BExplorerError::Shell("Comando de apertura inválido".into()))?;
+        let program = rest[..end].to_owned();
+        return Ok((program, rest[end + 1..].trim().to_owned()));
+    }
+    let mut parts = command.splitn(2, char::is_whitespace);
+    let program = parts.next().unwrap_or_default().to_owned();
+    let parameters = parts.next().unwrap_or_default().trim().to_owned();
+    Ok((program, parameters))
 }
 
 #[cfg(target_os = "windows")]
@@ -753,7 +1099,6 @@ fn open_with_platform(path: &Path) -> Result<()> {
     if command_exists("mimeopen") && Command::new("mimeopen").arg("-d").arg(path).spawn().is_ok() {
         return Ok(());
     }
-
     for program in ["gio", "xdg-open"] {
         if !command_exists(program) {
             continue;
@@ -766,7 +1111,6 @@ fn open_with_platform(path: &Path) -> Result<()> {
             return Ok(());
         }
     }
-
     open::that(path).map(|_| ()).map_err(|error| {
         BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
     })
@@ -776,6 +1120,18 @@ fn open_with_platform(path: &Path) -> Result<()> {
 fn open_with_platform(_path: &Path) -> Result<()> {
     Err(BExplorerError::Shell(
         "Open with is currently available on Windows only".into(),
+    ))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_with_applications_platform(_path: &Path) -> Result<Vec<OpenWithApplication>> {
+    Ok(Vec::new())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_with_application_platform(_path: &Path, _index: usize) -> Result<()> {
+    Err(BExplorerError::Shell(
+        "La selección de aplicaciones está disponible actualmente en Windows".into(),
     ))
 }
 

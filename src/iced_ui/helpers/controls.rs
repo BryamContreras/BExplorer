@@ -200,6 +200,45 @@ pub(in crate::iced_ui) fn context_menu_dynamic_row<'a>(
     .into()
 }
 
+pub(in crate::iced_ui) fn context_menu_application_row<'a>(
+    label: String,
+    icon: Option<iced_image::Handle>,
+    command: ContextCommand,
+    palette: Palette,
+) -> Element<'a, Message> {
+    let icon: Element<'a, Message> = if let Some(handle) = icon {
+        iced_image::Image::new(handle)
+            .width(Length::Fixed(18.0))
+            .height(Length::Fixed(18.0))
+            .content_fit(ContentFit::Contain)
+            .into()
+    } else {
+        inline_icon("open", palette.muted_text, 18.0)
+    };
+    let content = row![
+        icon,
+        text(label)
+            .size(13.0)
+            .color(palette.text)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .width(Length::Fill),
+    ]
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .height(Length::Fill);
+    Button::new(
+        container(content)
+            .height(Length::Fill)
+            .center_y(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(34)
+    .padding([0, 10])
+    .on_press(Message::RunContextCommand(command))
+    .style(move |_, status| context_button_style(palette, status))
+    .into()
+}
+
 pub(in crate::iced_ui) fn context_separator<'a>(palette: Palette) -> Element<'a, Message> {
     container(Space::new())
         .height(1)

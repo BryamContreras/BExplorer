@@ -400,13 +400,17 @@ impl BExplorerIced {
                     ContextCommand::Open,
                     palette,
                 ))
-                .push(context_menu_row(
-                    "open-with",
-                    self.localized("Abrir con", "Open with"),
-                    None,
-                    ContextCommand::OpenWith,
-                    palette,
-                ))
+                .push(
+                    mouse_area(context_menu_row(
+                        "open-with",
+                        self.localized("Abrir con", "Open with"),
+                        Some(ContextMenuTrailing::Icon("chev-right")),
+                        ContextCommand::OpenWithMenu,
+                        palette,
+                    ))
+                    .on_enter(Message::ContextOpenWithParentEnter)
+                    .on_exit(Message::ContextOpenWithParentExit),
+                )
                 .push(context_separator(palette))
                 .push(
                     mouse_area(context_menu_row(
@@ -557,6 +561,87 @@ impl BExplorerIced {
             .into();
 
         let mut overlay_layers = vec![backdrop.into(), floating_menu];
+        if self.context_open_with_submenu && is_entry {
+            let applications = self
+                .context_entry(menu_state.pane, menu_state.target)
+                .and_then(|entry| shell::open_with_applications(&entry.path).ok())
+                .unwrap_or_default();
+            let mut submenu_labels = applications
+                .iter()
+                .map(|application| application.name.clone())
+                .collect::<Vec<_>>();
+            submenu_labels.push(
+                self.localized("Elegir otra aplicación…", "Choose another app…")
+                    .into(),
+            );
+            let mut rows = column![].spacing(2).width(Length::Fill).padding([4, 6]);
+            for (index, application) in applications.iter().enumerate() {
+                let icon = application.icon_path.as_ref().and_then(|path| {
+                    let key = thumbnail_data::native_path_icon_cache_key(
+                        path,
+                        false,
+                        thumbnail_data::NATIVE_ICON_SIZE,
+                    );
+                    match self.native_icon_cache.get(&key) {
+                        Some(IcedImageState::Ready(handle)) => Some(handle.clone()),
+                        _ => None,
+                    }
+                });
+                rows = rows.push(context_menu_application_row(
+                    application.name.clone(),
+                    icon,
+                    ContextCommand::OpenWithApplication(index),
+                    palette,
+                ));
+            }
+            rows = rows.push(context_menu_dynamic_row(
+                "open-with",
+                self.localized("Elegir otra aplicación…", "Choose another app…")
+                    .into(),
+                None,
+                ContextCommand::OpenWith,
+                palette,
+            ));
+            let submenu_width = context_submenu_width(&submenu_labels).max(220.0);
+            let submenu_height = (applications.len() as f32 * 36.0 + 46.0).min(320.0);
+            let submenu_content = container(rows).width(submenu_width).style(move |_| {
+                container::Style::default()
+                    .background(palette.menu_bg)
+                    .border(border::rounded(7).color(palette.strong_border).width(1))
+                    .shadow(iced::Shadow {
+                        color: Color::from_rgba8(0, 0, 0, 0.28),
+                        offset: iced::Vector::new(0.0, 7.0),
+                        blur_radius: 18.0,
+                    })
+            });
+            let submenu_backdrop = (menu_state.submenu_backdrop_kind
+                == Some(ContextSubmenuKind::OpenWith))
+            .then_some(menu_state.submenu_backdrop.as_ref())
+            .flatten();
+            let submenu = self.frosted_popup_surface(
+                submenu_backdrop,
+                submenu_content.into(),
+                submenu_width,
+                submenu_height,
+            );
+            let submenu_x = if x + 258.0 + submenu_width <= self.window_size.width - 8.0 {
+                x + 252.0
+            } else {
+                (x - submenu_width + 6.0).max(8.0)
+            };
+            let submenu_y = (y + 42.0).clamp(
+                8.0,
+                (self.window_size.height - submenu_height - 8.0).max(8.0),
+            );
+            let submenu = mouse_area(submenu)
+                .on_enter(Message::ContextOpenWithSubmenuEnter)
+                .on_exit(Message::ContextOpenWithSubmenuExit);
+            overlay_layers.push(
+                float(opaque(submenu))
+                    .translate(move |_, _| Vector::new(submenu_x, submenu_y))
+                    .into(),
+            );
+        }
         if self.context_archive_submenu && is_entry {
             let (submenu_rows, submenu_labels): (Element<'_, Message>, Vec<String>) =
                 if self.context_extract_submenu {

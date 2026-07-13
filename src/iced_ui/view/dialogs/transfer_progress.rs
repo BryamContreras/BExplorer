@@ -12,6 +12,10 @@ impl BExplorerIced {
         } else {
             (item.copied_bytes as f32 / item.total_bytes as f32).clamp(0.0, 1.0)
         };
+        let is_delete = matches!(
+            item.kind,
+            TransferDisplayKind::Trash | TransferDisplayKind::PermanentDelete
+        );
         let files = if item.total_files == 0 {
             self.localized("Preparando archivos", "Preparing files")
                 .to_owned()
@@ -40,7 +44,13 @@ impl BExplorerIced {
         } else {
             String::new()
         };
-        let details = if speed.is_empty() {
+        let details = if is_delete {
+            if self.is_spanish() {
+                format!("{} elemento(s)", item.total_files)
+            } else {
+                format!("{} item(s)", item.total_files)
+            }
+        } else if speed.is_empty() {
             format!("{files}  -  {size}")
         } else {
             format!("{files}  -  {size}  -  {speed}")
@@ -49,7 +59,12 @@ impl BExplorerIced {
         let title = self.localized_transfer_title(&item);
         let id = item.id;
         let controls: Element<'_, Message> =
-            if matches!(item.state, TransferState::Copying | TransferState::Paused) {
+            if matches!(item.state, TransferState::Copying | TransferState::Paused)
+                && matches!(
+                    item.kind,
+                    TransferDisplayKind::Copy | TransferDisplayKind::Move
+                )
+            {
                 let pause_label = if item.state == TransferState::Paused {
                     self.localized("Reanudar", "Resume")
                 } else {
@@ -103,14 +118,26 @@ impl BExplorerIced {
                 ]
                 .spacing(3)
                 .width(Length::Fill),
-                text(format!("{:.0}%", progress * 100.0))
-                    .size(self.font_size())
-                    .color(palette.muted_text),
+                text(if is_delete {
+                    String::new()
+                } else {
+                    format!("{:.0}%", progress * 100.0)
+                })
+                .size(self.font_size())
+                .color(palette.muted_text),
                 controls,
             ]
             .spacing(9)
             .align_y(Alignment::Center),
-            transfer_progress_bar(progress, palette, TRANSFER_PROGRESS_BAR_HEIGHT),
+            if is_delete {
+                indeterminate_progress_bar(
+                    self.transfer_progress_phase,
+                    palette,
+                    TRANSFER_PROGRESS_BAR_HEIGHT,
+                )
+            } else {
+                transfer_progress_bar(progress, palette, TRANSFER_PROGRESS_BAR_HEIGHT)
+            },
             row![
                 text(state)
                     .size(self.font_size() - 1.0)

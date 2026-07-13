@@ -264,7 +264,16 @@ impl BExplorerIced {
         } else {
             Space::new().height(0).into()
         };
-        let status: Element<'_, Message> = column![progress_bar, status_content].spacing(0).into();
+        // Keep the filter row keyed separately from the progress indicator.
+        // Search batches change the indicator's widget type, but that must not
+        // recreate the text input and drop its keyboard focus.
+        let status: Element<'_, Message> = iced::widget::keyed::Column::with_children(vec![
+            (0_u8, progress_bar),
+            (1_u8, status_content.into()),
+        ])
+        .spacing(0)
+        .width(Length::Fill)
+        .into();
 
         let pane_body = container(
             column![

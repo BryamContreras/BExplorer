@@ -644,6 +644,29 @@ impl BExplorerIced {
                         self.start_load(pane)
                     }
                     Err(error) => {
+                        if operations::error_message_is_permission_denied(&error)
+                            && cfg!(any(target_os = "windows", target_os = "linux"))
+                        {
+                            if let Some(path) = self.tab_for_pane(pane).path.clone() {
+                                self.pane_mut(pane).status = if cfg!(target_os = "linux") {
+                                    "Crear la carpeta requiere permisos de root".into()
+                                } else {
+                                    "Crear la carpeta requiere permisos de administrador".into()
+                                };
+                                self.elevated_file_action_dialog =
+                                    Some(PendingElevatedFileAction {
+                                        pane,
+                                        action: operations::ElevatedFileAction::CreateFolder {
+                                            parent: path,
+                                            name: self
+                                                .localized("Nueva carpeta", "New folder")
+                                                .into(),
+                                        },
+                                        error,
+                                    });
+                                return Task::none();
+                            }
+                        }
                         self.pane_mut(pane).status = error;
                         Task::none()
                     }
@@ -677,6 +700,32 @@ impl BExplorerIced {
                         self.start_load(pane)
                     }
                     Err(error) => {
+                        if operations::error_message_is_permission_denied(&error)
+                            && cfg!(any(target_os = "windows", target_os = "linux"))
+                        {
+                            if let Some(path) = self.tab_for_pane(pane).path.clone() {
+                                self.pane_mut(pane).status = if cfg!(target_os = "linux") {
+                                    "Crear el archivo requiere permisos de root".into()
+                                } else {
+                                    "Crear el archivo requiere permisos de administrador".into()
+                                };
+                                self.elevated_file_action_dialog =
+                                    Some(PendingElevatedFileAction {
+                                        pane,
+                                        action: operations::ElevatedFileAction::CreateFile {
+                                            parent: path,
+                                            name: self
+                                                .localized(
+                                                    "Nuevo documento de texto.txt",
+                                                    "New text document.txt",
+                                                )
+                                                .into(),
+                                        },
+                                        error,
+                                    });
+                                return Task::none();
+                            }
+                        }
                         self.pane_mut(pane).status = error;
                         Task::none()
                     }
@@ -751,9 +800,16 @@ impl BExplorerIced {
                 self.cancel_archive(id);
                 Task::none()
             }
-            Message::TrashFinished(pane, result) => {
+            Message::TrashFinished(pane, paths, result) => {
                 self.pending_file_operations.remove(&pane);
-                match result {
+                let transfer_id = self
+                    .active_deletes
+                    .iter()
+                    .find(|(_, deletion)| deletion.pane == pane && deletion.paths == paths)
+                    .map(|(id, _)| *id)
+                    .unwrap_or_default();
+                self.active_deletes.remove(&transfer_id);
+                let completion_task = match result {
                     Ok(outcome) => {
                         if !outcome.undo_records.is_empty() {
                             self.last_undo_action = Some(UndoAction::Trash {
@@ -765,10 +821,29 @@ impl BExplorerIced {
                         self.start_load(pane)
                     }
                     Err(error) => {
-                        self.pane_mut(pane).status = error;
-                        self.start_load(pane)
+                        if operations::error_message_is_permission_denied(&error)
+                            && cfg!(any(target_os = "windows", target_os = "linux"))
+                        {
+                            self.pane_mut(pane).status = if cfg!(target_os = "linux") {
+                                "Enviar a la papelera requiere permisos de root".into()
+                            } else {
+                                "Enviar a la papelera requiere permisos de administrador".into()
+                            };
+                            self.elevated_delete_dialog = Some(PendingElevatedDelete {
+                                pane,
+                                paths,
+                                permanent: false,
+                                transfer_id,
+                                error,
+                            });
+                            Task::none()
+                        } else {
+                            self.pane_mut(pane).status = error;
+                            self.start_load(pane)
+                        }
                     }
-                }
+                };
+                Task::batch([completion_task, self.close_transfer_window_if_idle_task()])
             }
             Message::UndoLastAction => self.undo_last_action(),
             Message::UndoFinished(action, result) => {
@@ -857,6 +932,41 @@ impl BExplorerIced {
                 self.queue_visible_images(pane)
             }
             Message::PaneMouseWheel(pane, delta) => {
+                if self.current_modifiers.control() {
+                    let vertical_delta = match delta {
+                        mouse::ScrollDelta::Lines { x, y } => {
+                            if y.abs() > f32::EPSILON {
+                                y * 40.0
+                            } else {
+                                x * 40.0
+                            }
+                        }
+                        mouse::ScrollDelta::Pixels { x, y } => {
+                            if y.abs() > f32::EPSILON {
+                                y
+                            } else {
+                                x
+                            }
+                        }
+                    };
+                    self.view_scroll_accumulator += vertical_delta;
+                    if self.view_scroll_accumulator.abs() < 36.0 {
+                        return Task::none();
+                    }
+                    let larger = self.view_scroll_accumulator > 0.0;
+                    self.view_scroll_accumulator = 0.0;
+                    self.focus_pane(pane);
+                    let current_mode = self.effective_view_mode(pane);
+                    let mode = adjacent_view_mode(current_mode, larger);
+                    if mode == current_mode {
+                        return Task::none();
+                    }
+                    self.set_view_mode_for_pane(pane, mode);
+                    self.view_menu_open = None;
+                    self.save_session();
+                    return self.queue_visible_images(pane);
+                }
+                self.view_scroll_accumulator = 0.0;
                 let state = self.pane_mut(pane);
                 state.scrollbar_reveal_until = Some(Instant::now() + Duration::from_millis(850));
                 if state.has_vertical_overflow {
@@ -1382,6 +1492,7 @@ impl BExplorerIced {
             }
             Message::ContextArchiveParentEnter => {
                 self.context_archive_submenu = true;
+                self.context_open_with_submenu = false;
                 self.context_extract_submenu = false;
                 self.context_archive_parent_hovered = true;
                 self.context_new_submenu = false;
@@ -1389,6 +1500,7 @@ impl BExplorerIced {
             }
             Message::ContextExtractParentEnter => {
                 self.context_archive_submenu = true;
+                self.context_open_with_submenu = false;
                 self.context_extract_submenu = true;
                 self.context_archive_parent_hovered = true;
                 self.context_new_submenu = false;
@@ -1396,10 +1508,49 @@ impl BExplorerIced {
             }
             Message::ContextNewParentEnter => {
                 self.context_new_submenu = true;
+                self.context_open_with_submenu = false;
                 self.context_new_parent_hovered = true;
                 self.context_archive_submenu = false;
                 self.context_extract_submenu = false;
                 self.request_context_submenu_backdrop(ContextSubmenuKind::New)
+            }
+            Message::ContextOpenWithParentEnter => {
+                let Some(menu) = self.context_menu.as_ref() else {
+                    return Task::none();
+                };
+                let pane = menu.pane;
+                let target = menu.target;
+                self.context_open_with_submenu = true;
+                self.context_open_with_parent_hovered = true;
+                self.context_archive_submenu = false;
+                self.context_extract_submenu = false;
+                self.context_new_submenu = false;
+                let backdrop = self.request_context_submenu_backdrop(ContextSubmenuKind::OpenWith);
+                let icons = self.queue_open_with_application_icons(pane, target);
+                Task::batch([backdrop, icons])
+            }
+            Message::ContextOpenWithParentExit => {
+                self.context_open_with_parent_hovered = false;
+                Task::perform(delay(Duration::from_millis(140)), |_| {
+                    Message::CloseContextOpenWithSubmenuIfUnhovered
+                })
+            }
+            Message::ContextOpenWithSubmenuEnter => {
+                self.context_open_with_submenu_hovered = true;
+                Task::none()
+            }
+            Message::ContextOpenWithSubmenuExit => {
+                self.context_open_with_submenu_hovered = false;
+                Task::perform(delay(Duration::from_millis(140)), |_| {
+                    Message::CloseContextOpenWithSubmenuIfUnhovered
+                })
+            }
+            Message::CloseContextOpenWithSubmenuIfUnhovered => {
+                if !self.context_open_with_parent_hovered && !self.context_open_with_submenu_hovered
+                {
+                    self.context_open_with_submenu = false;
+                }
+                Task::none()
             }
             Message::ContextArchiveParentExit => {
                 self.context_archive_parent_hovered = false;
@@ -1455,12 +1606,37 @@ impl BExplorerIced {
             }
             Message::KeyPressed(key, physical_key, modifiers) => {
                 self.current_modifiers = modifiers;
-                if self.rename_dialog.is_some()
-                    && matches!(
-                        key.as_ref(),
-                        keyboard::Key::Named(keyboard::key::Named::Escape)
-                    )
-                {
+                let is_enter = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::Enter)
+                );
+                let is_escape = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::Escape)
+                );
+                if is_enter {
+                    if self.elevated_transfer_dialog.is_some() {
+                        return self.update(Message::ConfirmElevatedTransfer);
+                    }
+                    if self.elevated_delete_dialog.is_some() {
+                        return self.update(Message::ConfirmElevatedDelete);
+                    }
+                    if self.elevated_file_action_dialog.is_some() {
+                        return self.update(Message::ConfirmElevatedFileAction);
+                    }
+                }
+                if is_escape {
+                    if self.elevated_transfer_dialog.is_some() {
+                        return self.update(Message::CancelElevatedTransfer);
+                    }
+                    if self.elevated_delete_dialog.is_some() {
+                        return self.update(Message::CancelElevatedDelete);
+                    }
+                    if self.elevated_file_action_dialog.is_some() {
+                        return self.update(Message::CancelElevatedFileAction);
+                    }
+                }
+                if self.rename_dialog.is_some() && is_escape {
                     return self.update(Message::CancelRename);
                 }
                 if self.shortcuts_open
@@ -1508,6 +1684,27 @@ impl BExplorerIced {
                         self.start_load(dialog.pane)
                     }
                     Err(error) => {
+                        if operations::error_message_is_permission_denied(&error)
+                            && cfg!(any(target_os = "windows", target_os = "linux"))
+                        {
+                            self.pane_mut(dialog.pane).status = if cfg!(target_os = "linux") {
+                                "Renombrar requiere permisos de root".into()
+                            } else {
+                                "Renombrar requiere permisos de administrador".into()
+                            };
+                            self.elevated_file_action_dialog = Some(PendingElevatedFileAction {
+                                pane: dialog.pane,
+                                action: operations::ElevatedFileAction::Rename {
+                                    path: dialog.path.clone(),
+                                    name: rename_target_name(
+                                        &dialog.value,
+                                        dialog.extension.as_deref(),
+                                    ),
+                                },
+                                error,
+                            });
+                            return Task::none();
+                        }
                         self.pane_mut(dialog.pane).status = error;
                         dialog.editor.perform(text_editor::Action::SelectAll);
                         self.rename_dialog = Some(dialog.clone());
@@ -1521,18 +1718,44 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::ConfirmPermanentDelete => self.confirm_permanent_delete(),
-            Message::PermanentDeleteFinished(pane, result) => {
+            Message::PermanentDeleteFinished(pane, paths, result) => {
                 self.pending_file_operations.remove(&pane);
-                match result {
+                let transfer_id = self
+                    .active_deletes
+                    .iter()
+                    .find(|(_, deletion)| deletion.pane == pane && deletion.paths == paths)
+                    .map(|(id, _)| *id)
+                    .unwrap_or_default();
+                self.active_deletes.remove(&transfer_id);
+                let completion_task = match result {
                     Ok(count) => {
                         self.pane_mut(pane).status = format!("Deleted {count} item(s)");
                         self.start_load(pane)
                     }
                     Err(error) => {
-                        self.pane_mut(pane).status = error;
-                        self.start_load(pane)
+                        if operations::error_message_is_permission_denied(&error)
+                            && cfg!(any(target_os = "windows", target_os = "linux"))
+                        {
+                            self.pane_mut(pane).status = if cfg!(target_os = "linux") {
+                                "Eliminar permanentemente requiere permisos de root".into()
+                            } else {
+                                "Eliminar permanentemente requiere permisos de administrador".into()
+                            };
+                            self.elevated_delete_dialog = Some(PendingElevatedDelete {
+                                pane,
+                                paths,
+                                permanent: true,
+                                transfer_id,
+                                error,
+                            });
+                            Task::none()
+                        } else {
+                            self.pane_mut(pane).status = error;
+                            self.start_load(pane)
+                        }
                     }
-                }
+                };
+                Task::batch([completion_task, self.close_transfer_window_if_idle_task()])
             }
             Message::CancelPermanentDelete => {
                 self.request_popup_close(PendingPopupClose::PermanentDelete)
@@ -1667,6 +1890,203 @@ impl BExplorerIced {
             Message::CancelTransferConflict => {
                 self.request_popup_close(PendingPopupClose::TransferConflict)
             }
+            Message::ConfirmElevatedTransfer => {
+                let Some(pending) = self.elevated_transfer_dialog.take() else {
+                    return Task::none();
+                };
+                let pane = pending.pane;
+                let job = pending.job;
+                let worker_job = job.clone();
+                let mut progress = TransferProgress::pending(&job);
+                progress.state = TransferState::Copying;
+                progress.current_name = if cfg!(target_os = "linux") {
+                    "Esperando permisos de root…".into()
+                } else {
+                    "Esperando permisos de administrador…".into()
+                };
+                self.transfer_progress.insert(job.id, progress);
+                self.pane_mut(pane).status = "Esperando autorización del sistema…".into();
+                let elevated_task = Task::perform(
+                    run_blocking_file_operation(move || {
+                        transfer_queue::run_elevated_transfer(&worker_job)
+                    }),
+                    move |result| Message::ElevatedTransferFinished(pane, job, result),
+                );
+                Task::batch([self.ensure_transfer_window_task(), elevated_task])
+            }
+            Message::CancelElevatedTransfer => {
+                if let Some(pending) = self.elevated_transfer_dialog.take() {
+                    self.pane_mut(pending.pane).status = pending.error;
+                }
+                Task::none()
+            }
+            Message::ElevatedTransferFinished(pane, job, result) => match result {
+                Ok(result) => {
+                    if let Some(mut progress) = self.transfer_progress.remove(&job.id) {
+                        progress.state = TransferState::Finished;
+                        progress.files_done = result.completed_files;
+                        self.transfer_history.push_back(TransferHistoryState {
+                            progress,
+                            finished_at: Instant::now(),
+                        });
+                    }
+                    if job.conflict_policy == ConflictPolicy::KeepBoth
+                        && !result.completed_roots.is_empty()
+                    {
+                        self.last_undo_action = Some(match job.kind {
+                            TransferKind::Copy => UndoAction::Copy {
+                                pane,
+                                targets: result
+                                    .completed_roots
+                                    .iter()
+                                    .map(|item| item.target.clone())
+                                    .collect(),
+                            },
+                            TransferKind::Move => UndoAction::Move {
+                                pane,
+                                items: result.completed_roots.clone(),
+                            },
+                        });
+                    }
+                    self.pane_mut(pane).status = match job.kind {
+                        TransferKind::Copy => {
+                            format!(
+                                "Copiados {} elemento(s) con permisos elevados",
+                                result.completed_files
+                            )
+                        }
+                        TransferKind::Move => {
+                            format!(
+                                "Movidos {} elemento(s) con permisos elevados",
+                                result.completed_files
+                            )
+                        }
+                    };
+                    self.refresh_panes_for_directories(
+                        pane,
+                        &crate::iced_ui::file_actions::transfer_refresh_directories(&job),
+                    )
+                }
+                Err(error) => {
+                    if let Some(mut progress) = self.transfer_progress.remove(&job.id) {
+                        progress.state = TransferState::Failed;
+                        self.transfer_history.push_back(TransferHistoryState {
+                            progress,
+                            finished_at: Instant::now(),
+                        });
+                    }
+                    self.pane_mut(pane).status = error;
+                    self.refresh_panes_for_directories(
+                        pane,
+                        &crate::iced_ui::file_actions::transfer_refresh_directories(&job),
+                    )
+                }
+            },
+            Message::ConfirmElevatedDelete => {
+                let Some(pending) = self.elevated_delete_dialog.take() else {
+                    return Task::none();
+                };
+                let pane = pending.pane;
+                let permanent = pending.permanent;
+                let transfer_id = pending.transfer_id;
+                self.active_deletes.insert(
+                    transfer_id,
+                    ActiveDeleteState {
+                        id: transfer_id,
+                        pane,
+                        paths: pending.paths.clone(),
+                        permanent,
+                    },
+                );
+                let kind = if permanent {
+                    operations::ElevatedDeleteKind::Permanent
+                } else {
+                    operations::ElevatedDeleteKind::Trash
+                };
+                self.pane_mut(pane).status = "Esperando autorización del sistema…".into();
+                let delete_task = Task::perform(
+                    run_blocking_file_operation(move || {
+                        operations::run_elevated_delete(&pending.paths, kind)
+                    }),
+                    move |result| {
+                        Message::ElevatedDeleteFinished(pane, permanent, transfer_id, result)
+                    },
+                );
+                Task::batch([self.ensure_transfer_window_task(), delete_task])
+            }
+            Message::CancelElevatedDelete => {
+                if let Some(pending) = self.elevated_delete_dialog.take() {
+                    self.pane_mut(pending.pane).status = pending.error;
+                }
+                Task::none()
+            }
+            Message::ElevatedDeleteFinished(pane, permanent, transfer_id, result) => {
+                self.active_deletes.remove(&transfer_id);
+                match result {
+                    Ok(count) => {
+                        self.pane_mut(pane).status = if permanent {
+                            format!("Eliminados permanentemente {count} elemento(s)")
+                        } else {
+                            format!("Enviados a la papelera {count} elemento(s)")
+                        };
+                    }
+                    Err(error) => self.pane_mut(pane).status = error,
+                }
+                Task::batch([
+                    self.start_load(pane),
+                    self.close_transfer_window_if_idle_task(),
+                ])
+            }
+            Message::ConfirmElevatedFileAction => {
+                let Some(pending) = self.elevated_file_action_dialog.take() else {
+                    return Task::none();
+                };
+                let pane = pending.pane;
+                let action = pending.action;
+                let worker_action = action.clone();
+                self.pane_mut(pane).status = "Esperando autorización del sistema…".into();
+                Task::perform(
+                    run_blocking_file_operation(move || {
+                        operations::run_elevated_file_action(&worker_action)
+                    }),
+                    move |result| Message::ElevatedFileActionFinished(pane, action, result),
+                )
+            }
+            Message::CancelElevatedFileAction => {
+                if let Some(pending) = self.elevated_file_action_dialog.take() {
+                    self.pane_mut(pending.pane).status = pending.error;
+                }
+                Task::none()
+            }
+            Message::ElevatedFileActionFinished(pane, action, result) => match result {
+                Ok(created_or_renamed) => {
+                    match &action {
+                        operations::ElevatedFileAction::Rename { path, .. } => {
+                            let state = self.pane_mut(pane);
+                            if state.selected.remove(path) {
+                                state.selected.insert(created_or_renamed.clone());
+                            }
+                            state.status = format!(
+                                "Renombrado a {} con permisos elevados",
+                                created_or_renamed.display()
+                            );
+                        }
+                        _ => {
+                            self.pane_mut(pane).status = format!(
+                                "Creado {} con permisos elevados",
+                                created_or_renamed.display()
+                            );
+                            self.pending_new_folder_rename =
+                                Some((pane, created_or_renamed.clone()));
+                        }
+                    }
+                    self.start_load(pane)
+                }
+                Err(error) => {
+                    self.pane_mut(pane).status = error;
+                    Task::none()
+                }
+            },
             Message::ToggleSettings => {
                 if self.settings_open {
                     return self.request_popup_close(PendingPopupClose::Settings);
@@ -2063,6 +2483,7 @@ impl BExplorerIced {
                 }
             }
             Message::PollTransfers => {
+                self.transfer_progress_phase = (self.transfer_progress_phase + 0.025) % 1.0;
                 self.poll_defender_messages();
                 let mut tasks = vec![self.poll_transfer_messages(), self.poll_archive_messages()];
                 if !self.transfer_active()
