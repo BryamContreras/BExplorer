@@ -152,6 +152,26 @@ impl BExplorerIced {
                 .padding([0, 8])
                 .on_press(Message::ToggleSettings)
                 .style(move |_, status| button_style(palette, false, status)),
+                Button::new(
+                    container(
+                        row![
+                            inline_icon("properties", palette.muted_text, 16.0),
+                            text(self.localized("Acerca de", "About"))
+                                .size(self.font_size())
+                                .color(palette.text)
+                                .width(Length::Fill),
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .height(Length::Fill)
+                    .center_y(Length::Fill),
+                )
+                .width(Length::Fill)
+                .height(32)
+                .padding([0, 8])
+                .on_press(Message::OpenAbout)
+                .style(move |_, status| button_style(palette, false, status)),
             ]
             .spacing(3),
         )
@@ -174,7 +194,7 @@ impl BExplorerIced {
         )
         .on_press(Message::CloseFloatingMenus);
         let menu =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), menu.into(), 220.0, 116.0);
+            self.frosted_popup_surface(self.popup_backdrop.as_ref(), menu.into(), 220.0, 151.0);
         let floating_menu: Element<'_, Message> = float(opaque(menu))
             .translate(|_, _| Vector::new(0.0, TITLE_HEIGHT))
             .into();

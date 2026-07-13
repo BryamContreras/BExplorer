@@ -480,6 +480,7 @@ pub(in crate::iced_ui) fn icon_svg(label: &'static str) -> &'static [u8] {
         "terminal" => ICON_TERMINAL,
         "properties" => ICON_PROPERTIES,
         "settings" => ICON_SETTINGS,
+        "github" => ICON_GITHUB,
         "keyboard" => ICON_KEYBOARD,
         "theme" => ICON_THEME,
         "view-details" => ICON_VIEW_DETAILS,
@@ -539,6 +540,7 @@ const ICON_OPEN_WITH: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3
 const ICON_TERMINAL: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="6" width="16" height="12" rx="2" fill="none" stroke="#000" stroke-width="1.7"/><path d="m7 10 3 2-3 2M12 15h5" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_PROPERTIES: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="8" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 10.5v5M12 7.7h.1" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round"/></svg>"##;
 const ICON_SETTINGS: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 4.5v2M12 17.5v2M19.5 12h-2M6.5 12h-2M17.3 6.7l-1.4 1.4M8.1 15.9l-1.4 1.4M17.3 17.3l-1.4-1.4M8.1 8.1 6.7 6.7" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round"/></svg>"##;
+const ICON_GITHUB: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-.89-.01-1.74-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05A9.37 9.37 0 0 1 12 7.1c.85 0 1.71.12 2.5.35 1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.49A10.23 10.23 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z" fill="#000"/></svg>"##;
 const ICON_KEYBOARD: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="6" width="17" height="12" rx="2" fill="none" stroke="#000" stroke-width="1.55"/><path d="M6.5 9.5h.1M9.5 9.5h.1M12.5 9.5h.1M15.5 9.5h.1M6.5 12.5h.1M9.5 12.5h.1M12.5 12.5h.1M15.5 12.5h.1M8 15.5h8" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
 const ICON_THEME: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="7" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 5a7 7 0 0 1 0 14z" fill="#000"/></svg>"##;
 const ICON_VIEW_DETAILS: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8 7h11M8 12h11M8 17h11" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round"/><path d="M4.5 7h.1M4.5 12h.1M4.5 17h.1" fill="none" stroke="#000" stroke-width="2.5" stroke-linecap="round"/></svg>"##;
@@ -790,19 +792,21 @@ impl Palette {
             }
         };
         if config.vibrancy_active {
-            let intensity = config.vibrancy_intensity.clamp(15, 100) as f32 / 100.0;
+            #[cfg(target_os = "linux")]
+            let gnome_application_blur =
+                config.vibrancy == VibrancyMode::Blur && crate::platform::linux::is_gnome_wayland();
+            #[cfg(not(target_os = "linux"))]
+            let gnome_application_blur = false;
+
             // Intensity controls how much of the native/compositor backdrop is
             // allowed through. The previous scale left the window mostly
             // opaque even at 90%, making KWin's blur impossible to perceive.
             // Keep a readable floor while making the high end visibly glassy.
-            let base_alpha = (1.0 - intensity * 0.68).clamp(0.32, 0.9);
-            // Windows Acrylic already supplies a native backdrop. Let a little
-            // more of it show through without changing the Linux blur tuning.
-            let alpha = if config.vibrancy == VibrancyMode::Acrylic {
-                (base_alpha - 0.05).max(0.30)
-            } else {
-                base_alpha
-            };
+            let alpha = vibrancy_surface_alpha(
+                config.vibrancy_intensity,
+                config.vibrancy,
+                gnome_application_blur,
+            );
             for surface in [
                 &mut palette.page_bg,
                 &mut palette.table_bg,
@@ -823,5 +827,31 @@ impl Palette {
             palette.overlay_title_bg.a = dialog_alpha;
         }
         palette
+    }
+}
+
+pub(in crate::iced_ui) fn vibrancy_surface_alpha(
+    intensity: u8,
+    mode: VibrancyMode,
+    gnome_application_blur: bool,
+) -> f32 {
+    let intensity = intensity.min(100) as f32 / 100.0;
+    if gnome_application_blur {
+        // Blur My Shell controls the opacity of the complete client actor from
+        // the same intensity setting. Keep our own main surfaces opaque so a
+        // second alpha stage cannot make the result unexpectedly transparent.
+        return 1.0;
+    }
+
+    if intensity <= f32::EPSILON {
+        return 1.0;
+    }
+    let base_alpha = (1.0 - intensity * 0.68).clamp(0.32, 1.0);
+    // Windows Acrylic already supplies a native backdrop. Let a little more
+    // of it show through without changing the KWin blur tuning.
+    if mode == VibrancyMode::Acrylic {
+        (base_alpha - 0.05).max(0.30)
+    } else {
+        base_alpha
     }
 }

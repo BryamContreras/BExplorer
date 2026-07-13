@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn vibrancy_uses_dense_glass_for_menus_inputs_and_overlay_windows() {
+    fn vibrancy_keeps_main_surfaces_and_overlays_readable() {
         let config = AppConfig {
             vibrancy: VibrancyMode::Blur,
             vibrancy_intensity: 90,
@@ -225,12 +225,35 @@ mod tests {
         };
 
         let palette = Palette::from_config(&config, true);
-        assert!(palette.page_bg.a < 1.0);
-        assert!(palette.menu_bg.a > palette.page_bg.a);
-        assert!(palette.input_bg.a > palette.page_bg.a);
+        #[cfg(target_os = "linux")]
+        let gnome_application_blur = crate::platform::linux::is_gnome_wayland();
+        #[cfg(not(target_os = "linux"))]
+        let gnome_application_blur = false;
+
+        if gnome_application_blur {
+            assert_eq!(palette.page_bg.a, 1.0);
+            assert!(palette.menu_bg.a < palette.page_bg.a);
+            assert!(palette.input_bg.a < palette.page_bg.a);
+        } else {
+            assert!(palette.page_bg.a < 1.0);
+            assert!(palette.menu_bg.a > palette.page_bg.a);
+            assert!(palette.input_bg.a > palette.page_bg.a);
+        }
         assert!(palette.overlay_bg.a > palette.menu_bg.a);
         assert!(palette.overlay_title_bg.a > palette.menu_bg.a);
         assert!(palette.overlay_bg.a < 1.0);
+    }
+
+    #[test]
+    fn gnome_application_blur_avoids_multiplying_two_aggressive_alpha_stages() {
+        let compositor_alpha = vibrancy_surface_alpha(60, VibrancyMode::Blur, false);
+        let gnome_alpha = vibrancy_surface_alpha(60, VibrancyMode::Blur, true);
+        let strongest_gnome_alpha = vibrancy_surface_alpha(100, VibrancyMode::Blur, true);
+
+        assert!(gnome_alpha > compositor_alpha + 0.25);
+        assert_eq!(gnome_alpha, 1.0);
+        assert_eq!(strongest_gnome_alpha, 1.0);
+        assert_eq!(vibrancy_surface_alpha(0, VibrancyMode::Blur, true), 1.0);
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]

@@ -320,6 +320,10 @@ impl BExplorerIced {
                 self.shortcut_capture = None;
                 self.popup_backdrop = None;
             }
+            PendingPopupClose::About => {
+                self.about_open = false;
+                self.popup_backdrop = None;
+            }
             PendingPopupClose::Settings => {
                 self.settings_open = false;
                 self.popup_backdrop = None;
@@ -400,6 +404,9 @@ impl BExplorerIced {
             }
             PopupBackdropTarget::Shortcuts => {
                 self.shortcuts_open = true;
+            }
+            PopupBackdropTarget::About => {
+                self.about_open = true;
             }
             PopupBackdropTarget::ColorPicker => {
                 self.color_picker_open = true;

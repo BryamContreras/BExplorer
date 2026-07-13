@@ -262,6 +262,7 @@ struct BExplorerIced {
     resize_drag: Option<ResizeDrag>,
     settings_open: bool,
     shortcuts_open: bool,
+    about_open: bool,
     shortcut_capture: Option<ShortcutAction>,
     sidebar_visible: bool,
     sidebar_pointer_inside: bool,
@@ -338,7 +339,7 @@ fn popup_backdrop_region_for_screenshot(
             x: 0.0,
             y: TITLE_HEIGHT,
             width: 220.0_f32.min(window_width),
-            height: 116.0_f32.min((window_height - TITLE_HEIGHT).max(0.0)),
+            height: 151.0_f32.min((window_height - TITLE_HEIGHT).max(0.0)),
         },
         PopupBackdropTarget::NewMenu(pane) => Rectangle {
             x: if matches!(pane, PaneId::Secondary) {
@@ -379,6 +380,7 @@ fn popup_backdrop_region_for_screenshot(
         },
         PopupBackdropTarget::Settings => centered(470.0, 570.0),
         PopupBackdropTarget::Shortcuts => centered(740.0, 470.0),
+        PopupBackdropTarget::About => centered(390.0, 245.0),
         PopupBackdropTarget::ColorPicker => {
             let mut region = centered(COLOR_PICKER_WIDTH, 400.0);
             region.x = ((window_width - 470.0) * 0.5 + 136.0)
@@ -647,6 +649,7 @@ impl BExplorerIced {
             color_rgb_inputs,
             settings_open: false,
             shortcuts_open: false,
+            about_open: false,
             shortcut_capture: None,
             color_picker_open: false,
             accent_plane_dragging: false,

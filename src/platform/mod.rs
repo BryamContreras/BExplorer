@@ -240,7 +240,7 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
                 // Keep the native tint a touch lighter than the configured
                 // intensity so the acrylic backdrop is more noticeable while
                 // retaining enough contrast for the explorer content.
-                let alpha = (intensity.clamp(15, 100) as u16 * 9 / 5) as u8;
+                let alpha = (intensity.min(100) as u16 * 9 / 5) as u8;
                 let color = if dark {
                     (24, 29, 32, alpha)
                 } else {
@@ -268,7 +268,7 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
                 window,
                 NSVisualEffectMaterial::WindowBackground,
                 Some(NSVisualEffectState::FollowsWindowActiveState),
-                Some(f64::from(intensity.clamp(15, 100)) / 7.0),
+                Some(f64::from(intensity.min(100)) / 7.0),
             )
             .map(|_| true)
             .map_err(|error| crate::utils::errors::BExplorerError::Operation(error.to_string())),
@@ -281,7 +281,7 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
         // Blur My Shell because Mutter has no client-facing blur protocol.
         // Unsupported backends report an inactive result so the UI retains its
         // opaque, readable fallback.
-        let _ = (intensity, dark);
+        let _ = dark;
         if mode == VibrancyMode::Blur {
             match linux::ensure_kwin_blur_effect() {
                 Ok(true) => crate::utils::log::info(
@@ -293,7 +293,7 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
                 )),
             }
         }
-        match linux::apply_window_blur(window, mode == VibrancyMode::Blur) {
+        match linux::apply_window_blur(window, mode == VibrancyMode::Blur, intensity) {
             Ok(active) => Ok(active),
             Err(error) => {
                 crate::utils::log::info(format!(

@@ -392,6 +392,33 @@ impl BExplorerIced {
                 self.request_popup_backdrop(PopupBackdropTarget::Shortcuts)
             }
             Message::CloseShortcuts => self.request_popup_close(PendingPopupClose::Shortcuts),
+            Message::OpenAbout => {
+                self.title_menu_open = false;
+                self.show_menu_open = false;
+                self.show_menu_parent_hovered = false;
+                self.show_menu_submenu_hovered = false;
+                self.settings_open = false;
+                self.color_picker_open = false;
+                self.color_picker_backdrop = None;
+                self.accent_plane_dragging = false;
+                self.accent_hue_dragging = false;
+                self.request_popup_backdrop(PopupBackdropTarget::About)
+            }
+            Message::CloseAbout => self.request_popup_close(PendingPopupClose::About),
+            Message::OpenRepository => match shell::open_url(env!("CARGO_PKG_REPOSITORY")) {
+                Ok(()) => Task::none(),
+                Err(error) => {
+                    self.about_open = false;
+                    self.show_error_dialog(
+                        self.localized(
+                            "No se pudo abrir el repositorio",
+                            "Could not open repository",
+                        )
+                        .to_owned(),
+                        error.to_string(),
+                    )
+                }
+            },
             Message::BeginShortcutCapture(action) => {
                 self.shortcut_capture = Some(action);
                 Task::none()
@@ -1942,6 +1969,9 @@ impl BExplorerIced {
                 {
                     return self.update(Message::CloseShortcuts);
                 }
+                if self.about_open && is_escape {
+                    return self.update(Message::CloseAbout);
+                }
                 if self.shortcut_capture.is_some() {
                     return shortcut_binding_from_key(&key, physical_key, modifiers)
                         .map(|binding| self.update(Message::ShortcutBindingCaptured(binding)))
@@ -2551,7 +2581,7 @@ impl BExplorerIced {
                 self.apply_window_corners_task()
             }
             Message::SetVibrancyIntensity(intensity) => {
-                self.config.vibrancy_intensity = intensity.clamp(15, 100);
+                self.config.vibrancy_intensity = intensity.min(100);
                 Task::none()
             }
             Message::VibrancyIntensityReleased => {

@@ -214,6 +214,9 @@ impl BExplorerIced {
         if self.shortcuts_open {
             modal_layers.push(opaque(self.shortcuts_modal(popup_palette)));
         }
+        if self.about_open {
+            modal_layers.push(opaque(self.about_modal(popup_palette)));
+        }
         if self.permanent_delete_dialog.is_some() {
             modal_layers.push(opaque(self.permanent_delete_modal(popup_palette)));
         }

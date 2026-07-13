@@ -11,6 +11,19 @@ pub(in crate::iced_ui) fn app_window_icon() -> Option<window::Icon> {
     window::icon::from_rgba(icon.into_raw(), width, height).ok()
 }
 
+pub(in crate::iced_ui) fn app_icon_image_handle() -> iced_image::Handle {
+    static HANDLE: std::sync::OnceLock<iced_image::Handle> = std::sync::OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            let icon = image::load_from_memory(APP_ICON_PNG)
+                .expect("embedded application icon must be a valid PNG")
+                .resize_exact(192, 192, image::imageops::FilterType::Lanczos3)
+                .to_rgba8();
+            iced_image::Handle::from_rgba(192, 192, icon.into_raw())
+        })
+        .clone()
+}
+
 pub(in crate::iced_ui) fn main_window_settings(size: Size, maximized: bool) -> window::Settings {
     window::Settings {
         size: Size::new(size.width.max(920.0), size.height.max(560.0)),

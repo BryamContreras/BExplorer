@@ -328,14 +328,14 @@ impl BExplorerIced {
 
         let vibrancy_intensity: Element<'_, Message> = if self.config.vibrancy != VibrancyMode::None
         {
-            let intensity = self.config.vibrancy_intensity.clamp(15, 100);
+            let intensity = self.config.vibrancy_intensity.min(100);
             container(
                 row![
                     text(self.localized("Intensidad", "Intensity"))
                         .size(self.font_size())
                         .color(palette.text)
                         .width(Length::Fixed(84.0)),
-                    slider(15..=100, intensity, Message::SetVibrancyIntensity)
+                    slider(0..=100, intensity, Message::SetVibrancyIntensity)
                         .step(1)
                         .on_release(Message::VibrancyIntensityReleased)
                         .width(Length::Fill),

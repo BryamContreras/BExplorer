@@ -8,6 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 use crate::platform::LINUX_APPLICATION_ID;
 use crate::utils::errors::{BExplorerError, Result};
@@ -16,24 +17,24 @@ const EXTENSION_UUID: &str = "blur-my-shell@aunetx";
 const APPLICATION_SCHEMA: &str = "org.gnome.shell.extensions.blur-my-shell.applications";
 
 pub(super) fn is_gnome_wayland() -> bool {
-    let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
-    if !session_type.eq_ignore_ascii_case("wayland") {
-        return false;
-    }
-
-    [
-        "XDG_CURRENT_DESKTOP",
-        "XDG_SESSION_DESKTOP",
-        "DESKTOP_SESSION",
-    ]
-    .into_iter()
-    .filter_map(|name| std::env::var(name).ok())
-    .any(|value| value.to_ascii_lowercase().contains("gnome"))
+    static IS_GNOME_WAYLAND: OnceLock<bool> = OnceLock::new();
+    *IS_GNOME_WAYLAND.get_or_init(|| {
+        let session_type = std::env::var("XDG_SESSION_TYPE").unwrap_or_default();
+        session_type.eq_ignore_ascii_case("wayland")
+            && [
+                "XDG_CURRENT_DESKTOP",
+                "XDG_SESSION_DESKTOP",
+                "DESKTOP_SESSION",
+            ]
+            .into_iter()
+            .filter_map(|name| std::env::var(name).ok())
+            .any(|value| value.to_ascii_lowercase().contains("gnome"))
+    })
 }
 
 /// Enables or disables blur for BExplorer without changing the extension's
 /// policy for any other application.
-pub(super) fn set_application_blur(enabled: bool) -> Result<bool> {
+pub(super) fn set_application_blur(enabled: bool, intensity: u8) -> Result<bool> {
     if !is_gnome_wayland() {
         return Ok(false);
     }
@@ -56,12 +57,44 @@ pub(super) fn set_application_blur(enabled: bool) -> Result<bool> {
             "Blur My Shell is enabled, but its application settings schema was not found".into(),
         )
     })?;
+    if !can_manage_application_opacity(&schema_dir)? {
+        update_application_lists(&schema_dir, false)?;
+        return Err(BExplorerError::Operation(
+            "Blur My Shell application blur is shared with other applications; BExplorer kept its opaque fallback to avoid changing their opacity".into(),
+        ));
+    }
 
-    set_value(&schema_dir, "blur", "true")?;
+    set_value(
+        &schema_dir,
+        "opacity",
+        &application_opacity(intensity).to_string(),
+    )?;
     keep_focused_window_blurred(&schema_dir)?;
     update_application_lists(&schema_dir, true)?;
+    set_value(&schema_dir, "blur", "true")?;
     crate::utils::log::info("GNOME Blur My Shell application blur registered for BExplorer");
     Ok(true)
+}
+
+fn application_opacity(intensity: u8) -> u8 {
+    // Blur My Shell applies this value to the complete client actor. Keep the
+    // range deliberately subtle: zero must be fully opaque, while the highest
+    // intensity still preserves enough contrast for a file manager.
+    255_u8.saturating_sub((u16::from(intensity.min(100)) * 45 / 100) as u8)
+}
+
+fn can_manage_application_opacity(schema_dir: &Path) -> Result<bool> {
+    if get_value(schema_dir, "enable-all")?
+        .trim()
+        .eq_ignore_ascii_case("true")
+    {
+        return Ok(false);
+    }
+
+    let whitelist = parse_string_array(&get_value(schema_dir, "whitelist")?);
+    Ok(whitelist
+        .iter()
+        .all(|application| application.eq_ignore_ascii_case(LINUX_APPLICATION_ID)))
 }
 
 fn keep_focused_window_blurred(schema_dir: &Path) -> Result<()> {
@@ -247,5 +280,12 @@ mod tests {
             format_string_array(&values),
             "['Firefox', 'org.example.App', 'It\\'s fine']"
         );
+    }
+
+    #[test]
+    fn application_opacity_is_opaque_at_zero_and_stays_readable_at_maximum() {
+        assert_eq!(application_opacity(0), 255);
+        assert_eq!(application_opacity(100), 210);
+        assert!(application_opacity(15) > application_opacity(60));
     }
 }

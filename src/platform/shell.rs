@@ -82,6 +82,10 @@ pub fn open_path(path: &Path) -> Result<()> {
     open_path_platform(path)
 }
 
+pub fn open_url(url: &str) -> Result<()> {
+    open::that(url).map_err(|error| BExplorerError::Shell(format!("Could not open {url}: {error}")))
+}
+
 pub fn open_with(path: &Path) -> Result<()> {
     open_with_platform(path)
 }

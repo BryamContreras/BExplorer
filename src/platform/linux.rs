@@ -175,11 +175,12 @@ pub fn apply_window_corners(
 pub fn apply_window_blur<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
     window: &W,
     enabled: bool,
+    intensity: u8,
 ) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
         if gnome_blur::is_gnome_wayland() {
-            return gnome_blur::set_application_blur(enabled);
+            return gnome_blur::set_application_blur(enabled, intensity);
         }
     }
 
