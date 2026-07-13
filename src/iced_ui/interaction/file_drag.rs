@@ -434,7 +434,11 @@ impl BExplorerIced {
         let group_mode = self.effective_group_mode(pane);
         let mut current_group: Option<String> = None;
         let mut y = DETAIL_HEADER_HEIGHT - self.pane(pane).scroll_offset_y;
-        let width = self.file_surface_width(pane);
+        // Rows end at the last visible table column. The remaining surface is
+        // empty space, so a rubber-band drawn there must not select any row.
+        let width = self
+            .detail_column_widths(pane, (self.font_size() - 0.5).max(11.0))
+            .total_width();
         let mut selected = Vec::new();
         let render_limit = self.pane(pane).render_limit;
         for index in self.filtered_entries(pane).into_iter().take(render_limit) {

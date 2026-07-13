@@ -86,6 +86,15 @@ impl BExplorerIced {
         mode: GroupMode,
     ) -> String {
         if mode == GroupMode::Type {
+            // Windows can discover the same class of printer through several
+            // providers, each with a different descriptive comment. Keep all
+            // printer entries under one predictable group instead of making
+            // that provider text part of the group name.
+            if entry.drive_kind == Some(DriveKind::NetworkPrinter) {
+                return self
+                    .localized("Impresoras de red", "Network printers")
+                    .into();
+            }
             self.localized_entry_type_label(entry)
         } else {
             entry_group_label(entry, mode)

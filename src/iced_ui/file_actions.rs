@@ -32,6 +32,24 @@ impl BExplorerIced {
             self.pane_mut(pane).status = "No selected items".into();
             return Task::none();
         }
+        let includes_drive = self
+            .context_entry(pane, target)
+            .is_some_and(|entry| entry.kind == EntryKind::Drive)
+            || paths.iter().any(|path| {
+                self.pane(pane)
+                    .entries
+                    .iter()
+                    .any(|entry| entry.path == *path && entry.kind == EntryKind::Drive)
+            });
+        if includes_drive {
+            self.pane_mut(pane).status = self
+                .localized(
+                    "Las unidades no se pueden copiar ni cortar.",
+                    "Drives cannot be copied or cut.",
+                )
+                .into();
+            return Task::none();
+        }
         let portable_count = paths
             .iter()
             .filter(|path| explorer::is_portable_path(path))
@@ -109,8 +127,7 @@ impl BExplorerIced {
         let clipboard = match clipboard {
             Ok(clipboard) => clipboard,
             Err(error) => {
-                self.pane_mut(pane).status = error.to_string();
-                return Task::none();
+                return self.report_error(pane, error.to_string());
             }
         };
         if clipboard
@@ -149,8 +166,7 @@ impl BExplorerIced {
         }
 
         if let Err(error) = self.validate_transfer(&sources, &destination) {
-            self.pane_mut(pane).status = error.to_string();
-            return Task::none();
+            return self.report_error(pane, error.to_string());
         }
 
         let conflicts = self.transfer_conflicts(&sources, &destination);
@@ -176,10 +192,7 @@ impl BExplorerIced {
             ConflictPolicy::KeepBoth,
         ) {
             Ok(()) => self.ensure_transfer_window_task(),
-            Err(error) => {
-                self.pane_mut(pane).status = error.to_string();
-                Task::none()
-            }
+            Err(error) => self.report_error(pane, error.to_string()),
         }
     }
 
@@ -197,10 +210,7 @@ impl BExplorerIced {
             policy,
         ) {
             Ok(()) => self.ensure_transfer_window_task(),
-            Err(error) => {
-                self.pane_mut(pending.pane).status = error.to_string();
-                Task::none()
-            }
+            Err(error) => self.report_error(pending.pane, error.to_string()),
         }
     }
 
@@ -517,7 +527,7 @@ impl BExplorerIced {
                                 error,
                             });
                         } else {
-                            self.pane_mut(active.pane).status = error;
+                            tasks.push(self.report_error(active.pane, error));
                         }
                         tasks.push(self.refresh_panes_for_directories(
                             active.pane,
@@ -626,7 +636,7 @@ impl BExplorerIced {
     }
 
     pub(super) fn transfer_window_size(&self) -> Size {
-        progress_window_size_for_item_count(self.transfer_items().len())
+        transfer_window_size_for_item_count(self.transfer_items().len())
     }
 
     pub(super) fn transfer_in_progress_for(&self, pane: PaneId) -> bool {
@@ -663,25 +673,6 @@ impl BExplorerIced {
         } else {
             Some((copied as f32 / total as f32).clamp(0.0, 1.0))
         }
-    }
-
-    pub(super) fn transfer_progress_fraction(&self) -> Option<f32> {
-        let mut copied = 0_u64;
-        let mut total = 0_u64;
-        for pane in [PaneId::Primary, PaneId::Secondary] {
-            let (pane_copied, pane_total) = self
-                .transfer_batch_totals
-                .get(&pane)
-                .copied()
-                .unwrap_or_default();
-            copied = copied.saturating_add(pane_copied);
-            total = total.saturating_add(pane_total);
-        }
-        for progress in self.transfer_progress.values() {
-            copied = copied.saturating_add(progress.copied_bytes);
-            total = total.saturating_add(progress.total_bytes);
-        }
-        (total > 0).then(|| (copied as f32 / total as f32).clamp(0.0, 1.0))
     }
 
     pub(super) fn collapse_transfer_ownership_to_primary(&mut self) {
@@ -748,62 +739,167 @@ impl BExplorerIced {
         }
         match operations::open_path(&entry.path) {
             Ok(()) => self.pane_mut(pane).status = "Opened".into(),
-            Err(error) => self.pane_mut(pane).status = error.to_string(),
+            Err(error) => return self.report_error(pane, error.to_string()),
         }
         Task::none()
     }
 
-    pub(super) fn context_open_with(&mut self, pane: PaneId, target: ContextTarget) {
+    pub(super) fn context_open_with(
+        &mut self,
+        pane: PaneId,
+        target: ContextTarget,
+    ) -> Task<Message> {
         let Some(entry) = self.context_entry(pane, target) else {
-            return;
+            return Task::none();
         };
         if explorer::is_virtual_path(&entry.path) {
-            self.pane_mut(pane).status = "Open with is not available for virtual locations".into();
-            return;
+            return self.report_error(pane, "Open with is not available for virtual locations");
         }
         match shell::open_with(&entry.path) {
             Ok(()) => self.pane_mut(pane).status = "Open with requested".into(),
-            Err(error) => self.pane_mut(pane).status = error.to_string(),
+            Err(error) => return self.report_error(pane, error.to_string()),
         }
+        Task::none()
     }
 
-    pub(super) fn context_open_terminal(&mut self, pane: PaneId, target: ContextTarget) {
+    pub(super) fn context_open_terminal(
+        &mut self,
+        pane: PaneId,
+        target: ContextTarget,
+    ) -> Task<Message> {
         let path = self
             .context_entry(pane, target)
             .map(|entry| entry.path)
             .or_else(|| self.tab_for_pane(pane).path.clone());
         let Some(path) = path else {
-            self.pane_mut(pane).status = "Terminal is not available here".into();
-            return;
+            return self.report_error(pane, "Terminal is not available here");
         };
         if explorer::is_virtual_path(&path) {
-            self.pane_mut(pane).status = "Terminal is not available for virtual locations".into();
-            return;
+            return self.report_error(pane, "Terminal is not available for virtual locations");
         }
         match shell::open_terminal_at(&path) {
             Ok(()) => self.pane_mut(pane).status = "Terminal opened".into(),
-            Err(error) => self.pane_mut(pane).status = error.to_string(),
+            Err(error) => return self.report_error(pane, error.to_string()),
         }
+        Task::none()
     }
 
-    pub(super) fn context_properties(&mut self, pane: PaneId, target: ContextTarget) {
+    pub(super) fn context_properties(
+        &mut self,
+        pane: PaneId,
+        target: ContextTarget,
+    ) -> Task<Message> {
         let path = self
             .context_entry(pane, target)
             .map(|entry| entry.path)
             .or_else(|| self.tab_for_pane(pane).path.clone());
         let Some(path) = path else {
-            self.pane_mut(pane).status = "No properties target".into();
-            return;
+            return self.report_error(pane, "No properties target");
         };
         if explorer::is_virtual_path(&path) {
-            self.pane_mut(pane).status =
-                "Properties are not available for virtual locations".into();
-            return;
+            return self.report_error(pane, "Properties are not available for virtual locations");
         }
         match shell::show_properties(&path) {
             Ok(()) => self.pane_mut(pane).status = "Properties opened".into(),
-            Err(error) => self.pane_mut(pane).status = error.to_string(),
+            Err(error) => return self.report_error(pane, error.to_string()),
         }
+        Task::none()
+    }
+
+    pub(super) fn context_format_drive(
+        &mut self,
+        pane: PaneId,
+        target: ContextTarget,
+    ) -> Task<Message> {
+        let Some(entry) = self.context_entry(pane, target) else {
+            return Task::none();
+        };
+        if entry.kind != EntryKind::Drive || !entry.drive_kind.is_some_and(DriveKind::is_formatable)
+        {
+            return self.report_error(
+                pane,
+                self.localized(
+                    "Esta unidad no se puede formatear desde BExplorer",
+                    "This drive cannot be formatted from BExplorer",
+                ),
+            );
+        }
+        let file_systems = operations::available_format_filesystems(&entry.path);
+        let Some(default_file_system) = file_systems
+            .iter()
+            .find(|filesystem| filesystem.eq_ignore_ascii_case(&entry.file_system))
+            .cloned()
+            .or_else(|| file_systems.first().cloned())
+        else {
+            return self.report_error(
+                pane,
+                self.localized(
+                    "No hay formatos disponibles en este sistema",
+                    "No formats are available on this system",
+                ),
+            );
+        };
+        let display_name = entry.name.clone();
+        let volume_label = entry
+            .name
+            .rsplit_once(" (")
+            .map(|(label, _)| label.to_owned())
+            .unwrap_or(entry.name);
+        let dialog = FormatDialogState {
+            pane,
+            path: entry.path,
+            display_name,
+            capacity: entry.size,
+            file_systems,
+            file_system: default_file_system,
+            volume_label,
+            allocation_unit_size: self.localized("Predeterminado", "Default").to_owned(),
+            quick_format: true,
+            confirm_erase: false,
+        };
+        self.request_popup_backdrop(PopupBackdropTarget::Format(dialog))
+    }
+
+    pub(super) fn confirm_format_dialog(&mut self) -> Task<Message> {
+        let Some(dialog) = self.format_dialog.clone() else {
+            return Task::none();
+        };
+        if !dialog.confirm_erase || dialog.file_system.trim().is_empty() {
+            return Task::none();
+        }
+        let allocation_unit_size = parse_allocation_unit_size(&dialog.allocation_unit_size);
+        let pane = dialog.pane;
+        let path = dialog.path.clone();
+        let worker_path = path.clone();
+        let filesystem = dialog.file_system.clone();
+        let label = dialog.volume_label.trim().to_owned();
+        let quick = dialog.quick_format;
+        self.format_dialog = None;
+        self.popup_backdrop = None;
+        let state = self.pane_mut(pane);
+        // Ignore a stale directory load that may still be completing while
+        // the selected drive is being formatted.
+        state.request_id = state.request_id.wrapping_add(1);
+        state.loading = true;
+        state.formatting = true;
+        state.formatting_path = Some(path.clone());
+        state.status.clear();
+        Task::perform(
+            run_blocking_file_operation(move || {
+                operations::format_drive(
+                    &worker_path,
+                    &filesystem,
+                    &label,
+                    quick,
+                    allocation_unit_size,
+                )
+            }),
+            move |result| Message::FormatFinished(pane, path, result),
+        )
+    }
+
+    pub(super) fn cancel_format_dialog(&mut self) -> Task<Message> {
+        self.request_popup_close(PendingPopupClose::FormatDialog)
     }
 
     pub(super) fn commit_pending_rename_if_not(
@@ -1034,10 +1130,7 @@ impl BExplorerIced {
             None,
         ) {
             Ok(task) => task,
-            Err(error) => {
-                self.pane_mut(pane).status = error;
-                Task::none()
-            }
+            Err(error) => self.report_error(pane, error),
         }
     }
 
@@ -1057,10 +1150,7 @@ impl BExplorerIced {
 
         match self.start_extract_job(pane, entry.path, mode) {
             Ok(task) => task,
-            Err(error) => {
-                self.pane_mut(pane).status = error;
-                Task::none()
-            }
+            Err(error) => self.report_error(pane, error),
         }
     }
 
@@ -1093,10 +1183,7 @@ impl BExplorerIced {
                 self.archive_dialog = None;
                 task
             }
-            Err(error) => {
-                self.pane_mut(dialog.pane).status = error;
-                Task::none()
-            }
+            Err(error) => self.report_error(dialog.pane, error),
         }
     }
 
@@ -1396,7 +1483,7 @@ impl BExplorerIced {
                             );
                         }
                         Err(error) => {
-                            self.pane_mut(active.pane).status = error;
+                            tasks.push(self.report_error(active.pane, error));
                             tasks.push(
                                 self.refresh_panes_for_directories(
                                     active.pane,
@@ -1455,17 +1542,7 @@ impl BExplorerIced {
     }
 
     pub(super) fn archive_window_size(&self) -> Size {
-        progress_window_size_for_item_count(self.archive_items().len())
-    }
-
-    pub(super) fn archive_progress_fraction(&self) -> Option<f32> {
-        let mut completed = 0_u64;
-        let mut total = 0_u64;
-        for active in self.active_archives.values() {
-            completed = completed.saturating_add(active.progress.completed);
-            total = total.saturating_add(active.progress.total);
-        }
-        (total > 0).then(|| (completed as f32 / total as f32).clamp(0.0, 1.0))
+        transfer_window_size_for_item_count(self.archive_items().len())
     }
 
     pub(super) fn cancel_archive(&mut self, id: u64) {
@@ -1483,4 +1560,22 @@ impl BExplorerIced {
             self.archive_history.pop_front();
         }
     }
+}
+
+fn parse_allocation_unit_size(value: &str) -> Option<u64> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() || value == "default" || value == "predeterminado" {
+        return None;
+    }
+    let (number, multiplier) = if let Some(number) = value.strip_suffix("kb") {
+        (number.trim(), 1024_u64)
+    } else if let Some(number) = value.strip_suffix("bytes") {
+        (number.trim(), 1_u64)
+    } else {
+        return None;
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .and_then(|number| number.checked_mul(multiplier))
 }

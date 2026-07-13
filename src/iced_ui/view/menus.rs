@@ -312,6 +312,13 @@ impl BExplorerIced {
             .as_ref()
             .and_then(|entry| entry.drive_kind)
             .is_some_and(DriveKind::is_ejectable);
+        let formatable_drive = context_entry.as_ref().is_some_and(|entry| {
+            entry.kind == EntryKind::Drive && entry.drive_kind.is_some_and(DriveKind::is_formatable)
+        });
+        let drive_entry = context_entry
+            .as_ref()
+            .is_some_and(|entry| entry.kind == EntryKind::Drive);
+        let can_copy_or_cut = is_entry && !drive_entry;
         let defender_available = cfg!(target_os = "windows")
             && context_entry
                 .as_ref()
@@ -327,14 +334,14 @@ impl BExplorerIced {
                     self.localized("Copiar", "Copy"),
                     ContextCommand::Copy,
                     palette,
-                    true
+                    can_copy_or_cut
                 ),
                 context_quick_button(
                     "cut",
                     self.localized("Cortar", "Cut"),
                     ContextCommand::Cut,
                     palette,
-                    true
+                    can_copy_or_cut
                 ),
                 context_quick_button(
                     "paste",
@@ -374,87 +381,106 @@ impl BExplorerIced {
         .align_y(Alignment::Center)
         .width(Length::Fill);
 
-        let mut items = if is_sidebar_drive {
-            column![context_menu_row(
-                "storage",
+        let mut items = column![].spacing(2).width(Length::Fill);
+        if is_sidebar_drive {
+            if formatable_drive {
+                items = items.push(context_menu_row(
+                    "format",
+                    self.localized("Formatear", "Format"),
+                    None,
+                    ContextCommand::FormatDrive,
+                    palette,
+                ));
+            }
+            items = items.push(context_menu_row(
+                "eject",
                 self.localized("Expulsar", "Eject"),
                 None,
                 ContextCommand::EjectDrive,
                 palette,
-            )]
+            ));
         } else {
-            column![quick_actions, context_separator(palette)]
+            items = items.push(quick_actions).push(context_separator(palette));
         }
-        .spacing(2)
-        .width(Length::Fill);
 
         if is_sidebar_drive {
             // The sidebar menu intentionally contains only actions that are
             // safe for the mounted volume itself.
         } else if is_entry {
-            items = items
-                .push(context_menu_row(
-                    "open",
-                    self.localized("Abrir", "Open"),
-                    None,
-                    ContextCommand::Open,
-                    palette,
-                ))
-                .push(
-                    mouse_area(context_menu_row(
-                        "open-with",
-                        self.localized("Abrir con", "Open with"),
-                        Some(ContextMenuTrailing::Icon("chev-right")),
-                        ContextCommand::OpenWithMenu,
+            items = items.push(context_menu_row(
+                "open",
+                self.localized("Abrir", "Open"),
+                None,
+                ContextCommand::Open,
+                palette,
+            ));
+            if !drive_entry {
+                items = items
+                    .push(
+                        mouse_area(context_menu_row(
+                            "open-with",
+                            self.localized("Abrir con", "Open with"),
+                            Some(ContextMenuTrailing::Icon("chev-right")),
+                            ContextCommand::OpenWithMenu,
+                            palette,
+                        ))
+                        .on_enter(Message::ContextOpenWithParentEnter)
+                        .on_exit(Message::ContextOpenWithParentExit),
+                    )
+                    .push(context_separator(palette))
+                    .push(
+                        mouse_area(context_menu_row(
+                            "archive",
+                            self.localized("Comprimir", "Compress"),
+                            Some(ContextMenuTrailing::Icon("chev-right")),
+                            ContextCommand::CompressMenu,
+                            palette,
+                        ))
+                        .on_enter(Message::ContextArchiveParentEnter)
+                        .on_exit(Message::ContextArchiveParentExit),
+                    );
+                if extractable_archive {
+                    items = items.push(
+                        mouse_area(context_menu_row(
+                            "archive",
+                            self.localized("Extraer", "Extract"),
+                            Some(ContextMenuTrailing::Icon("chev-right")),
+                            ContextCommand::ExtractMenu,
+                            palette,
+                        ))
+                        .on_enter(Message::ContextExtractParentEnter)
+                        .on_exit(Message::ContextArchiveParentExit),
+                    );
+                }
+                if mountable_disk_image {
+                    items = items.push(context_menu_row(
+                        "storage",
+                        self.localized("Montar imagen", "Mount image"),
+                        None,
+                        ContextCommand::MountDiskImage,
                         palette,
-                    ))
-                    .on_enter(Message::ContextOpenWithParentEnter)
-                    .on_exit(Message::ContextOpenWithParentExit),
-                )
-                .push(context_separator(palette))
-                .push(
-                    mouse_area(context_menu_row(
-                        "archive",
-                        self.localized("Comprimir", "Compress"),
-                        Some(ContextMenuTrailing::Icon("chev-right")),
-                        ContextCommand::CompressMenu,
-                        palette,
-                    ))
-                    .on_enter(Message::ContextArchiveParentEnter)
-                    .on_exit(Message::ContextArchiveParentExit),
-                );
-            if extractable_archive {
-                items = items.push(
-                    mouse_area(context_menu_row(
-                        "archive",
-                        self.localized("Extraer", "Extract"),
-                        Some(ContextMenuTrailing::Icon("chev-right")),
-                        ContextCommand::ExtractMenu,
-                        palette,
-                    ))
-                    .on_enter(Message::ContextExtractParentEnter)
-                    .on_exit(Message::ContextArchiveParentExit),
-                );
-            }
-            if mountable_disk_image {
-                items = items.push(context_menu_row(
-                    "storage",
-                    self.localized("Montar imagen", "Mount image"),
-                    None,
-                    ContextCommand::MountDiskImage,
-                    palette,
-                ));
+                    ));
+                }
             }
             if ejectable_drive {
                 items = items.push(context_menu_row(
-                    "storage",
+                    "eject",
                     self.localized("Expulsar", "Eject"),
                     None,
                     ContextCommand::EjectDrive,
                     palette,
                 ));
             }
-            if defender_available {
+            if formatable_drive {
+                items = items.push(context_menu_row(
+                    "format",
+                    self.localized("Formatear", "Format"),
+                    None,
+                    ContextCommand::FormatDrive,
+                    palette,
+                ));
+            }
+            if defender_available && !drive_entry {
                 items = items.push(context_menu_row(
                     "properties",
                     self.localized(
@@ -466,30 +492,32 @@ impl BExplorerIced {
                     palette,
                 ));
             }
-            items = items
-                .push(context_separator(palette))
-                .push(context_menu_row(
-                    "rename",
-                    self.localized("Renombrar", "Rename"),
-                    None,
-                    ContextCommand::Rename,
-                    palette,
-                ))
-                .push(context_menu_row(
-                    "trash",
-                    self.localized("Eliminar", "Delete"),
-                    None,
-                    ContextCommand::Delete,
-                    palette,
-                ))
-                .push(context_menu_row(
-                    "delete-forever",
-                    self.localized("Eliminar permanentemente", "Delete permanently"),
-                    None,
-                    ContextCommand::DeletePermanent,
-                    palette,
-                ))
-                .push(context_separator(palette));
+            if !drive_entry {
+                items = items
+                    .push(context_separator(palette))
+                    .push(context_menu_row(
+                        "rename",
+                        self.localized("Renombrar", "Rename"),
+                        None,
+                        ContextCommand::Rename,
+                        palette,
+                    ))
+                    .push(context_menu_row(
+                        "trash",
+                        self.localized("Eliminar", "Delete"),
+                        None,
+                        ContextCommand::Delete,
+                        palette,
+                    ))
+                    .push(context_menu_row(
+                        "delete-forever",
+                        self.localized("Eliminar permanentemente", "Delete permanently"),
+                        None,
+                        ContextCommand::DeletePermanent,
+                        palette,
+                    ))
+                    .push(context_separator(palette));
+            }
         } else {
             items = items
                 .push(context_menu_row(

@@ -17,14 +17,16 @@ pub(super) fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
     let file = wide_os_null(exe.as_os_str());
     let params = wide_null(&join_windows_args(args));
 
-    let mut info = SHELLEXECUTEINFOW::default();
-    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.fMask = SEE_MASK_NOCLOSEPROCESS;
-    info.hwnd = HWND::default();
-    info.lpVerb = PCWSTR(verb.as_ptr());
-    info.lpFile = PCWSTR(file.as_ptr());
-    info.lpParameters = PCWSTR(params.as_ptr());
-    info.nShow = SW_HIDE.0;
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS,
+        hwnd: HWND::default(),
+        lpVerb: PCWSTR(verb.as_ptr()),
+        lpFile: PCWSTR(file.as_ptr()),
+        lpParameters: PCWSTR(params.as_ptr()),
+        nShow: SW_HIDE.0,
+        ..Default::default()
+    };
 
     unsafe {
         ShellExecuteExW(&mut info).map_err(|error| {
@@ -70,18 +72,18 @@ fn quote_windows_arg(arg: &str) -> String {
         match ch {
             '\\' => backslashes += 1,
             '"' => {
-                quoted.extend(std::iter::repeat('\\').take(backslashes * 2 + 1));
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
                 quoted.push('"');
                 backslashes = 0;
             }
             _ => {
-                quoted.extend(std::iter::repeat('\\').take(backslashes));
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
                 backslashes = 0;
                 quoted.push(ch);
             }
         }
     }
-    quoted.extend(std::iter::repeat('\\').take(backslashes * 2));
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
     quoted.push('"');
     quoted
 }

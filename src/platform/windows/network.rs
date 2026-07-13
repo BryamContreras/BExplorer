@@ -85,7 +85,7 @@ pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
             }
         }
 
-        computers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        computers.sort_by_key(|computer| computer.name.to_lowercase());
         computers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
         computers
     }
@@ -209,8 +209,7 @@ fn function_discovery_network_devices() -> Vec<NetworkComputerInfo> {
                 }
             }
 
-            computers
-                .sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            computers.sort_by_key(|computer| computer.name.to_lowercase());
             computers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
             Ok(computers)
         })()
@@ -277,7 +276,7 @@ fn netbios_network_devices() -> Vec<NetworkComputerInfo> {
         }
     }
 
-    computers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    computers.sort_by_key(|computer| computer.name.to_lowercase());
     computers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
     computers
 }
@@ -306,7 +305,7 @@ fn netbios_cached_devices() -> Vec<NetworkComputerInfo> {
             comment: "PC de red".into(),
         })
         .collect();
-    computers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    computers.sort_by_key(|computer| computer.name.to_lowercase());
     computers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
     computers
 }
@@ -422,7 +421,7 @@ fn installed_printer_devices() -> Vec<NetworkComputerInfo> {
                 kind: crate::platform::NetworkDeviceKind::Printer,
             });
         }
-        printers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        printers.sort_by_key(|printer| printer.name.to_lowercase());
         printers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
         printers
     }
@@ -458,6 +457,9 @@ fn classify_network_device_kind(name: &str, comment: &str) -> crate::platform::N
         || lower.contains("laserjet")
         || lower.contains("epson")
         || lower.contains("canon")
+        || lower.contains("ir-adv")
+        || lower.contains("ir adv")
+        || lower.contains("imagerunner")
         || lower.starts_with("hpd")
     {
         crate::platform::NetworkDeviceKind::Printer
@@ -669,7 +671,7 @@ fn shell_network_devices() -> Vec<NetworkComputerInfo> {
                 });
             }
 
-            devices.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            devices.sort_by_key(|device| device.name.to_lowercase());
             devices.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
             Ok(devices)
         })()
@@ -761,7 +763,7 @@ pub fn network_shares(host: &str) -> Vec<NetworkShareInfo> {
             shares = network_shares_without_prompt(host);
         }
 
-        shares.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        shares.sort_by_key(|share| share.name.to_lowercase());
         shares.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
         merge_network_shares(&mut shares, wnet_network_shares(host));
         shares
@@ -954,14 +956,14 @@ fn merge_network_computers(
             merged.push(computer);
         }
     }
-    merged.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    merged.sort_by_key(|item| item.name.to_lowercase());
     *target = merged;
 }
 
 #[cfg(target_os = "windows")]
 fn merge_network_shares(target: &mut Vec<NetworkShareInfo>, mut extra: Vec<NetworkShareInfo>) {
     target.append(&mut extra);
-    target.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    target.sort_by_key(|item| item.name.to_lowercase());
     target.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
 }
 
@@ -973,7 +975,7 @@ fn wnet_network_computers() -> Vec<NetworkComputerInfo> {
     let mut computers = Vec::new();
     let mut visited = 0_usize;
     collect_wnet_computers(None, 0, MAX_DEPTH, MAX_NODES, &mut visited, &mut computers);
-    computers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+    computers.sort_by_key(|computer| computer.name.to_lowercase());
     computers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
     computers
 }
@@ -1385,6 +1387,14 @@ mod tests {
         assert_eq!(
             parse_nbtstat_name(output).as_deref(),
             Some("DESKTOP-0DHC1AV")
+        );
+    }
+
+    #[test]
+    fn recognizes_canon_image_runner_as_a_network_printer() {
+        assert_eq!(
+            classify_network_device_kind("iR-ADV 529", "Dispositivo de red"),
+            crate::platform::NetworkDeviceKind::Printer
         );
     }
 }

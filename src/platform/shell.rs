@@ -16,6 +16,7 @@ mod defender;
 mod disk;
 #[cfg(target_os = "windows")]
 mod elevation;
+mod format;
 
 #[cfg(target_os = "windows")]
 pub use defender::WindowsDefenderScanResult;
@@ -113,13 +114,8 @@ pub fn scan_path_with_windows_defender(
 }
 
 #[cfg(target_os = "windows")]
-pub fn remove_windows_defender_threats() -> Result<()> {
-    defender::remove_windows_defender_threats()
-}
-
-#[cfg(target_os = "windows")]
-pub fn exclude_windows_defender_paths(paths: &[PathBuf]) -> Result<()> {
-    defender::exclude_windows_defender_paths(paths)
+pub fn remediate_paths_with_windows_defender(paths: &[PathBuf]) -> Result<usize> {
+    defender::remediate_paths_with_windows_defender(paths)
 }
 
 pub fn open_windows_security() -> Result<()> {
@@ -140,6 +136,20 @@ pub fn suppress_file_explorer_windows_at(path: &Path) -> Result<()> {
 
 pub fn eject_drive(path: &Path) -> Result<()> {
     disk::eject_drive(path)
+}
+
+pub fn available_format_filesystems(path: &Path) -> Vec<String> {
+    format::available_format_filesystems(path)
+}
+
+pub fn format_drive(
+    path: &Path,
+    filesystem: &str,
+    label: &str,
+    quick: bool,
+    allocation_unit_size: Option<u64>,
+) -> Result<()> {
+    format::format_drive(path, filesystem, label, quick, allocation_unit_size)
 }
 
 #[cfg(target_os = "windows")]
@@ -740,13 +750,15 @@ fn open_path_platform(path: &Path) -> Result<()> {
             .collect::<Vec<_>>()
     });
 
-    let mut info = SHELLEXECUTEINFOW::default();
-    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.lpFile = PCWSTR(file.as_ptr());
-    info.lpDirectory = working_directory
-        .as_ref()
-        .map_or(PCWSTR::null(), |directory| PCWSTR(directory.as_ptr()));
-    info.nShow = SW_SHOWNORMAL.0;
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        lpFile: PCWSTR(file.as_ptr()),
+        lpDirectory: working_directory
+            .as_ref()
+            .map_or(PCWSTR::null(), |directory| PCWSTR(directory.as_ptr())),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
 
     unsafe { ShellExecuteExW(&mut info) }.map_err(|error| {
         BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
@@ -1026,11 +1038,13 @@ fn launch_association_command(command: &str, path: &Path) -> Result<()> {
         .encode_wide()
         .chain([0])
         .collect::<Vec<_>>();
-    let mut info = SHELLEXECUTEINFOW::default();
-    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
-    info.lpFile = PCWSTR(program.as_ptr());
-    info.lpParameters = PCWSTR(parameters.as_ptr());
-    info.nShow = SW_SHOWNORMAL.0;
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+        lpFile: PCWSTR(program.as_ptr()),
+        lpParameters: PCWSTR(parameters.as_ptr()),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
     unsafe { ShellExecuteExW(&mut info) }
         .map_err(|error| BExplorerError::Shell(error.to_string()))?;
     Ok(())

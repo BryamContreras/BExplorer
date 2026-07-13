@@ -29,9 +29,7 @@ use crate::fs::archive::{
 };
 #[cfg(target_os = "windows")]
 use crate::fs::defender::{self, DefenderJob};
-use crate::fs::defender::{
-    DefenderMessage, DefenderProgress, DefenderScanState, DefenderSummary, ElevatedDefenderAction,
-};
+use crate::fs::defender::{DefenderMessage, DefenderProgress, DefenderScanState, DefenderSummary};
 use crate::fs::explorer::{self, DriveKind, EntryKind, FileCategory, FileEntry};
 use crate::fs::transfer_queue::{
     self, ConflictPolicy, ElevatedTransferResult, TransferCompletedRoot, TransferControl,
@@ -117,26 +115,31 @@ const TRANSFER_CARD_HEIGHT: f32 = 96.0;
 const TRANSFER_CARD_GAP: f32 = 8.0;
 const TRANSFER_WINDOW_WIDTH: f32 = 540.0;
 const TRANSFER_WINDOW_TITLE_HEIGHT: f32 = 30.0;
-const TRANSFER_WINDOW_HEADER_HEIGHT: f32 = 26.0;
-const TRANSFER_WINDOW_OVERALL_BAR_HEIGHT: f32 = 9.0;
+// Defender displays one progress card. Its native window stays fitted to the
+// card and grows only when the result includes error or threat detail lines.
+const DEFENDER_WINDOW_BASE_HEIGHT: f32 = 176.0;
+const DEFENDER_WINDOW_DETAIL_LINE_HEIGHT: f32 = 26.0;
+const DEFENDER_WINDOW_MAX_HEIGHT: f32 = 272.0;
+const DEFENDER_CARD_HEIGHT: f32 = 132.0;
+const DEFENDER_ERROR_CARD_HEIGHT: f32 = 158.0;
+const DEFENDER_THREAT_CARD_HEIGHT: f32 = 58.0;
+const DEFENDER_THREAT_CARD_GAP: f32 = 6.0;
+const DEFENDER_THREAT_SECTION_GAP: f32 = 10.0;
+const DEFENDER_THREAT_WINDOW_BASE_HEIGHT: f32 = 190.0;
+const DEFENDER_THREAT_WINDOW_WIDTH: f32 = 620.0;
+const DEFENDER_THREAT_WINDOW_VISIBLE_CARD_LIMIT: usize = 5;
 const TRANSFER_PROGRESS_BAR_HEIGHT: f32 = 9.0;
-const TRANSFER_WINDOW_CONTENT_GAP: f32 = 12.0;
-const TRANSFER_WINDOW_HEADER_PADDING_X: f32 = 12.0;
-const TRANSFER_WINDOW_HEADER_PADDING_Y: f32 = 10.0;
 const TRANSFER_WINDOW_CARD_PADDING_X: f32 = 4.0;
 const TRANSFER_WINDOW_CARD_TOP_GAP: f32 = 2.0;
 const TRANSFER_WINDOW_CARD_BOTTOM_PADDING: f32 = 8.0;
 const TRANSFER_WINDOW_VISIBLE_CARD_LIMIT: f32 = 3.0;
-const TRANSFER_WINDOW_CHROME_HEIGHT: f32 = TRANSFER_WINDOW_TITLE_HEIGHT
-    + TRANSFER_WINDOW_HEADER_PADDING_Y * 2.0
-    + TRANSFER_WINDOW_HEADER_HEIGHT
-    + TRANSFER_WINDOW_CONTENT_GAP
-    + TRANSFER_WINDOW_OVERALL_BAR_HEIGHT
-    + TRANSFER_WINDOW_CARD_TOP_GAP * 2.0
-    + TRANSFER_WINDOW_CARD_BOTTOM_PADDING
-    + 2.0;
-const TRANSFER_WINDOW_MIN_HEIGHT: f32 = TRANSFER_WINDOW_CHROME_HEIGHT + TRANSFER_CARD_HEIGHT;
-const TRANSFER_WINDOW_MAX_HEIGHT: f32 = TRANSFER_WINDOW_CHROME_HEIGHT
+const TRANSFER_WINDOW_CARD_ONLY_CHROME_HEIGHT: f32 = WINDOW_BORDER_WIDTH * 2.0
+    + TRANSFER_WINDOW_TITLE_HEIGHT
+    + TRANSFER_WINDOW_CARD_TOP_GAP
+    + TRANSFER_WINDOW_CARD_BOTTOM_PADDING;
+const TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT: f32 =
+    TRANSFER_WINDOW_CARD_ONLY_CHROME_HEIGHT + TRANSFER_CARD_HEIGHT;
+const TRANSFER_WINDOW_CARD_ONLY_MAX_HEIGHT: f32 = TRANSFER_WINDOW_CARD_ONLY_CHROME_HEIGHT
     + TRANSFER_CARD_HEIGHT * TRANSFER_WINDOW_VISIBLE_CARD_LIMIT
     + TRANSFER_CARD_GAP * (TRANSFER_WINDOW_VISIBLE_CARD_LIMIT - 1.0);
 const COLOR_PICKER_WIDTH: f32 = 290.0;
@@ -216,8 +219,14 @@ struct BExplorerIced {
     defender_cancel: Option<Arc<AtomicBool>>,
     defender_progress: Option<DefenderProgress>,
     defender_summary: Option<DefenderSummary>,
+    defender_window_id: Option<window::Id>,
+    defender_threats_window_id: Option<window::Id>,
+    defender_threat_remediation_pending: bool,
+    defender_threat_remediation_message: Option<(String, bool)>,
     rename_dialog: Option<RenameState>,
     archive_dialog: Option<ArchiveDialogState>,
+    format_dialog: Option<FormatDialogState>,
+    error_dialog: Option<ErrorDialogState>,
     permanent_delete_dialog: Option<PendingPermanentDelete>,
     transfer_conflict_dialog: Option<PendingTransferConflict>,
     elevated_transfer_dialog: Option<PendingElevatedTransfer>,
@@ -382,6 +391,8 @@ fn popup_backdrop_region_for_screenshot(
         PopupBackdropTarget::Rename(_) => centered(380.0, 164.0),
         PopupBackdropTarget::PermanentDelete(_) => centered(420.0, 176.0),
         PopupBackdropTarget::Archive(_) => centered(470.0, 382.0),
+        PopupBackdropTarget::Format(_) => centered(480.0, 560.0),
+        PopupBackdropTarget::Error(_) => centered(500.0, 270.0),
         PopupBackdropTarget::TransferConflict(_) => centered(460.0, 238.0),
     }
 }
@@ -526,6 +537,7 @@ impl BExplorerIced {
 
         let (transfer_tx, transfer_rx) = mpsc::channel();
         let initial_size = Size::new(config.window_size[0], config.window_size[1]);
+        let initial_window_maximized = config.window_maximized;
         let color_rgb_inputs = accent_rgb_strings(config.accent_color);
         let preview_panel_pane = config.show_preview_panel.then_some(PaneId::Primary);
         let preview_panel_progress = if config.show_preview_panel { 1.0 } else { 0.0 };
@@ -605,8 +617,14 @@ impl BExplorerIced {
             defender_cancel: None,
             defender_progress: None,
             defender_summary: None,
+            defender_window_id: None,
+            defender_threats_window_id: None,
+            defender_threat_remediation_pending: false,
+            defender_threat_remediation_message: None,
             rename_dialog: None,
             archive_dialog: None,
+            format_dialog: None,
+            error_dialog: None,
             permanent_delete_dialog: None,
             transfer_conflict_dialog: None,
             elevated_transfer_dialog: None,
@@ -633,7 +651,7 @@ impl BExplorerIced {
             accent_plane_pointer: None,
             accent_hue_dragging: false,
             accent_hue_pointer: None,
-            window_maximized: false,
+            window_maximized: initial_window_maximized,
             main_window_id: None,
             transfer_window_id: None,
             transfer_window_item_count: 0,
@@ -641,24 +659,38 @@ impl BExplorerIced {
             archive_window_item_count: 0,
         };
 
+        // Paint the last known storage state immediately. The root load then
+        // refreshes this data asynchronously without blocking the first frame.
+        app.sidebar_storage_entries = explorer::load_storage_cache();
+
         app.reset_fixed_root_presentation(PaneId::Primary);
         if app.split.is_some() {
             app.reset_fixed_root_presentation(PaneId::Secondary);
         }
-        let (main_window_id, open_main_window) = window::open(main_window_settings(initial_size));
+        let (main_window_id, open_main_window) =
+            window::open(main_window_settings(initial_size, initial_window_maximized));
         app.main_window_id = Some(main_window_id);
 
+        let primary_starts_at_storage_root = app.tab_for_pane(PaneId::Primary).path.is_none();
+        let secondary_starts_at_storage_root = app
+            .split
+            .as_ref()
+            .is_some_and(|_| app.tab_for_pane(PaneId::Secondary).path.is_none());
         let sidebar_icons = app.queue_sidebar_icons();
         let mut tasks = vec![
             open_main_window.map(Message::MainWindowOpened),
             app.start_load(PaneId::Primary),
-            app.refresh_sidebar_storage(),
             sidebar_icons,
         ];
+        if !primary_starts_at_storage_root && !secondary_starts_at_storage_root {
+            tasks.push(app.refresh_sidebar_storage());
+        }
         if matches!(app.config.theme, ThemePreference::System) {
             tasks.push(iced::system::theme().map(Message::SystemThemeChanged));
         }
-        if app.split.is_some() {
+        if app.split.is_some()
+            && (!secondary_starts_at_storage_root || !primary_starts_at_storage_root)
+        {
             tasks.push(app.start_load(PaneId::Secondary));
         }
         #[cfg(debug_assertions)]

@@ -332,7 +332,11 @@ pub(in crate::iced_ui) fn indeterminate_progress_bar(
         container(Space::new())
             .height(height)
             .width(Length::FillPortion(SEGMENT))
-            .style(move |_| container::Style::default().background(accent_gradient(palette))),
+            .style(move |_| {
+                container::Style::default()
+                    .background(accent_gradient(palette))
+                    .border(border::rounded(height / 2.0))
+            }),
     );
     if trailing > 0 {
         segments = segments.push(Space::new().width(Length::FillPortion(trailing)));
@@ -343,7 +347,9 @@ pub(in crate::iced_ui) fn indeterminate_progress_bar(
         .width(Length::Fill)
         .clip(true)
         .style(move |_| {
-            container::Style::default().background(translucent_color(palette.border, 0.72))
+            container::Style::default()
+                .background(palette.header_bg)
+                .border(border::rounded(height / 2.0))
         })
         .into()
 }
@@ -384,6 +390,78 @@ pub(in crate::iced_ui) fn drive_capacity_bar(
             Space::new()
                 .height(Length::Fill)
                 .width(Length::FillPortion(empty)),
+        );
+    }
+
+    container(segments)
+        .height(HEIGHT)
+        .width(Length::Fill)
+        .padding(inset)
+        .clip(true)
+        .style(move |_| {
+            let border_color = palette.border;
+            let background = if selected {
+                if light_theme {
+                    mix_color(palette.input_bg, Color::WHITE, 0.28)
+                } else {
+                    Color::from_rgba8(3, 22, 30, 0.72)
+                }
+            } else {
+                mix_color(palette.input_bg, palette.border, 0.38)
+            };
+            container::Style::default()
+                .background(background)
+                .border(border::rounded(RADIUS).color(border_color).width(1))
+        })
+        .into()
+}
+
+pub(in crate::iced_ui) fn drive_formatting_bar(
+    phase: f32,
+    palette: Palette,
+    selected: bool,
+) -> Element<'static, Message> {
+    const HEIGHT: f32 = 10.0;
+    const RADIUS: f32 = 2.0;
+    const SEGMENT: u16 = 280;
+    const TRAVEL: u16 = 1000 - SEGMENT;
+
+    let light_theme = palette.page_bg.r + palette.page_bg.g + palette.page_bg.b > 1.8;
+    let inset = if selected && !light_theme { 1.0 } else { 0.0 };
+    let inner_height = HEIGHT - inset * 2.0;
+    let phase = phase.rem_euclid(1.0);
+    let position = if phase <= 0.5 {
+        phase * 2.0
+    } else {
+        (1.0 - phase) * 2.0
+    };
+    let leading = ((position * f32::from(TRAVEL)).round() as u16).min(TRAVEL);
+    let trailing = TRAVEL.saturating_sub(leading);
+    let active_fill = if selected {
+        mix_color(palette.accent, Color::WHITE, 0.12)
+    } else {
+        palette.accent
+    };
+    let mut segments = row![].spacing(0).height(inner_height);
+
+    if leading > 0 {
+        segments = segments.push(
+            Space::new()
+                .height(Length::Fill)
+                .width(Length::FillPortion(leading)),
+        );
+    }
+    segments = segments.push(
+        container(Space::new())
+            .height(Length::Fill)
+            .width(Length::FillPortion(SEGMENT))
+            .style(move |_| container::Style::default().background(active_fill)),
+    );
+    if trailing > 0 {
+        segments = segments.push(
+            Space::new()
+                .height(Length::Fill)
+                .width(Length::FillPortion(trailing)),
         );
     }
 

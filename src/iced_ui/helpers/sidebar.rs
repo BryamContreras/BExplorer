@@ -80,6 +80,7 @@ pub(in crate::iced_ui) fn sidebar_items_for_section(
         SidebarSection::Favorites => sidebar_favorite_items(config, spanish),
         SidebarSection::Places => sidebar_place_items(),
         SidebarSection::Storage => sidebar_storage_items(storage_entries, spanish),
+        SidebarSection::Portable => sidebar_portable_items(storage_entries),
         SidebarSection::Network => vec![SidebarItem {
             label: if spanish {
                 String::from("Abrir red")
@@ -145,7 +146,14 @@ pub(in crate::iced_ui) fn sidebar_storage_items(
     storage_entries: &[FileEntry],
     _spanish: bool,
 ) -> Vec<SidebarItem> {
-    if storage_entries.is_empty() {
+    // Portable devices expose virtual paths and should live in their own
+    // sidebar section instead of being mixed in with mounted storage.
+    let mut entries = storage_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.drive_kind != Some(DriveKind::Portable))
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
         return vec![SidebarItem {
             label: filesystem_root_label(),
             target: SidebarTarget::Navigate(Some(filesystem_root_path())),
@@ -154,13 +162,50 @@ pub(in crate::iced_ui) fn sidebar_storage_items(
         }];
     }
 
-    storage_entries
-        .iter()
-        .enumerate()
+    // Mirror This PC: drives are grouped by their type and each group is
+    // ordered ascending by name. Keep the source index for contextual eject
+    // actions, since `storage_entries` itself remains in its cached order.
+    entries.sort_by(|(_, left), (_, right)| {
+        left.type_label()
+            .to_ascii_lowercase()
+            .cmp(&right.type_label().to_ascii_lowercase())
+            .then_with(|| explorer::compare_names_case_insensitive(&left.name, &right.name))
+    });
+
+    entries
+        .into_iter()
         .map(|(index, entry)| SidebarItem {
             label: entry.name.clone(),
             target: SidebarTarget::Navigate(Some(entry.path.clone())),
             icon: "storage",
+            context_drive_index: entry
+                .drive_kind
+                .is_some_and(DriveKind::is_ejectable)
+                .then_some(index),
+        })
+        .collect()
+}
+
+pub(in crate::iced_ui) fn sidebar_portable_items(
+    storage_entries: &[FileEntry],
+) -> Vec<SidebarItem> {
+    let mut entries = storage_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.drive_kind == Some(DriveKind::Portable))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(_, left), (_, right)| {
+        explorer::compare_names_case_insensitive(&left.name, &right.name)
+    });
+
+    entries
+        .into_iter()
+        .map(|(index, entry)| SidebarItem {
+            label: entry.name.clone(),
+            target: SidebarTarget::Navigate(Some(entry.path.clone())),
+            // Keep the sidebar deliberately quiet and theme-colored. The
+            // richer device illustration is reserved for the This PC view.
+            icon: "portable-sidebar",
             context_drive_index: entry
                 .drive_kind
                 .is_some_and(DriveKind::is_ejectable)
@@ -235,6 +280,8 @@ pub(in crate::iced_ui) fn sidebar_section_label(
         (SidebarSection::Places, false) => "Places",
         (SidebarSection::Storage, true) => "Almacenamiento",
         (SidebarSection::Storage, false) => "Storage",
+        (SidebarSection::Portable, true) => "Dispositivos portátiles",
+        (SidebarSection::Portable, false) => "Portable devices",
         (SidebarSection::Network, true) => "Red",
         (SidebarSection::Network, false) => "Network",
         (SidebarSection::Recents, true) => "Recientes",
@@ -247,6 +294,7 @@ pub(in crate::iced_ui) fn sidebar_section_icon(section: SidebarSection) -> &'sta
         SidebarSection::Favorites => "bookmark",
         SidebarSection::Places => "places",
         SidebarSection::Storage => "storage",
+        SidebarSection::Portable => "portable-sidebar",
         SidebarSection::Network => "net",
         SidebarSection::Recents => "rec",
     }
@@ -273,11 +321,10 @@ pub(in crate::iced_ui) fn filesystem_root_label() -> String {
             .to_string_lossy()
             .trim_end_matches(['\\', '/'])
             .to_owned();
-        return info
-            .volume_label
+        info.volume_label
             .filter(|label| !label.trim().is_empty())
             .map(|label| format!("{label} ({drive})"))
-            .unwrap_or(drive);
+            .unwrap_or(drive)
     }
     #[cfg(not(windows))]
     {

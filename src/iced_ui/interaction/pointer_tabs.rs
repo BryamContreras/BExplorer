@@ -308,6 +308,9 @@ impl BExplorerIced {
 
         let mut top = TITLE_HEIGHT + 8.0;
         for section in self.config.normalized_sidebar_order() {
+            if !self.sidebar_section_visible(section) {
+                continue;
+            }
             let height = self.sidebar_section_layout_height(section);
             if y >= top && y <= top + height {
                 return Some((section, y > top + height * 0.5));

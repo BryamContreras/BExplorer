@@ -112,6 +112,13 @@ impl BExplorerIced {
             self.transfer_window_view(Palette::from_config(&self.config, self.is_dark_theme()))
         } else if self.archive_window_id == Some(id) {
             self.archive_window_view(Palette::from_config(&self.config, self.is_dark_theme()))
+        } else if self.defender_window_id == Some(id) {
+            self.defender_window_view(Palette::from_config(&self.config, self.is_dark_theme()))
+        } else if self.defender_threats_window_id == Some(id) {
+            self.defender_threats_window_view(Palette::from_config(
+                &self.config,
+                self.is_dark_theme(),
+            ))
         } else {
             self.view()
         }
@@ -122,6 +129,15 @@ impl BExplorerIced {
             self.localized("Transferencias", "Transfers").to_owned()
         } else if self.archive_window_id == Some(id) {
             self.localized("Compresiones", "Compressions").to_owned()
+        } else if self.defender_window_id == Some(id) {
+            self.localized("Microsoft Defender", "Microsoft Defender")
+                .to_owned()
+        } else if self.defender_threats_window_id == Some(id) {
+            self.localized(
+                "Amenazas de Microsoft Defender",
+                "Microsoft Defender threats",
+            )
+            .to_owned()
         } else {
             "BExplorer".into()
         }
@@ -216,8 +232,11 @@ impl BExplorerIced {
         if self.archive_dialog.is_some() {
             modal_layers.push(opaque(self.archive_dialog_modal(popup_palette)));
         }
-        if self.defender_visible() {
-            modal_layers.push(opaque(self.defender_modal(palette)));
+        if self.format_dialog.is_some() {
+            modal_layers.push(opaque(self.format_dialog_modal(popup_palette)));
+        }
+        if self.error_dialog.is_some() {
+            modal_layers.push(opaque(self.error_dialog_modal(popup_palette)));
         }
         stack(modal_layers).into()
     }

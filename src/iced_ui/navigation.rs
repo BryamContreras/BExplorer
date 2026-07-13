@@ -44,7 +44,7 @@ impl BExplorerIced {
         self.cancel_recursive_search(pane);
         self.sync_pane_view_mode_from_tab(pane);
         let path = self.tab_for_pane(pane).path.clone();
-        if path.is_none() && !self.sidebar_storage_entries.is_empty() {
+        if path.is_none() {
             let cached_entries = self.sidebar_storage_entries.clone();
             let available_paths = cached_entries
                 .iter()
@@ -52,16 +52,29 @@ impl BExplorerIced {
                 .collect::<HashSet<_>>();
             let state = self.pane_mut(pane);
             state.request_id += 1;
-            state.loading = false;
             state.search_progress_phase = 0.0;
-            state.status = format!("{} elements", cached_entries.len());
             state.folder_entries = None;
-            state.entries = cached_entries;
             state.selected.retain(|path| available_paths.contains(path));
             state.selection_anchor = None;
-            state.mark_entries_changed();
             state.has_vertical_overflow = false;
-            return self.queue_visible_images(pane);
+
+            if cached_entries.is_empty() {
+                state.loading = true;
+                state.status = String::from("Loading...");
+                return self.refresh_sidebar_storage();
+            }
+
+            state.loading = false;
+            state.status = format!("{} elements", cached_entries.len());
+            state.entries = cached_entries;
+            state.mark_entries_changed();
+            return Task::batch([
+                self.queue_visible_images(pane),
+                self.refresh_sidebar_storage(),
+            ]);
+        }
+        if path.as_deref().is_some_and(explorer::is_network_root_path) {
+            return self.start_network_root_load(pane);
         }
         let show_hidden = self.config.show_hidden;
         let request_id = {
@@ -76,6 +89,73 @@ impl BExplorerIced {
             load_entries(pane, request_id, path, show_hidden),
             |result| Message::Loaded(result.pane, result.request_id, result.entries),
         )
+    }
+
+    /// Paints the cached network root immediately, then lets every discovery
+    /// source add results as it completes instead of waiting for the slowest
+    /// source to finish.
+    fn start_network_root_load(&mut self, pane: PaneId) -> Task<Message> {
+        let cached_entries = explorer::network_root_cached_entries();
+        let searching = self
+            .localized(
+                "Buscando dispositivos de red…",
+                "Searching network devices…",
+            )
+            .to_owned();
+        let refreshing = self.localized("Actualizando red…", "Refreshing network…");
+        let elements = self.localized("elementos", "items");
+        let request_id = {
+            let state = self.pane_mut(pane);
+            state.request_id += 1;
+            state.loading = true;
+            state.network_discovery_pending = explorer::NETWORK_DISCOVERY_SOURCES.len() + 1;
+            state.search_progress_phase = 0.0;
+            state.status = if cached_entries.is_empty() {
+                searching
+            } else {
+                format!("{} {elements} · {refreshing}", cached_entries.len())
+            };
+            state.folder_entries = None;
+            state.entries = cached_entries;
+            state.selected.clear();
+            state.selection_anchor = None;
+            state.render_limit = INITIAL_RENDER_LIMIT;
+            state.scroll_offset_y = 0.0;
+            state.has_vertical_overflow = false;
+            state.mark_entries_changed();
+            state.request_id
+        };
+
+        let mut tasks = explorer::NETWORK_DISCOVERY_SOURCES
+            .iter()
+            .copied()
+            .map(|source| {
+                Task::perform(
+                    run_blocking_file_operation(move || {
+                        Ok::<_, BExplorerError>(
+                            explorer::list_network_discovery_source_entries_timed(source),
+                        )
+                    }),
+                    move |result| {
+                        Message::NetworkDiscoveryEntries(
+                            pane,
+                            request_id,
+                            result.unwrap_or_default(),
+                        )
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        tasks.push(Task::perform(
+            run_blocking_file_operation(|| {
+                Ok::<_, BExplorerError>(explorer::list_network_netbios_neighbor_addresses_timed())
+            }),
+            move |result| {
+                Message::NetworkDiscoveryAddresses(pane, request_id, result.unwrap_or_default())
+            },
+        ));
+        tasks.push(self.queue_visible_images(pane));
+        Task::batch(tasks)
     }
 
     pub(in crate::iced_ui) fn refresh_sidebar_storage(&self) -> Task<Message> {

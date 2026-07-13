@@ -41,12 +41,6 @@ pub(in crate::iced_ui) fn window_close_button<'a>(palette: Palette) -> Button<'a
         })
 }
 
-pub(in crate::iced_ui) fn transfer_window_minimize_button<'a>(
-    palette: Palette,
-) -> Button<'a, Message> {
-    native_window_minimize_button(Message::TransferWindowMinimize, palette)
-}
-
 pub(in crate::iced_ui) fn native_window_minimize_button<'a>(
     message: Message,
     palette: Palette,
@@ -312,7 +306,7 @@ pub(in crate::iced_ui) fn inline_icon<'a>(
     // lightweight line weight intact.
     const ICON_OPTICAL_SCALE: f32 = 1.12;
     let size = (size * ICON_OPTICAL_SCALE).round().max(1.0);
-    let preserves_native_colors = matches!(label, "pc" | "printer");
+    let preserves_native_colors = matches!(label, "pc" | "printer" | "portable");
     let icon = svg::Svg::new(svg::Handle::from_memory(icon_svg(label)))
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
@@ -420,6 +414,7 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
 pub(in crate::iced_ui) fn fallback_icon_label(entry: &FileEntry) -> &'static str {
     match &entry.kind {
         EntryKind::Drive if entry.drive_kind == Some(DriveKind::NetworkPrinter) => "printer",
+        EntryKind::Drive if entry.drive_kind == Some(DriveKind::Portable) => "portable",
         EntryKind::Drive => "pc",
         EntryKind::Folder => "folder",
         EntryKind::Symlink => "lnk",
@@ -460,6 +455,8 @@ pub(in crate::iced_ui) fn icon_svg(label: &'static str) -> &'static [u8] {
         "places" => ICON_PLACES,
         "bookmark" => ICON_BOOKMARK,
         "storage" => ICON_STORAGE,
+        "portable" => ICON_PORTABLE,
+        "portable-sidebar" => ICON_PORTABLE_SIDEBAR,
         "file" => ICON_FILE,
         "pc" => ICON_PC,
         "printer" => ICON_PRINTER,
@@ -474,6 +471,8 @@ pub(in crate::iced_ui) fn icon_svg(label: &'static str) -> &'static [u8] {
         "trash" => ICON_TRASH,
         "delete-forever" => ICON_DELETE_FOREVER,
         "archive" => ICON_ARCHIVE,
+        "eject" => ICON_EJECT,
+        "format" => ICON_FORMAT,
         "group" => ICON_GROUP,
         "preview" => ICON_PREVIEW,
         "open" => ICON_OPEN,
@@ -515,9 +514,13 @@ const ICON_FOLDER_STACK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www
 const ICON_PLACES: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M3.5 8.2c0-1.1.9-2 2-2h4.7l1.7 1.8h6.6c1.1 0 2 .9 2 2v6.8c0 1.1-.9 2-2 2h-13c-1.1 0-2-.9-2-2z" fill="#000"/></svg>"##;
 const ICON_BOOKMARK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 4.5h10v15l-5-3-5 3z" fill="none" stroke="#000" stroke-width="1.8" stroke-linejoin="round"/></svg>"##;
 const ICON_STORAGE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><ellipse cx="12" cy="6" rx="7" ry="2.8" fill="none" stroke="#000" stroke-width="1.7"/><path d="M5 6v9.5c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 11c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8" fill="none" stroke="#000" stroke-width="1.7"/></svg>"##;
+const ICON_PORTABLE_SIDEBAR: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="7.15" y="2.35" width="9.7" height="19.3" rx="2.1" fill="none" stroke="#000" stroke-width="1.65"/><path d="M10.15 4.65h3.7" fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round"/><circle cx="12" cy="18.9" r=".8" fill="#000"/></svg>"##;
+const ICON_PORTABLE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="portable-case" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#748d90"/><stop offset=".2" stop-color="#617b7e"/><stop offset=".48" stop-color="#6b8588"/><stop offset=".8" stop-color="#526c70"/><stop offset="1" stop-color="#647d80"/></linearGradient></defs><path d="M4.1 2.05c0-.58.47-1.05 1.05-1.05h13.7c.58 0 1.05.47 1.05 1.05v19.9c0 .58-.47 1.05-1.05 1.05H5.15c-.58 0-1.05-.47-1.05-1.05z" fill="url(#portable-case)" stroke="#788f92" stroke-width=".16"/><path d="M4.55 3.35h14.9V21.6H4.55z" fill="#2488ad"/><path d="M4.55 3.35h14.9V21.6z" fill="#075779" opacity=".42"/><path d="M5.4 4.15h13.2V5.2H5.4z" fill="#8be6fa" opacity=".22"/><rect x="9.25" y="2.35" width="5.5" height=".55" rx=".16" fill="#91a5a7" opacity=".72"/><path d="M4.38 3.5v18.05" fill="none" stroke="#d2dedf" stroke-opacity=".12" stroke-width=".22" stroke-linecap="round"/></svg>"##;
+const ICON_EJECT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="m12 5 6 8H6z" fill="none" stroke="#000" stroke-width="1.7" stroke-linejoin="round"/><path d="M6 18.2h12" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
+const ICON_FORMAT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="4.1" y="7.4" width="15.8" height="10.2" rx="1.7" fill="none" stroke="#000" stroke-width="1.65"/><path d="M7.2 14.3h4.3M7.2 11.1h2.2" fill="none" stroke="#000" stroke-width="1.55" stroke-linecap="round"/><path d="M15.7 5.1a4.4 4.4 0 0 1 2.9 4.15M19 9.25l-.4-2.65-2.45 1.1" fill="none" stroke="#000" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_FILE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/></svg>"##;
 const ICON_PC: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="1.1" y="2.15" width="21.8" height="15.35" rx="1.55" fill="#294b55" stroke="#f7fcff" stroke-width=".42" stroke-opacity=".72"/><rect x="1.5" y="2.55" width="21" height="14.55" rx="1.2" fill="none" stroke="#132f38" stroke-width=".72"/><rect x="2.85" y="3.65" width="18.3" height="11.75" rx=".38" fill="#08bfe8"/><path d="M2.85 3.65h18.3V15.4z" fill="#087fa7" opacity=".2"/><path d="M10.45 17.4h3.1v2.3h3.4c.6 0 1.1.48 1.1 1.08v.47H5.95v-.47c0-.6.5-1.08 1.1-1.08h3.4z" fill="#294b55" stroke="#f7fcff" stroke-width=".35" stroke-opacity=".6"/><path d="M5.95 21.25h12.1" fill="none" stroke="#132f38" stroke-width=".75" stroke-linecap="round"/></svg>"##;
-const ICON_PRINTER: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 3.2h10v5.1H7z" fill="#d9eef5" stroke="#031923" stroke-width="1.15" stroke-linejoin="round"/><rect x="3" y="7.2" width="18" height="9.4" rx="2" fill="#16779c" stroke="#031923" stroke-width="1.2"/><circle cx="18.1" cy="10.3" r=".75" fill="#8ce1f5"/><path d="M6.4 13.2h11.2v7.6H6.4z" fill="#eaf7fa" stroke="#031923" stroke-width="1.15" stroke-linejoin="round"/><path d="M8.4 16h7.2M8.4 18.2h5.2" fill="none" stroke="#52717d" stroke-width="1" stroke-linecap="round"/></svg>"##;
+const ICON_PRINTER: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7.1 2.7h9.8v5.65H7.1z" fill="#e9f1f3" stroke="#90a7ae" stroke-width=".7" stroke-linejoin="round"/><path d="M8.15 3.7h7.7v1.1h-7.7z" fill="#c8d8dc" opacity=".72"/><rect x="2.65" y="7.75" width="18.7" height="9.15" rx="1.7" fill="#2b444d" stroke="#10232a" stroke-width=".85"/><path d="M3.5 9.05h17v5.1h-17z" fill="#385761" opacity=".68"/><rect x="16.65" y="9.65" width="1.28" height="1.28" rx=".4" fill="#64c7df"/><path d="M6.1 13.25h11.8v7.35H6.1z" fill="#eef5f6" stroke="#94a9af" stroke-width=".7" stroke-linejoin="round"/><path d="M8.1 15.55h7.8M8.1 17.7h5.7" fill="none" stroke="#607980" stroke-width=".9" stroke-linecap="round"/><path d="M6.1 13.25h11.8v1.15H6.1z" fill="#d7e3e6"/><path d="M4.35 17.05h15.3" fill="none" stroke="#0d2026" stroke-opacity=".48" stroke-width=".65"/></svg>"##;
 const ICON_LINK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M10 8.5 11.5 7a4 4 0 0 1 5.7 5.7l-2 2a4 4 0 0 1-5.7 0" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/><path d="m14 15.5-1.5 1.5a4 4 0 0 1-5.7-5.7l2-2a4 4 0 0 1 5.7 0" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
 const ICON_RECENT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="7.5" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 7.5V12l3 2" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_NETWORK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="5.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><circle cx="6" cy="18.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><circle cx="18" cy="18.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 7.5v4.5M12 12 7.5 17M12 12l4.5 5" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round"/></svg>"##;
@@ -787,12 +790,19 @@ impl Palette {
             }
         };
         if config.vibrancy_active {
-            let intensity = config.vibrancy_intensity.clamp(15, 90) as f32 / 100.0;
+            let intensity = config.vibrancy_intensity.clamp(15, 100) as f32 / 100.0;
             // Intensity controls how much of the native/compositor backdrop is
             // allowed through. The previous scale left the window mostly
             // opaque even at 90%, making KWin's blur impossible to perceive.
             // Keep a readable floor while making the high end visibly glassy.
-            let alpha = (1.0 - intensity * 0.68).clamp(0.32, 0.9);
+            let base_alpha = (1.0 - intensity * 0.68).clamp(0.32, 0.9);
+            // Windows Acrylic already supplies a native backdrop. Let a little
+            // more of it show through without changing the Linux blur tuning.
+            let alpha = if config.vibrancy == VibrancyMode::Acrylic {
+                (base_alpha - 0.05).max(0.30)
+            } else {
+                base_alpha
+            };
             for surface in [
                 &mut palette.page_bg,
                 &mut palette.table_bg,

@@ -300,6 +300,20 @@ pub fn eject_drive(path: &Path) -> Result<()> {
     crate::platform::shell::eject_drive(path)
 }
 
+pub fn available_format_filesystems(path: &Path) -> Vec<String> {
+    crate::platform::shell::available_format_filesystems(path)
+}
+
+pub fn format_drive(
+    path: &Path,
+    filesystem: &str,
+    label: &str,
+    quick: bool,
+    allocation_unit_size: Option<u64>,
+) -> Result<()> {
+    crate::platform::shell::format_drive(path, filesystem, label, quick, allocation_unit_size)
+}
+
 #[allow(dead_code)]
 pub fn paste_paths(sources: &[PathBuf], destination: &Path, mode: PasteMode) -> Result<usize> {
     if !destination.is_dir() {
@@ -538,11 +552,11 @@ fn is_drive_root(path: &Path) -> bool {
         let path = path.display().to_string().replace('/', "\\");
         let trimmed = path.trim_end_matches('\\');
         let mut chars = trimmed.chars();
-        return chars
+        chars
             .next()
             .is_some_and(|letter| letter.is_ascii_alphabetic())
             && chars.next() == Some(':')
-            && chars.next().is_none();
+            && chars.next().is_none()
     }
 
     #[cfg(not(target_os = "windows"))]

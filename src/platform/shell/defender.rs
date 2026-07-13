@@ -16,16 +16,20 @@ use crate::utils::errors::{BExplorerError, Result};
 pub struct WindowsDefenderThreat {
     pub name: String,
     pub path: Option<PathBuf>,
-    pub status: String,
 }
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug)]
 pub struct WindowsDefenderScanResult {
-    pub target: PathBuf,
     pub exit_code: Option<i32>,
-    pub output: String,
     pub threats: Vec<WindowsDefenderThreat>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DefenderScanDisposition {
+    DetectOnly,
+    Remediate,
 }
 
 #[cfg(target_os = "windows")]
@@ -33,20 +37,64 @@ pub(super) fn scan_path_with_windows_defender(
     path: &Path,
     cancel: &AtomicBool,
 ) -> Result<WindowsDefenderScanResult> {
+    scan_path_with_windows_defender_with_disposition(
+        path,
+        cancel,
+        DefenderScanDisposition::DetectOnly,
+    )
+}
+
+#[cfg(target_os = "windows")]
+pub(super) fn remediate_paths_with_windows_defender(paths: &[PathBuf]) -> Result<usize> {
+    let cancel = AtomicBool::new(false);
+    for path in paths {
+        let result = scan_path_with_windows_defender_with_disposition(
+            path,
+            &cancel,
+            DefenderScanDisposition::Remediate,
+        )?;
+        // MpCmdRun can report a non-zero exit code when it finds a threat,
+        // even after it has successfully quarantined or removed the file.
+        // The removed path is the authoritative result in that case.
+        let removed_by_defender = !path.exists();
+        if !removed_by_defender && !matches!(result.exit_code, Some(0) | None) {
+            return Err(BExplorerError::Operation(format!(
+                "Microsoft Defender could not confirm remediation for {} (exit code {})",
+                path.display(),
+                result
+                    .exit_code
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".into())
+            )));
+        }
+    }
+    Ok(paths.len())
+}
+
+#[cfg(target_os = "windows")]
+fn scan_path_with_windows_defender_with_disposition(
+    path: &Path,
+    cancel: &AtomicBool,
+    disposition: DefenderScanDisposition,
+) -> Result<WindowsDefenderScanResult> {
     if let Some(mp_cmd_run) = windows_defender_command() {
         let mut command = Command::new(&mp_cmd_run);
         command.args(["-Scan", "-ScanType", "3", "-File"]);
         command.arg(path);
+        if disposition == DefenderScanDisposition::DetectOnly {
+            command.arg("-DisableRemediation");
+        }
         hide_command_window(&mut command);
         let (exit_code, output) = run_defender_command(command, cancel)?;
         let mut threats = query_windows_defender_threats_for(path);
         add_output_attention_threat(path, exit_code, &output, &mut threats);
-        return Ok(WindowsDefenderScanResult {
-            target: path.to_path_buf(),
-            exit_code,
-            output,
-            threats,
-        });
+        return Ok(WindowsDefenderScanResult { exit_code, threats });
+    }
+
+    if disposition == DefenderScanDisposition::DetectOnly {
+        return Err(BExplorerError::Operation(
+            "This version of Microsoft Defender does not support detection-only scans".into(),
+        ));
     }
 
     let mut command = Command::new("powershell.exe");
@@ -63,12 +111,7 @@ pub(super) fn scan_path_with_windows_defender(
     let (exit_code, output) = run_defender_command(command, cancel)?;
     let mut threats = query_windows_defender_threats_for(path);
     add_output_attention_threat(path, exit_code, &output, &mut threats);
-    Ok(WindowsDefenderScanResult {
-        target: path.to_path_buf(),
-        exit_code,
-        output,
-        threats,
-    })
+    Ok(WindowsDefenderScanResult { exit_code, threats })
 }
 
 #[cfg(target_os = "windows")]
@@ -111,23 +154,15 @@ fn run_defender_command(
 fn add_output_attention_threat(
     path: &Path,
     exit_code: Option<i32>,
-    output: &str,
+    _output: &str,
     threats: &mut Vec<WindowsDefenderThreat>,
 ) {
     if !threats.is_empty() || matches!(exit_code, Some(0) | None) {
         return;
     }
-    let status = output
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("Action required")
-        .to_string();
     threats.push(WindowsDefenderThreat {
         name: "Windows Defender alert".into(),
         path: Some(path.to_path_buf()),
-        status,
     });
 }
 
@@ -159,7 +194,7 @@ fn query_windows_defender_threats() -> Result<Vec<WindowsDefenderThreat>> {
         "-ExecutionPolicy",
         "Bypass",
         "-Command",
-        "& { $items = @(Get-MpThreatDetection | Select-Object ThreatName,ActionSuccess,Resources,ThreatStatusID,ThreatStatusErrorCode); if ($items.Count -eq 0) { '[]' } else { $items | ConvertTo-Json -Depth 5 -Compress } }",
+        "& { $detections = @(Get-MpThreatDetection); $catalog = @{}; foreach ($d in $detections) { if ($null -ne $d.ThreatID -and -not $catalog.ContainsKey([string]$d.ThreatID)) { $catalog[[string]$d.ThreatID] = @(Get-MpThreat -ThreatID $d.ThreatID -ErrorAction SilentlyContinue | Select-Object -First 1)[0] } }; $items = @(foreach ($d in $detections) { $id = [string]$d.ThreatID; $entry = $catalog[$id]; $name = if (-not [string]::IsNullOrWhiteSpace([string]$d.ThreatName)) { [string]$d.ThreatName } elseif ($null -ne $entry -and -not [string]::IsNullOrWhiteSpace([string]$entry.ThreatName)) { [string]$entry.ThreatName } else { $null }; [PSCustomObject]@{ ThreatName = $name; ThreatID = $d.ThreatID; Resources = $d.Resources } }); if ($items.Count -eq 0) { '[]' } else { $items | ConvertTo-Json -Depth 5 -Compress } }",
     ]);
     hide_command_window(&mut command);
     let output = command
@@ -184,30 +219,22 @@ fn query_windows_defender_threats() -> Result<Vec<WindowsDefenderThreat>> {
 
     let mut threats = Vec::new();
     for item in items {
-        let name = json_string(&item, "ThreatName").unwrap_or_else(|| "Threat".into());
-        let status = json_string(&item, "ThreatStatusID")
-            .or_else(|| json_string(&item, "ThreatStatusErrorCode"))
-            .unwrap_or_else(|| {
-                if json_bool(&item, "ActionSuccess").unwrap_or(false) {
-                    "Remediated".into()
-                } else {
-                    "Action required".into()
-                }
-            });
+        let threat_id = json_string(&item, "ThreatID");
+        let name = json_string(&item, "ThreatName").unwrap_or_else(|| {
+            threat_id
+                .as_deref()
+                .map(|id| format!("Microsoft Defender threat ({id})"))
+                .unwrap_or_else(|| "Microsoft Defender detection".into())
+        });
         let resources = json_strings(&item, "Resources");
         if resources.is_empty() {
-            threats.push(WindowsDefenderThreat {
-                name,
-                path: None,
-                status,
-            });
+            threats.push(WindowsDefenderThreat { name, path: None });
             continue;
         }
         for resource in resources {
             threats.push(WindowsDefenderThreat {
                 name: name.clone(),
                 path: defender_resource_path(&resource),
-                status: status.clone(),
             });
         }
     }
@@ -216,68 +243,9 @@ fn query_windows_defender_threats() -> Result<Vec<WindowsDefenderThreat>> {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) fn remove_windows_defender_threats() -> Result<()> {
-    run_defender_powershell_action("Remove-MpThreat")
-}
-
-#[cfg(target_os = "windows")]
-pub(super) fn exclude_windows_defender_paths(paths: &[PathBuf]) -> Result<()> {
-    if paths.is_empty() {
-        return Err(BExplorerError::Operation(
-            "No exclusion target selected".into(),
-        ));
-    }
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        "& { foreach ($TargetPath in $args) { Add-MpPreference -ExclusionPath $TargetPath -ErrorAction Stop } }",
-    ]);
-    command.args(paths);
-    hide_command_window(&mut command);
-    let output = command
-        .output()
-        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(BExplorerError::Shell(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
-    }
-}
-
-#[cfg(target_os = "windows")]
 pub(super) fn open_windows_security() -> Result<()> {
     open_windows_uri("windowsdefender://threat")
         .or_else(|_| open_windows_uri("ms-settings:windowsdefender"))
-}
-
-#[cfg(target_os = "windows")]
-fn run_defender_powershell_action(script: &str) -> Result<()> {
-    let mut command = Command::new("powershell.exe");
-    command.args([
-        "-NoProfile",
-        "-NonInteractive",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-Command",
-        script,
-    ]);
-    hide_command_window(&mut command);
-    let output = command
-        .output()
-        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(BExplorerError::Shell(
-            String::from_utf8_lossy(&output.stderr).trim().to_string(),
-        ))
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -321,11 +289,6 @@ fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
         serde_json::Value::Bool(value) => Some(value.to_string()),
         _ => None,
     }
-}
-
-#[cfg(target_os = "windows")]
-fn json_bool(value: &serde_json::Value, key: &str) -> Option<bool> {
-    value.get(key)?.as_bool()
 }
 
 #[cfg(target_os = "windows")]

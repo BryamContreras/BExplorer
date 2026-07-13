@@ -209,7 +209,12 @@ impl BExplorerIced {
         let sidebar_width = self.current_sidebar_width();
 
         let mut content = column![].padding([8, 8]).spacing(1);
-        for section in self.config.normalized_sidebar_order() {
+        for section in self
+            .config
+            .normalized_sidebar_order()
+            .into_iter()
+            .filter(|section| self.sidebar_section_visible(*section))
+        {
             content = content.push(self.sidebar_section(pane, section, palette));
         }
 

@@ -100,6 +100,14 @@ impl BExplorerIced {
         !self.config.sidebar_collapsed.contains(&section)
     }
 
+    pub(in crate::iced_ui) fn sidebar_section_visible(&self, section: SidebarSection) -> bool {
+        section != SidebarSection::Portable
+            || self
+                .sidebar_storage_entries
+                .iter()
+                .any(|entry| entry.drive_kind == Some(DriveKind::Portable))
+    }
+
     pub(in crate::iced_ui) fn toggle_sidebar_section(&mut self, section: SidebarSection) {
         if let Some(index) = self
             .config
@@ -145,12 +153,17 @@ impl BExplorerIced {
             if *candidate == section {
                 break;
             }
-            top += self.sidebar_section_layout_height(*candidate) + 1.0;
+            if self.sidebar_section_visible(*candidate) {
+                top += self.sidebar_section_layout_height(*candidate) + 1.0;
+            }
         }
         top
     }
 
     pub(in crate::iced_ui) fn sidebar_section_layout_height(&self, section: SidebarSection) -> f32 {
+        if !self.sidebar_section_visible(section) {
+            return 0.0;
+        }
         let item_count = if self.sidebar_section_expanded(section) {
             sidebar_items_for_section(
                 &self.config,

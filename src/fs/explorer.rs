@@ -8,6 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use fs2::free_space;
+use serde::{Deserialize, Serialize};
 
 use crate::utils::errors::BExplorerError;
 use crate::utils::errors::Result;
@@ -124,7 +125,7 @@ impl FileCategory {
 }
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum DriveKind {
     Local,
     External,
@@ -163,6 +164,10 @@ impl DriveKind {
     pub fn is_ejectable(self) -> bool {
         matches!(self, Self::External | Self::Usb | Self::Optical)
     }
+
+    pub fn is_formatable(self) -> bool {
+        matches!(self, Self::Local | Self::External | Self::Usb)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +184,145 @@ pub struct FileEntry {
     pub modified: Option<String>,
     pub created: Option<String>,
     pub is_hidden: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StorageCacheEntry {
+    name: String,
+    path: PathBuf,
+    drive_kind: DriveKind,
+    file_system: String,
+    free_space: Option<u64>,
+    size: Option<u64>,
+    percent_full: Option<f32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct StorageCache {
+    entries: Vec<StorageCacheEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NetworkCacheEntry {
+    name: String,
+    path: PathBuf,
+    drive_kind: DriveKind,
+    file_system: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NetworkCache {
+    entries: Vec<NetworkCacheEntry>,
+}
+
+/// Loads the last known This PC entries without touching the system's storage
+/// APIs. A stale or unreadable cache is ignored and the normal asynchronous
+/// refresh will repopulate it.
+pub fn load_storage_cache() -> Vec<FileEntry> {
+    let Ok(path) = crate::utils::paths::storage_cache_file() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(cache) = serde_json::from_slice::<StorageCache>(&bytes) else {
+        return Vec::new();
+    };
+
+    cache
+        .entries
+        .into_iter()
+        .map(|entry| FileEntry {
+            name: entry.name,
+            path: entry.path,
+            kind: EntryKind::Drive,
+            category: FileCategory::Other,
+            drive_kind: Some(entry.drive_kind),
+            file_system: entry.file_system,
+            free_space: entry.free_space,
+            size: entry.size,
+            percent_full: entry.percent_full,
+            modified: None,
+            created: None,
+            is_hidden: false,
+        })
+        .collect()
+}
+
+/// Persists the storage entries needed to paint This PC on the next launch.
+/// Failures are non-critical and can be ignored by the caller.
+pub fn save_storage_cache(entries: &[FileEntry]) -> Result<()> {
+    let cache = StorageCache {
+        entries: entries
+            .iter()
+            .filter_map(|entry| {
+                Some(StorageCacheEntry {
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                    drive_kind: entry.drive_kind?,
+                    file_system: entry.file_system.clone(),
+                    free_space: entry.free_space,
+                    size: entry.size,
+                    percent_full: entry.percent_full,
+                })
+            })
+            .collect(),
+    };
+    let path = crate::utils::paths::storage_cache_file()?;
+    crate::utils::atomic_file::write(&path, &serde_json::to_vec(&cache)?)
+}
+
+/// Loads the last discovered network devices without starting a new network
+/// scan. This keeps the network root useful immediately while discovery runs.
+pub fn load_network_cache() -> Vec<FileEntry> {
+    let Ok(path) = crate::utils::paths::network_cache_file() else {
+        return Vec::new();
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return Vec::new();
+    };
+    let Ok(cache) = serde_json::from_slice::<NetworkCache>(&bytes) else {
+        return Vec::new();
+    };
+
+    cache
+        .entries
+        .into_iter()
+        .map(|entry| FileEntry {
+            name: entry.name,
+            path: entry.path,
+            kind: EntryKind::Drive,
+            category: FileCategory::Other,
+            drive_kind: Some(entry.drive_kind),
+            file_system: entry.file_system,
+            free_space: None,
+            size: None,
+            percent_full: None,
+            modified: None,
+            created: None,
+            is_hidden: false,
+        })
+        .collect()
+}
+
+/// Persists the most recently known network devices. Like the storage cache,
+/// this is opportunistic: failing to cache must never interrupt browsing.
+pub fn save_network_cache(entries: &[FileEntry]) -> Result<()> {
+    let cache = NetworkCache {
+        entries: entries
+            .iter()
+            .filter_map(|entry| {
+                Some(NetworkCacheEntry {
+                    name: entry.name.clone(),
+                    path: entry.path.clone(),
+                    drive_kind: entry.drive_kind?,
+                    file_system: entry.file_system.clone(),
+                })
+            })
+            .collect(),
+    };
+    let path = crate::utils::paths::network_cache_file()?;
+    crate::utils::atomic_file::write(&path, &serde_json::to_vec(&cache)?)
 }
 
 impl FileEntry {
@@ -234,9 +378,30 @@ const VIRTUAL_ROOT: &str = "__bexplorer_virtual__";
 const VIRTUAL_NETWORK: &str = "network";
 const VIRTUAL_PORTABLE: &str = "portable";
 const WPD_ROOT_OBJECT_ID: &str = "DEVICE";
-const NETWORK_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+const NETWORK_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(10);
 static NETWORK_DISCOVERY_ACTIVE: AtomicBool = AtomicBool::new(false);
 static NETWORK_ROOT_CACHE: OnceLock<Mutex<Vec<FileEntry>>> = OnceLock::new();
+
+#[derive(Clone, Copy, Debug)]
+pub enum NetworkDiscoverySource {
+    System,
+    Fast,
+    NetBiosCache,
+    Printers,
+    FunctionDevices,
+    WindowsNetwork,
+    Shell,
+}
+
+pub const NETWORK_DISCOVERY_SOURCES: &[NetworkDiscoverySource] = &[
+    NetworkDiscoverySource::System,
+    NetworkDiscoverySource::Fast,
+    NetworkDiscoverySource::NetBiosCache,
+    NetworkDiscoverySource::Printers,
+    NetworkDiscoverySource::FunctionDevices,
+    NetworkDiscoverySource::WindowsNetwork,
+    NetworkDiscoverySource::Shell,
+];
 
 pub fn list_entries(path: Option<&Path>, show_hidden: bool) -> Result<Vec<FileEntry>> {
     match path {
@@ -444,6 +609,10 @@ fn portable_device_duplicates_storage(
         return true;
     }
 
+    if portable_device_name_is_mounted_storage(device, storage_entries) {
+        return true;
+    }
+
     let device_name = normalized_storage_label(&device.name);
     if device_name.is_empty() {
         return false;
@@ -452,6 +621,33 @@ fn portable_device_duplicates_storage(
     storage_entries.iter().any(|entry| {
         entry_is_mounted_storage(entry) && normalized_storage_label(&entry.name) == device_name
     })
+}
+
+fn portable_device_name_is_mounted_storage(
+    device: &PortableDevice,
+    storage_entries: &[FileEntry],
+) -> bool {
+    let Some(device_letter) = drive_root_letter(&device.name) else {
+        return false;
+    };
+
+    storage_entries.iter().any(|entry| {
+        entry_is_mounted_storage(entry)
+            && drive_root_letter(&entry.path.to_string_lossy()) == Some(device_letter)
+    })
+}
+
+fn drive_root_letter(value: &str) -> Option<u8> {
+    let value = value.trim();
+    let bytes = value.as_bytes();
+    let (&letter, rest) = bytes.split_first()?;
+    if !letter.is_ascii_alphabetic() || rest.first() != Some(&b':') {
+        return None;
+    }
+    if rest.len() > 1 && !rest[1..].iter().all(|byte| matches!(byte, b'\\' | b'/')) {
+        return None;
+    }
+    Some(letter.to_ascii_uppercase())
 }
 
 fn portable_device_id_is_mounted_storage(id: &str) -> bool {
@@ -538,19 +734,11 @@ fn list_network_computers() -> Vec<FileEntry> {
     }
 
     let (sender, receiver) = mpsc::channel();
-    let sources: [fn() -> Vec<FileEntry>; 7] = [
-        list_network_computer_entries_default,
-        list_network_computer_entries_fast,
-        list_network_computer_entries_netbios_cached,
-        list_network_printer_entries,
-        list_network_function_device_entries,
-        list_network_computer_entries_wnet,
-        list_network_shell_entries,
-    ];
-    for source in sources {
+    for source in NETWORK_DISCOVERY_SOURCES {
+        let source = *source;
         let sender = sender.clone();
         thread::spawn(move || {
-            let entries = source();
+            let entries = list_network_discovery_source_entries(source);
             if !entries.is_empty() {
                 let _ = sender.send(SourceMessage::Entries(entries));
             }
@@ -593,9 +781,8 @@ fn list_network_computers() -> Vec<FileEntry> {
 
     NETWORK_DISCOVERY_ACTIVE.store(false, AtomicOrdering::Release);
     sort_entries_by_name(&mut entries);
-    if let Ok(mut cache) = network_root_cache().lock() {
-        *cache = entries.clone();
-    }
+    replace_network_root_cache(&entries);
+    let _ = save_network_cache(&entries);
     entries
 }
 
@@ -607,17 +794,34 @@ fn list_network_computer_entries_default() -> Vec<FileEntry> {
 }
 
 fn network_root_cache() -> &'static Mutex<Vec<FileEntry>> {
-    NETWORK_ROOT_CACHE.get_or_init(|| Mutex::new(Vec::new()))
+    NETWORK_ROOT_CACHE.get_or_init(|| Mutex::new(load_network_cache()))
 }
 
-fn network_root_cached_entries() -> Vec<FileEntry> {
+pub fn network_root_cached_entries() -> Vec<FileEntry> {
     network_root_cache()
         .lock()
         .map(|entries| entries.clone())
         .unwrap_or_default()
 }
 
-fn merge_network_entries(target: &mut Vec<FileEntry>, entries: Vec<FileEntry>) {
+/// Merges a batch found by a network source into the in-memory cache. This is
+/// intentionally cheap enough to call for every partial discovery result.
+pub fn merge_network_root_cache(entries: &[FileEntry]) -> Vec<FileEntry> {
+    let Ok(mut cache) = network_root_cache().lock() else {
+        return entries.to_vec();
+    };
+    merge_network_entries(&mut cache, entries.to_vec());
+    sort_entries_by_name(&mut cache);
+    cache.clone()
+}
+
+fn replace_network_root_cache(entries: &[FileEntry]) {
+    if let Ok(mut cache) = network_root_cache().lock() {
+        *cache = entries.to_vec();
+    }
+}
+
+pub fn merge_network_entries(target: &mut Vec<FileEntry>, entries: Vec<FileEntry>) {
     for entry in entries {
         if let Some(existing) = target
             .iter_mut()
@@ -630,6 +834,49 @@ fn merge_network_entries(target: &mut Vec<FileEntry>, entries: Vec<FileEntry>) {
             target.push(entry);
         }
     }
+}
+
+pub fn list_network_discovery_source_entries(source: NetworkDiscoverySource) -> Vec<FileEntry> {
+    match source {
+        NetworkDiscoverySource::System => list_network_computer_entries_default(),
+        NetworkDiscoverySource::Fast => list_network_computer_entries_fast(),
+        NetworkDiscoverySource::NetBiosCache => list_network_computer_entries_netbios_cached(),
+        NetworkDiscoverySource::Printers => list_network_printer_entries(),
+        NetworkDiscoverySource::FunctionDevices => list_network_function_device_entries(),
+        NetworkDiscoverySource::WindowsNetwork => list_network_computer_entries_wnet(),
+        NetworkDiscoverySource::Shell => list_network_shell_entries(),
+    }
+}
+
+/// Runs one discovery source behind the same timeout used by the aggregate
+/// scanner. A slow network provider must not leave the incremental UI loading
+/// forever.
+pub fn list_network_discovery_source_entries_timed(
+    source: NetworkDiscoverySource,
+) -> Vec<FileEntry> {
+    network_discovery_with_timeout(move || list_network_discovery_source_entries(source))
+        .unwrap_or_default()
+}
+
+pub fn list_network_netbios_neighbor_addresses_timed() -> Vec<String> {
+    network_discovery_with_timeout(list_network_netbios_neighbor_addresses).unwrap_or_default()
+}
+
+pub fn network_computer_entry_netbios_address_timed(address: String) -> Option<FileEntry> {
+    network_discovery_with_timeout(move || network_computer_entry_netbios_address(&address))
+        .flatten()
+}
+
+fn network_discovery_with_timeout<T, F>(operation: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let _ = sender.send(operation());
+    });
+    receiver.recv_timeout(NETWORK_DISCOVERY_TIMEOUT).ok()
 }
 
 fn network_entry_priority(entry: &FileEntry) -> u8 {
@@ -1072,6 +1319,21 @@ mod tests {
         let device = PortableDevice {
             id: "SWD\\WPDBUSENUM\\volume-like-device".into(),
             name: "NEXTCLOUD".into(),
+            manufacturer: String::new(),
+            description: String::new(),
+        };
+
+        assert!(portable_device_duplicates_storage(&device, &storage));
+    }
+
+    #[test]
+    fn filters_portable_duplicate_named_as_mounted_drive_root() {
+        let mut entry = storage_entry("Local Disk (E:)", DriveKind::Local);
+        entry.path = PathBuf::from("E:\\");
+        let storage = [entry];
+        let device = PortableDevice {
+            id: "SWD\\WPDBUSENUM\\volume-like-device".into(),
+            name: "E:\\".into(),
             manufacturer: String::new(),
             description: String::new(),
         };

@@ -247,22 +247,34 @@ impl BExplorerIced {
         .align_y(Alignment::Center);
 
         let transfer_active = self.transfer_in_progress_for(pane);
+        let formatting = self.pane(pane).formatting;
         let search_active = self.pane(pane).search_receiver.is_some();
         let loading_active = self.pane(pane).loading || self.pane(pane).mounting_disk_image;
         let progress_bar: Element<'_, Message> = if transfer_active {
             let progress = self.transfer_progress_fraction_for(pane).unwrap_or(0.0);
-            iced::widget::progress_bar(0.0..=1.0, progress)
-                .girth(2.0)
-                .style(move |_| iced::widget::progress_bar::Style {
-                    background: translucent_color(palette.border, 0.72).into(),
-                    bar: accent_gradient(palette).into(),
-                    border: border::rounded(0),
-                })
-                .into()
-        } else if search_active || loading_active {
-            indeterminate_progress_bar(self.pane(pane).search_progress_phase, palette, 2.0)
+            row![
+                iced::widget::progress_bar(0.0..=1.0, progress)
+                    .girth(2.0)
+                    .style(move |_| iced::widget::progress_bar::Style {
+                        background: translucent_color(palette.border, 0.72).into(),
+                        bar: accent_gradient(palette).into(),
+                        border: border::rounded(0),
+                    }),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fixed(2.0))
+            .into()
+        } else if !formatting && (search_active || loading_active) {
+            row![indeterminate_progress_bar(
+                self.pane(pane).search_progress_phase,
+                palette,
+                2.0
+            )]
+            .width(Length::Fill)
+            .height(Length::Fixed(2.0))
+            .into()
         } else {
-            Space::new().height(0).into()
+            row![].width(Length::Fill).height(Length::Fixed(0.0)).into()
         };
         // Keep the filter row keyed separately from the progress indicator.
         // Search batches change the indicator's widget type, but that must not

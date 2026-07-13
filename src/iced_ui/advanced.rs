@@ -187,6 +187,11 @@ impl BExplorerIced {
             if let Some(cancel) = self.defender_cancel.take() {
                 cancel.store(true, AtomicOrdering::Relaxed);
             }
+            let close_threats = self
+                .defender_threats_window_id
+                .take()
+                .map(window::close)
+                .unwrap_or_else(Task::none);
 
             let (sender, receiver) = mpsc::channel();
             let cancel = Arc::new(AtomicBool::new(false));
@@ -197,6 +202,8 @@ impl BExplorerIced {
             self.defender_rx = Some(receiver);
             self.defender_cancel = Some(cancel);
             self.defender_summary = None;
+            self.defender_threat_remediation_pending = false;
+            self.defender_threat_remediation_message = None;
             self.defender_progress = Some(DefenderProgress {
                 state: DefenderScanState::Running,
                 current_path: paths.first().cloned(),
@@ -207,7 +214,7 @@ impl BExplorerIced {
             });
             self.pane_mut(pane).status = "Analizando con Microsoft Defender…".into();
             thread::spawn(move || defender::run_scan(job, sender, worker_cancel));
-            Task::none()
+            Task::batch([close_threats, self.ensure_defender_window_task()])
         }
     }
 
@@ -219,25 +226,149 @@ impl BExplorerIced {
                 .is_some_and(|progress| progress.state == DefenderScanState::Running)
     }
 
-    pub(in crate::iced_ui) fn defender_visible(&self) -> bool {
-        self.defender_active() || self.defender_summary.is_some()
-    }
-
     pub(in crate::iced_ui) fn cancel_defender_scan(&mut self) {
         if let Some(cancel) = &self.defender_cancel {
             cancel.store(true, AtomicOrdering::Relaxed);
         }
     }
 
-    pub(in crate::iced_ui) fn close_defender_panel(&mut self) {
+    pub(in crate::iced_ui) fn close_defender_panel(&mut self) -> Task<Message> {
         self.cancel_defender_scan();
         self.defender_progress = None;
         self.defender_summary = None;
         self.defender_rx = None;
         self.defender_cancel = None;
+        self.defender_threat_remediation_pending = false;
+        self.defender_threat_remediation_message = None;
+        let close_scan = self
+            .defender_window_id
+            .take()
+            .map(window::close)
+            .unwrap_or_else(Task::none);
+        let close_threats = self
+            .defender_threats_window_id
+            .take()
+            .map(window::close)
+            .unwrap_or_else(Task::none);
+        Task::batch([close_scan, close_threats])
     }
 
-    pub(in crate::iced_ui) fn poll_defender_messages(&mut self) {
+    pub(in crate::iced_ui) fn ensure_defender_window_task(&mut self) -> Task<Message> {
+        if let Some(id) = self.defender_window_id {
+            return Task::batch([
+                self.sync_defender_window_size_task(),
+                window::minimize(id, false),
+                window::gain_focus(id),
+            ]);
+        }
+        let (id, task) = window::open(defender_window_settings(self.defender_window_size()));
+        self.defender_window_id = Some(id);
+        task.map(Message::DefenderWindowOpened)
+    }
+
+    pub(in crate::iced_ui) fn defender_window_size(&self) -> Size {
+        let detail_lines = self
+            .defender_summary
+            .as_ref()
+            .map(|summary| usize::from(summary.error.is_some()))
+            .unwrap_or_default();
+        defender_window_size_for_detail_lines(detail_lines)
+    }
+
+    pub(in crate::iced_ui) fn sync_defender_window_size_task(&mut self) -> Task<Message> {
+        self.defender_window_id
+            .map(|id| sync_fixed_progress_window_size_task(id, self.defender_window_size()))
+            .unwrap_or_else(Task::none)
+    }
+
+    pub(in crate::iced_ui) fn ensure_defender_threats_window_task(&mut self) -> Task<Message> {
+        let threat_count = self
+            .defender_summary
+            .as_ref()
+            .map(|summary| summary.threats.len())
+            .unwrap_or_default();
+        let close_scan = self
+            .defender_window_id
+            .take()
+            .map(window::close)
+            .unwrap_or_else(Task::none);
+        if let Some(id) = self.defender_threats_window_id {
+            return Task::batch([
+                close_scan,
+                window::minimize(id, false),
+                window::gain_focus(id),
+            ]);
+        }
+        let (id, task) = window::open(defender_threats_window_settings(threat_count));
+        self.defender_threats_window_id = Some(id);
+        Task::batch([close_scan, task.map(Message::DefenderThreatsWindowOpened)])
+    }
+
+    pub(in crate::iced_ui) fn remediate_defender_threats_task(&mut self) -> Task<Message> {
+        if self.defender_threat_remediation_pending {
+            return Task::none();
+        }
+        let mut paths = self
+            .defender_summary
+            .as_ref()
+            .map(|summary| {
+                let detected = summary
+                    .threats
+                    .iter()
+                    .filter_map(|threat| threat.path.clone())
+                    .collect::<Vec<_>>();
+                if detected.is_empty() {
+                    summary.paths.clone()
+                } else {
+                    detected
+                }
+            })
+            .unwrap_or_default();
+        paths.sort();
+        paths.dedup();
+        if paths.is_empty() {
+            self.defender_threat_remediation_message = Some((
+                self.localized(
+                    "No se encontró una ruta para que Defender la procese.",
+                    "No path was available for Defender to remediate.",
+                )
+                .to_owned(),
+                true,
+            ));
+            return Task::none();
+        }
+
+        self.defender_threat_remediation_pending = true;
+        self.defender_threat_remediation_message = None;
+        #[cfg(target_os = "windows")]
+        {
+            Task::perform(
+                run_blocking_file_operation(move || {
+                    shell::remediate_paths_with_windows_defender(&paths)
+                }),
+                |result| {
+                    Message::DefenderThreatRemediationFinished(
+                        result.map_err(|error| error.to_string()),
+                    )
+                },
+            )
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.defender_threat_remediation_pending = false;
+            self.defender_threat_remediation_message = Some((
+                self.localized(
+                    "Microsoft Defender solo está disponible en Windows.",
+                    "Microsoft Defender is only available on Windows.",
+                )
+                .to_owned(),
+                true,
+            ));
+            Task::none()
+        }
+    }
+
+    pub(in crate::iced_ui) fn poll_defender_messages(&mut self) -> Task<Message> {
         let mut finished = false;
         while let Some(message) = self
             .defender_rx
@@ -278,37 +409,15 @@ impl BExplorerIced {
         if finished {
             self.defender_rx = None;
             self.defender_cancel = None;
+            if self
+                .defender_summary
+                .as_ref()
+                .is_some_and(|summary| !summary.threats.is_empty())
+            {
+                return self.ensure_defender_threats_window_task();
+            }
         }
-    }
-
-    pub(in crate::iced_ui) fn run_defender_action(
-        &mut self,
-        action: ElevatedDefenderAction,
-        success: &'static str,
-    ) -> Task<Message> {
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = (action, success);
-            self.pane_mut(self.focused_pane()).status =
-                "Microsoft Defender solo está disponible en Windows".into();
-            Task::none()
-        }
-
-        #[cfg(target_os = "windows")]
-        Task::perform(
-            run_blocking_file_operation(move || {
-                defender::run_elevated_defender_action(&action)?;
-                Ok(success.to_owned())
-            }),
-            Message::DefenderActionFinished,
-        )
-    }
-
-    pub(in crate::iced_ui) fn defender_exclusion_paths(&self) -> Vec<PathBuf> {
-        self.defender_summary
-            .as_ref()
-            .map(|summary| summary.paths.clone())
-            .unwrap_or_default()
+        Task::none()
     }
 }
 

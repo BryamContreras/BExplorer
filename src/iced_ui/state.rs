@@ -13,6 +13,8 @@ enum ScrollbarAxis {
 #[derive(Clone, Debug)]
 enum Message {
     Loaded(PaneId, u64, Result<Vec<FileEntry>, String>),
+    NetworkDiscoveryEntries(PaneId, u64, Vec<FileEntry>),
+    NetworkDiscoveryAddresses(PaneId, u64, Vec<String>),
     SidebarStorageLoaded(Result<Vec<FileEntry>, String>),
     StorageDevicesChanged,
     RefreshStorageAfterDeviceChange,
@@ -75,6 +77,15 @@ enum Message {
     ShowArchivePasswordConfirmation(bool),
     ConfirmArchiveDialog,
     CancelArchiveDialog,
+    FormatVolumeLabelChanged(String),
+    SetFormatFileSystem(String),
+    SetFormatAllocationUnitSize(String),
+    ToggleFormatQuick,
+    ToggleFormatEraseConfirmation,
+    ConfirmFormatDialog,
+    CancelFormatDialog,
+    FormatFinished(PaneId, PathBuf, Result<(), String>),
+    DismissErrorDialog,
     CancelArchive(u64),
     TrashFinished(PaneId, Vec<PathBuf>, Result<operations::TrashDeleteOutcome, String>),
     UndoLastAction,
@@ -149,11 +160,9 @@ enum Message {
     DriveEjected(PaneId, PathBuf, Result<(), String>),
     CancelDefenderScan,
     CloseDefenderPanel,
-    RemoveDefenderThreats,
-    ExcludeDefenderPaths,
+    RemediateDefenderThreats,
+    DefenderThreatRemediationFinished(Result<usize, String>),
     OpenWindowsSecurity,
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    DefenderActionFinished(Result<String, String>),
     PortableClipboardPrepared(PaneId, Result<Vec<PathBuf>, String>),
     PortableOpenPrepared(PaneId, Result<PathBuf, String>),
     PortableDeleteFinished(PaneId, Result<usize, String>),
@@ -176,6 +185,8 @@ enum Message {
     MainWindowOpened(window::Id),
     TransferWindowOpened(window::Id),
     ArchiveWindowOpened(window::Id),
+    DefenderWindowOpened(window::Id),
+    DefenderThreatsWindowOpened(window::Id),
     ReopenTransferWindow(window::Id, Option<Point>),
     ReopenArchiveWindow(window::Id, Option<Point>),
     WindowClosed(window::Id),
@@ -184,6 +195,10 @@ enum Message {
     TransferWindowMinimize,
     ArchiveWindowDrag,
     ArchiveWindowMinimize,
+    DefenderWindowDrag,
+    DefenderWindowMinimize,
+    DefenderThreatsWindowDrag,
+    DefenderThreatsWindowMinimize,
     ToggleTransferPause(u64),
     CancelTransfer(u64),
     ToggleSettings,
@@ -255,6 +270,8 @@ enum PopupBackdropTarget {
     Rename(RenameState),
     PermanentDelete(PendingPermanentDelete),
     Archive(ArchiveDialogState),
+    Format(FormatDialogState),
+    Error(ErrorDialogState),
     TransferConflict(PendingTransferConflict),
 }
 
@@ -265,6 +282,8 @@ enum PendingPopupClose {
     Settings,
     ColorPicker,
     ArchiveDialog,
+    FormatDialog,
+    ErrorDialog,
     PermanentDelete,
     TransferConflict,
 }
@@ -336,6 +355,7 @@ enum ContextCommand {
     DeletePermanent,
     MountDiskImage,
     EjectDrive,
+    FormatDrive,
     ScanWithDefender,
 }
 
@@ -727,6 +747,26 @@ struct ArchiveDialogState {
     show_password_confirmation: bool,
 }
 
+#[derive(Clone, Debug)]
+struct FormatDialogState {
+    pane: PaneId,
+    path: PathBuf,
+    display_name: String,
+    capacity: Option<u64>,
+    file_systems: Vec<String>,
+    file_system: String,
+    volume_label: String,
+    allocation_unit_size: String,
+    quick_format: bool,
+    confirm_erase: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ErrorDialogState {
+    title: String,
+    message: String,
+}
+
 struct ActiveArchiveState {
     job: ArchiveJob,
     pane: PaneId,
@@ -856,9 +896,12 @@ struct PaneState {
     sort_column: TableColumn,
     sort_ascending: bool,
     loading: bool,
+    formatting: bool,
+    formatting_path: Option<PathBuf>,
     mounting_disk_image: bool,
     status: String,
     request_id: u64,
+    network_discovery_pending: usize,
     search_cancel: Option<Arc<AtomicBool>>,
     search_receiver: Option<Receiver<crate::fs::search::SearchEvent>>,
     recursive_search_active: bool,
@@ -894,9 +937,12 @@ impl Default for PaneState {
             sort_column: TableColumn::Name,
             sort_ascending: true,
             loading: false,
+            formatting: false,
+            formatting_path: None,
             mounting_disk_image: false,
             status: String::from("0 elements"),
             request_id: 0,
+            network_discovery_pending: 0,
             search_cancel: None,
             search_receiver: None,
             recursive_search_active: false,

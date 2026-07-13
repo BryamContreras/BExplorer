@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
@@ -169,26 +171,67 @@ pub(super) fn suppress_file_explorer_windows_at(path: &Path) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 pub(super) fn eject_drive(path: &Path) -> Result<()> {
-    let status = Command::new("powershell.exe")
+    let output = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            "& { $DriveRoot = $env:BEXPLORER_DRIVE_ROOT; if ([string]::IsNullOrWhiteSpace($DriveRoot)) { exit 2 }; $drive = $DriveRoot.TrimEnd('\\'); $shell = New-Object -ComObject Shell.Application; $item = $shell.Namespace(17).ParseName($drive); if (-not $item) { $item = $shell.Namespace(17).ParseName($DriveRoot) }; if (-not $item) { throw \"Drive not found: $DriveRoot\" }; $item.InvokeVerb('Eject'); Start-Sleep -Milliseconds 700 }",
+            r#"
+& {
+    $DriveRoot = $env:BEXPLORER_DRIVE_ROOT
+    if ([string]::IsNullOrWhiteSpace($DriveRoot)) { exit 2 }
+
+    $DriveRoot = $DriveRoot.Replace('/', '\').TrimEnd([char]92) + '\'
+    $drive = $DriveRoot.TrimEnd([char]92)
+    $shell = New-Object -ComObject Shell.Application
+    $item = $shell.Namespace(17).ParseName($drive)
+    if (-not $item) { $item = $shell.Namespace(17).ParseName($DriveRoot) }
+    if (-not $item) { throw "Drive not found: $DriveRoot" }
+
+    # Shell verbs are localized. Invoking the English text directly succeeds
+    # on some systems without doing anything on Spanish Windows, so find the
+    # real Eject verb exposed by this volume and invoke that COM verb itself.
+    $ejectVerb = @($item.Verbs()) | Where-Object {
+        $name = (([string]$_.Name).Replace('&', '').Replace('…', '').Trim())
+        $name -match '^(?i:eject|expulsar|quitar|safely remove)$'
+    } | Select-Object -First 1
+    if (-not $ejectVerb) {
+        throw "This drive does not expose an eject command in Windows"
+    }
+    $ejectVerb.DoIt()
+
+    # The Shell call is asynchronous. Report success only after Windows has
+    # actually removed the drive letter, instead of showing a false success.
+    for ($attempt = 0; $attempt -lt 32; $attempt++) {
+        Start-Sleep -Milliseconds 250
+        if (-not (Test-Path -LiteralPath $DriveRoot)) { exit 0 }
+    }
+    throw "Windows did not remove $DriveRoot after requesting eject"
+}
+"#,
         ])
         .env("BEXPLORER_DRIVE_ROOT", path)
-        .status()
+        .creation_flags(0x0800_0000)
+        .output()
         .map_err(|error| BExplorerError::Shell(error.to_string()))?;
 
-    if status.success() {
+    if output.status.success() {
         Ok(())
     } else {
-        Err(BExplorerError::Shell(format!(
-            "Could not eject drive {}",
-            path.display()
-        )))
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if detail.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        } else {
+            detail
+        };
+        let message = if detail.is_empty() {
+            format!("Could not eject drive {}", path.display())
+        } else {
+            format!("Could not eject drive {}: {detail}", path.display())
+        };
+        Err(BExplorerError::Shell(message))
     }
 }
 

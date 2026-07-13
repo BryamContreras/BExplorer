@@ -80,7 +80,7 @@ pub fn portable_devices() -> Vec<PortableDeviceInfo> {
                 CoTaskMemFree(Some(id.0 as *const _));
             }
 
-            devices.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            devices.sort_by_key(|device| device.name.to_lowercase());
             Ok(devices)
         })()
         .unwrap_or_else(|error| {
@@ -202,7 +202,7 @@ pub fn portable_device_objects(device_id: &str, parent_object_id: &str) -> Vec<P
             }
 
             let _ = device.Close();
-            objects.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+            objects.sort_by_key(|object| object.name.to_lowercase());
             Ok(objects)
         })()
         .unwrap_or_else(|error| {
@@ -1212,7 +1212,7 @@ fn portable_objects_from_content(
             }
         }
 
-        objects.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
+        objects.sort_by_key(|object| object.name.to_lowercase());
         Ok(objects)
     }
 }

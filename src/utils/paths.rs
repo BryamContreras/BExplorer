@@ -24,6 +24,14 @@ pub fn session_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("session.json"))
 }
 
+pub fn storage_cache_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join("storage-cache.json"))
+}
+
+pub fn network_cache_file() -> Result<PathBuf> {
+    Ok(config_dir()?.join("network-cache.json"))
+}
+
 pub fn log_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("bexplorer.log"))
 }

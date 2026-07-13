@@ -133,7 +133,7 @@ pub fn start_external_file_drag(
     {
         let _ = (display, window);
         windows::release_mouse_capture();
-        return windows::start_file_drag(paths).map(|_| ());
+        windows::start_file_drag(paths).map(|_| ())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -191,7 +191,7 @@ pub use windows::PortableDeviceSession;
 pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        return path.exists().then(|| path.to_path_buf());
+        path.exists().then(|| path.to_path_buf())
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -201,7 +201,7 @@ pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
 
     #[cfg(target_os = "macos")]
     {
-        return macos::mounted_network_path(path);
+        macos::mounted_network_path(path)
     }
 
     #[cfg(not(any(target_os = "windows", unix)))]
@@ -215,9 +215,9 @@ pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
 pub fn apply_window_corners(
     window: &WindowHandle<'_>,
     _display: &DisplayHandle<'_>,
-    _radius: u32,
+    radius: u32,
 ) -> Result<()> {
-    windows::apply_small_window_corners(window)
+    windows::apply_small_window_corners(window, radius)
 }
 
 pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
@@ -237,7 +237,10 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
             VibrancyMode::None => Ok(false),
             VibrancyMode::Mica | VibrancyMode::Blur => Ok(false),
             VibrancyMode::Acrylic => {
-                let alpha = (intensity.clamp(15, 90) as u16 * 2).min(220) as u8;
+                // Keep the native tint a touch lighter than the configured
+                // intensity so the acrylic backdrop is more noticeable while
+                // retaining enough contrast for the explorer content.
+                let alpha = (intensity.clamp(15, 100) as u16 * 9 / 5) as u8;
                 let color = if dark {
                     (24, 29, 32, alpha)
                 } else {
@@ -265,7 +268,7 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
                 window,
                 NSVisualEffectMaterial::WindowBackground,
                 Some(NSVisualEffectState::FollowsWindowActiveState),
-                Some(f64::from(intensity.clamp(15, 90)) / 7.0),
+                Some(f64::from(intensity.clamp(15, 100)) / 7.0),
             )
             .map(|_| true)
             .map_err(|error| crate::utils::errors::BExplorerError::Operation(error.to_string())),

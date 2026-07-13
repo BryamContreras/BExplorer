@@ -199,15 +199,17 @@ pub enum SidebarSection {
     Recents,
     Favorites,
     Storage,
+    Portable,
     Network,
     Places,
 }
 
 impl SidebarSection {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Favorites,
         Self::Places,
         Self::Storage,
+        Self::Portable,
         Self::Network,
         Self::Recents,
     ];
@@ -221,6 +223,7 @@ pub struct AppConfig {
     pub font_size: f32,
     pub accent_color: [u8; 3],
     pub window_size: [f32; 2],
+    pub window_maximized: bool,
     pub favorites: Vec<PathBuf>,
     pub recent_paths: Vec<PathBuf>,
     pub show_hidden: bool,
@@ -259,6 +262,7 @@ impl Default for AppConfig {
             font_size: 12.5,
             accent_color: [3, 117, 172],
             window_size: [1280.0, 760.0],
+            window_maximized: false,
             favorites: Vec::new(),
             recent_paths: Vec::new(),
             show_hidden: true,
@@ -343,7 +347,14 @@ impl AppConfig {
             SidebarSection::Network,
             SidebarSection::Places,
         ];
-        if self.sidebar_order == legacy_default {
+        let previous_default = vec![
+            SidebarSection::Favorites,
+            SidebarSection::Places,
+            SidebarSection::Storage,
+            SidebarSection::Network,
+            SidebarSection::Recents,
+        ];
+        if self.sidebar_order == legacy_default || self.sidebar_order == previous_default {
             self.sidebar_order = SidebarSection::ALL.to_vec();
             return;
         }
@@ -384,6 +395,7 @@ mod tests {
         assert_eq!(config.theme, ThemePreference::System);
         assert_eq!(config.accent_color, [3, 117, 172]);
         assert_eq!(config.vibrancy, VibrancyMode::None);
+        assert!(!config.window_maximized);
         assert!(config.show_extensions);
         assert!(config.show_hidden);
     }

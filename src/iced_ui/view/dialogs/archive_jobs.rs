@@ -396,25 +396,9 @@ impl BExplorerIced {
 
     pub(in crate::iced_ui) fn archive_window_view(&self, palette: Palette) -> Element<'_, Message> {
         let items = self.archive_items();
-        let panel_height = progress_window_size_for_item_count(items.len()).height;
+        let panel_height = transfer_window_size_for_item_count(items.len()).height;
         let inner_height = (panel_height - WINDOW_BORDER_WIDTH * 2.0).max(0.0);
         let body_height = (inner_height - TRANSFER_WINDOW_TITLE_HEIGHT).max(0.0);
-        let active_count = self.active_archives.len();
-        let summary = if active_count == 1 {
-            self.localized("1 compresión activa", "1 active compression")
-                .to_owned()
-        } else if active_count == 0 {
-            self.localized("Sin compresiones activas", "No active compressions")
-                .to_owned()
-        } else {
-            if self.is_spanish() {
-                format!("{active_count} compresiones activas")
-            } else {
-                format!("{active_count} active compressions")
-            }
-        };
-        let overall = self.archive_progress_fraction().unwrap_or(0.0);
-
         let title_drag_area = mouse_area(
             container(
                 text(self.localized("Compresiones", "Compressions"))
@@ -442,34 +426,15 @@ impl BExplorerIced {
                 .background(palette.overlay_title_bg)
                 .border(border::rounded(border::top(WINDOW_RADIUS - 1.0)))
         });
-        let header = row![
-            text(self.localized("Compresiones", "Compressions"))
-                .size(self.font_size() + 2.0)
-                .color(palette.text)
-                .width(Length::Fill),
-            text(summary)
-                .size(self.font_size())
-                .color(palette.muted_text),
-        ]
-        .spacing(8)
-        .height(TRANSFER_WINDOW_HEADER_HEIGHT)
-        .align_y(Alignment::Center);
         let content: Element<'_, Message> = if items.is_empty() {
-            column![
-                container(header).width(Length::Fill).padding([
-                    TRANSFER_WINDOW_HEADER_PADDING_Y,
-                    TRANSFER_WINDOW_HEADER_PADDING_X,
-                ]),
-                container(
-                    text(self.localized("No hay compresiones", "No compressions"))
-                        .size(self.font_size())
-                        .color(palette.muted_text)
-                )
-                .center(Length::Fill)
-                .width(Length::Fill)
-                .height(Length::Fill),
-            ]
-            .spacing(12)
+            container(
+                text(self.localized("No hay compresiones", "No compressions"))
+                    .size(self.font_size())
+                    .color(palette.muted_text),
+            )
+            .center(Length::Fill)
+            .width(Length::Fill)
+            .height(Length::Fill)
             .into()
         } else {
             let item_count = items.len();
@@ -488,25 +453,15 @@ impl BExplorerIced {
             .height(Length::Fixed(visible_height))
             .into();
             column![
-                container(
-                    column![
-                        header,
-                        transfer_progress_bar(overall, palette, TRANSFER_WINDOW_OVERALL_BAR_HEIGHT),
-                    ]
-                    .spacing(TRANSFER_WINDOW_CONTENT_GAP)
-                )
-                .width(Length::Fill)
-                .padding([
-                    TRANSFER_WINDOW_HEADER_PADDING_Y,
-                    TRANSFER_WINDOW_HEADER_PADDING_X,
-                ]),
+                Space::new().height(TRANSFER_WINDOW_CARD_TOP_GAP),
                 container(cards)
                     .width(Length::Fill)
                     .padding([0.0, TRANSFER_WINDOW_CARD_PADDING_X])
                     .height(Length::Fixed(visible_height)),
                 Space::new().height(TRANSFER_WINDOW_CARD_BOTTOM_PADDING),
             ]
-            .spacing(TRANSFER_WINDOW_CARD_TOP_GAP)
+            .spacing(0)
+            .height(Length::Fixed(body_height))
             .into()
         };
         let body = container(content)

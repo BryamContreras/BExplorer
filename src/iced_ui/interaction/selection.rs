@@ -69,6 +69,66 @@ impl BExplorerIced {
         state.status = format!("Selected {count} item(s)");
     }
 
+    pub(in crate::iced_ui) fn select_entry_starting_with(
+        &mut self,
+        pane: PaneId,
+        character: &str,
+    ) -> Task<Message> {
+        if character.chars().count() != 1
+            || !character.chars().all(char::is_alphanumeric)
+            || self.settings_open
+            || self.shortcuts_open
+            || self.address_edit.is_some()
+            || self.rename_dialog.is_some()
+            || self.archive_dialog.is_some()
+            || self.format_dialog.is_some()
+            || self.error_dialog.is_some()
+            || self.permanent_delete_dialog.is_some()
+            || self.elevated_transfer_dialog.is_some()
+            || self.elevated_delete_dialog.is_some()
+            || self.elevated_file_action_dialog.is_some()
+            || self.context_menu.is_some()
+        {
+            return Task::none();
+        }
+
+        let displayed = self.displayed_entry_indices(pane);
+        let names = displayed
+            .iter()
+            .filter_map(|index| self.pane(pane).entries.get(*index))
+            .map(|entry| self.entry_display_name(entry))
+            .collect::<Vec<_>>();
+        let selected_position = self
+            .pane(pane)
+            .selection_anchor
+            .and_then(|anchor| displayed.iter().position(|index| *index == anchor));
+        let Some(position) = next_matching_name_position(&names, selected_position, character)
+        else {
+            return Task::none();
+        };
+        let Some(index) = displayed.get(position).copied() else {
+            return Task::none();
+        };
+
+        self.select_single(pane, index);
+        self.last_entry_click = None;
+        let relative_offset = if names.len() > 1 {
+            position as f32 / (names.len() - 1) as f32
+        } else {
+            0.0
+        };
+        Task::batch([
+            self.queue_selected_preview(pane),
+            iced::widget::operation::snap_to(
+                pane_scroll_id(pane),
+                iced::widget::operation::RelativeOffset {
+                    x: 0.0,
+                    y: relative_offset,
+                },
+            ),
+        ])
+    }
+
     pub(in crate::iced_ui) fn rename_selected(&mut self, pane: PaneId) -> Task<Message> {
         let selected: Vec<_> = self.pane(pane).selected.iter().cloned().collect();
         if selected.is_empty() {
@@ -143,8 +203,7 @@ impl BExplorerIced {
             KeyboardShortcut::Rename => self.rename_selected(pane),
             KeyboardShortcut::EditAddress => self.update(Message::BeginAddressEdit(pane)),
             KeyboardShortcut::Properties => {
-                self.context_properties(pane, ContextTarget::Background);
-                Task::none()
+                self.context_properties(pane, ContextTarget::Background)
             }
             KeyboardShortcut::GoUp => self.update(Message::Up(pane)),
             KeyboardShortcut::GoBack => self.update(Message::Back(pane)),
@@ -184,5 +243,39 @@ impl BExplorerIced {
     ) -> Task<Message> {
         self.focus_pane(pane);
         self.context_delete(pane, ContextTarget::Background, permanent)
+    }
+}
+
+fn next_matching_name_position(
+    names: &[String],
+    selected_position: Option<usize>,
+    character: &str,
+) -> Option<usize> {
+    let prefix = character.to_lowercase();
+    let last_position = selected_position
+        .filter(|position| *position < names.len())
+        .unwrap_or_else(|| names.len().saturating_sub(1));
+    (1..=names.len())
+        .map(|offset| (last_position + offset) % names.len())
+        .find(|position| names[*position].to_lowercase().starts_with(&prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_matching_name_position;
+
+    #[test]
+    fn name_navigation_cycles_through_matching_entries() {
+        let names = vec![
+            "Archivo.txt".into(),
+            "Borrador.txt".into(),
+            "Biblioteca".into(),
+            "Documento.txt".into(),
+        ];
+
+        assert_eq!(next_matching_name_position(&names, Some(1), "b"), Some(2));
+        assert_eq!(next_matching_name_position(&names, Some(2), "B"), Some(1));
+        assert_eq!(next_matching_name_position(&names, None, "d"), Some(3));
+        assert_eq!(next_matching_name_position(&names, Some(3), "z"), None);
     }
 }

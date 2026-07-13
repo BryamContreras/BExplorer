@@ -11,9 +11,10 @@ pub(in crate::iced_ui) fn app_window_icon() -> Option<window::Icon> {
     window::icon::from_rgba(icon.into_raw(), width, height).ok()
 }
 
-pub(in crate::iced_ui) fn main_window_settings(size: Size) -> window::Settings {
+pub(in crate::iced_ui) fn main_window_settings(size: Size, maximized: bool) -> window::Settings {
     window::Settings {
         size: Size::new(size.width.max(920.0), size.height.max(560.0)),
+        maximized,
         min_size: Some(Size::new(920.0, 560.0)),
         decorations: false,
         resizable: true,
@@ -37,11 +38,14 @@ pub(in crate::iced_ui) fn progress_visible_card_list_height(item_count: usize) -
     progress_card_list_height(item_count.min(TRANSFER_WINDOW_VISIBLE_CARD_LIMIT as usize))
 }
 
-pub(in crate::iced_ui) fn progress_window_size_for_item_count(item_count: usize) -> Size {
+pub(in crate::iced_ui) fn transfer_window_size_for_item_count(item_count: usize) -> Size {
     Size::new(
         TRANSFER_WINDOW_WIDTH,
-        (TRANSFER_WINDOW_CHROME_HEIGHT + progress_visible_card_list_height(item_count))
-            .clamp(TRANSFER_WINDOW_MIN_HEIGHT, TRANSFER_WINDOW_MAX_HEIGHT),
+        (TRANSFER_WINDOW_CARD_ONLY_CHROME_HEIGHT + progress_visible_card_list_height(item_count))
+            .clamp(
+                TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT,
+                TRANSFER_WINDOW_CARD_ONLY_MAX_HEIGHT,
+            ),
     )
 }
 
@@ -89,6 +93,31 @@ pub(in crate::iced_ui) fn archive_window_settings_at(
     position: Option<Point>,
 ) -> window::Settings {
     fixed_progress_window_settings(size, position)
+}
+
+pub(in crate::iced_ui) fn defender_window_size_for_detail_lines(detail_lines: usize) -> Size {
+    let height = (DEFENDER_WINDOW_BASE_HEIGHT
+        + detail_lines as f32 * DEFENDER_WINDOW_DETAIL_LINE_HEIGHT)
+        .min(DEFENDER_WINDOW_MAX_HEIGHT);
+    Size::new(TRANSFER_WINDOW_WIDTH, height)
+}
+
+pub(in crate::iced_ui) fn defender_window_settings(size: Size) -> window::Settings {
+    fixed_progress_window_settings(size, None)
+}
+
+pub(in crate::iced_ui) fn defender_threats_window_size(threat_count: usize) -> Size {
+    let visible_count = threat_count.clamp(1, DEFENDER_THREAT_WINDOW_VISIBLE_CARD_LIMIT);
+    let height = DEFENDER_THREAT_WINDOW_BASE_HEIGHT
+        + (visible_count.saturating_sub(1) as f32)
+            * (DEFENDER_THREAT_CARD_HEIGHT + DEFENDER_THREAT_CARD_GAP);
+    Size::new(DEFENDER_THREAT_WINDOW_WIDTH, height)
+}
+
+pub(in crate::iced_ui) fn defender_threats_window_settings(
+    threat_count: usize,
+) -> window::Settings {
+    fixed_progress_window_settings(defender_threats_window_size(threat_count), None)
 }
 
 pub(in crate::iced_ui) fn sync_fixed_progress_window_size_task(

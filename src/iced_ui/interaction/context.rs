@@ -338,6 +338,14 @@ impl BExplorerIced {
                 self.archive_dialog = None;
                 self.popup_backdrop = None;
             }
+            PendingPopupClose::FormatDialog => {
+                self.format_dialog = None;
+                self.popup_backdrop = None;
+            }
+            PendingPopupClose::ErrorDialog => {
+                self.error_dialog = None;
+                self.popup_backdrop = None;
+            }
             PendingPopupClose::PermanentDelete => {
                 self.permanent_delete_dialog = None;
                 self.popup_backdrop = None;
@@ -407,11 +415,42 @@ impl BExplorerIced {
             PopupBackdropTarget::Archive(dialog) => {
                 self.archive_dialog = Some(dialog);
             }
+            PopupBackdropTarget::Format(dialog) => {
+                self.format_dialog = Some(dialog);
+            }
+            PopupBackdropTarget::Error(dialog) => {
+                self.error_dialog = Some(dialog);
+            }
             PopupBackdropTarget::TransferConflict(dialog) => {
                 self.transfer_conflict_dialog = Some(dialog);
             }
         }
         Task::none()
+    }
+
+    pub(in crate::iced_ui) fn show_error_dialog(
+        &mut self,
+        title: String,
+        message: String,
+    ) -> Task<Message> {
+        self.request_popup_backdrop(PopupBackdropTarget::Error(ErrorDialogState {
+            title,
+            message,
+        }))
+    }
+
+    pub(in crate::iced_ui) fn report_error(
+        &mut self,
+        pane: PaneId,
+        message: impl Into<String>,
+    ) -> Task<Message> {
+        let message = message.into();
+        self.pane_mut(pane).status = message.clone();
+        self.show_error_dialog(
+            self.localized("Se produjo un error", "An error occurred")
+                .to_owned(),
+            message,
+        )
     }
 
     pub(in crate::iced_ui) fn context_menu_window_position(
@@ -459,8 +498,32 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn context_menu_height(&self, menu: &ContextMenuState) -> f32 {
         match menu.target {
             ContextTarget::Background => 218.0,
-            ContextTarget::SidebarDrive(_) => 48.0,
+            ContextTarget::SidebarDrive(_) => {
+                let formatable = self
+                    .context_entry(menu.pane, menu.target)
+                    .is_some_and(|entry| {
+                        entry.kind == EntryKind::Drive
+                            && entry.drive_kind.is_some_and(DriveKind::is_formatable)
+                    });
+                if formatable { 84.0 } else { 48.0 }
+            }
             ContextTarget::Entry(_) => {
+                let drive_entry = self
+                    .context_entry(menu.pane, menu.target)
+                    .is_some_and(|entry| entry.kind == EntryKind::Drive);
+                if drive_entry {
+                    let action_rows = self
+                        .context_entry(menu.pane, menu.target)
+                        .map(|entry| {
+                            usize::from(entry.drive_kind.is_some_and(DriveKind::is_ejectable))
+                                + usize::from(
+                                    entry.kind == EntryKind::Drive
+                                        && entry.drive_kind.is_some_and(DriveKind::is_formatable),
+                                )
+                        })
+                        .unwrap_or(0);
+                    return 128.0 + action_rows as f32 * 36.0;
+                }
                 let has_extract_action =
                     self.context_entry(menu.pane, menu.target)
                         .is_some_and(|entry| {
@@ -479,6 +542,10 @@ impl BExplorerIced {
                     .map(|entry| {
                         usize::from(is_mountable_disk_image_entry(&entry))
                             + usize::from(entry.drive_kind.is_some_and(DriveKind::is_ejectable))
+                            + usize::from(
+                                entry.kind == EntryKind::Drive
+                                    && entry.drive_kind.is_some_and(DriveKind::is_formatable),
+                            )
                             + usize::from(
                                 cfg!(target_os = "windows")
                                     && !explorer::is_virtual_path(&entry.path),
@@ -531,6 +598,23 @@ impl BExplorerIced {
         let Some(menu) = self.context_menu.clone() else {
             return Task::none();
         };
+        let target_is_drive = self
+            .context_entry(menu.pane, menu.target)
+            .is_some_and(|entry| entry.kind == EntryKind::Drive);
+        if target_is_drive
+            && matches!(
+                command,
+                ContextCommand::CompressMenu
+                    | ContextCommand::CompressDialog
+                    | ContextCommand::CompressDefault(_)
+                    | ContextCommand::Copy
+                    | ContextCommand::Cut
+                    | ContextCommand::Delete
+                    | ContextCommand::DeletePermanent
+            )
+        {
+            return Task::none();
+        }
         if command == ContextCommand::CompressMenu {
             self.context_archive_submenu = true;
             self.context_extract_submenu = false;
@@ -559,19 +643,10 @@ impl BExplorerIced {
             ContextCommand::NewMenu => Task::none(),
             ContextCommand::NewFolder => self.update(Message::NewFolder(menu.pane)),
             ContextCommand::NewTextDocument => self.update(Message::NewTextDocument(menu.pane)),
-            ContextCommand::OpenTerminal => {
-                self.context_open_terminal(menu.pane, menu.target);
-                Task::none()
-            }
-            ContextCommand::Properties => {
-                self.context_properties(menu.pane, menu.target);
-                Task::none()
-            }
+            ContextCommand::OpenTerminal => self.context_open_terminal(menu.pane, menu.target),
+            ContextCommand::Properties => self.context_properties(menu.pane, menu.target),
             ContextCommand::Open => self.context_open(menu.pane, menu.target),
-            ContextCommand::OpenWith => {
-                self.context_open_with(menu.pane, menu.target);
-                Task::none()
-            }
+            ContextCommand::OpenWith => self.context_open_with(menu.pane, menu.target),
             ContextCommand::OpenWithMenu => Task::none(),
             ContextCommand::OpenWithApplication(index) => {
                 let Some(entry) = self.context_entry(menu.pane, menu.target) else {
@@ -580,7 +655,7 @@ impl BExplorerIced {
                 let path = entry.path.clone();
                 match shell::open_with_application(&path, index) {
                     Ok(()) => self.pane_mut(menu.pane).status = "Aplicación abierta".into(),
-                    Err(error) => self.pane_mut(menu.pane).status = error.to_string(),
+                    Err(error) => return self.report_error(menu.pane, error.to_string()),
                 }
                 Task::none()
             }
@@ -610,6 +685,7 @@ impl BExplorerIced {
                 };
                 self.eject_drive(menu.pane, entry.path)
             }
+            ContextCommand::FormatDrive => self.context_format_drive(menu.pane, menu.target),
             ContextCommand::ScanWithDefender => {
                 let paths = self.context_paths(menu.pane, menu.target);
                 self.start_defender_scan(menu.pane, paths)

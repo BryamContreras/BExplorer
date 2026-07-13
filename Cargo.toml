@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 arboard = { version = "3", features = ["wayland-data-control"] }
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crc32fast = "1.5"
 directories = "5"

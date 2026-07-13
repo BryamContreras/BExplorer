@@ -300,6 +300,39 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_separates_portable_devices_from_storage_and_keeps_drive_order() {
+        assert!(sidebar_portable_items(&[]).is_empty());
+
+        let mut usb = test_entry("4 (F:)", EntryKind::Drive, None);
+        usb.drive_kind = Some(DriveKind::Usb);
+        let mut local_e = test_entry("Local Disk (E:)", EntryKind::Drive, None);
+        local_e.drive_kind = Some(DriveKind::Local);
+        let mut local_c = test_entry("Local Disk (C:)", EntryKind::Drive, None);
+        local_c.drive_kind = Some(DriveKind::Local);
+        let mut network = test_entry("SISCAT9 (S:)", EntryKind::Drive, None);
+        network.drive_kind = Some(DriveKind::Network);
+        let mut portable = test_entry("Phone", EntryKind::Drive, None);
+        portable.drive_kind = Some(DriveKind::Portable);
+
+        let items =
+            sidebar_storage_items(&[usb, local_e, local_c, network, portable.clone()], true);
+        let labels = items.into_iter().map(|item| item.label).collect::<Vec<_>>();
+        assert_eq!(
+            labels,
+            [
+                "Local Disk (C:)",
+                "Local Disk (E:)",
+                "SISCAT9 (S:)",
+                "4 (F:)",
+            ]
+        );
+
+        let portable_items = sidebar_portable_items(&[portable]);
+        assert_eq!(portable_items.len(), 1);
+        assert_eq!(portable_items[0].label, "Phone");
+    }
+
+    #[test]
     fn network_printers_use_the_printer_fallback_icon() {
         let mut printer = test_entry("Office printer", EntryKind::Drive, None);
         printer.drive_kind = Some(DriveKind::NetworkPrinter);
@@ -307,6 +340,9 @@ mod tests {
 
         printer.drive_kind = Some(DriveKind::NetworkComputer);
         assert_eq!(fallback_icon_label(&printer), "pc");
+
+        printer.drive_kind = Some(DriveKind::Portable);
+        assert_eq!(fallback_icon_label(&printer), "portable");
     }
 
     #[test]
@@ -442,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_window_grows_for_three_cards_then_caps_and_scrolls() {
+    fn card_only_progress_window_grows_for_three_cards_then_caps_and_scrolls() {
         assert_eq!(progress_card_list_height(1), TRANSFER_CARD_HEIGHT);
         assert_eq!(
             progress_card_list_height(2),
@@ -454,42 +490,52 @@ mod tests {
         );
 
         assert_eq!(
-            progress_window_size_for_item_count(1).height,
-            TRANSFER_WINDOW_MIN_HEIGHT
+            transfer_window_size_for_item_count(1).height,
+            TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT
         );
         assert_eq!(
-            progress_window_size_for_item_count(2).height,
-            TRANSFER_WINDOW_MIN_HEIGHT + TRANSFER_CARD_HEIGHT + TRANSFER_CARD_GAP
+            transfer_window_size_for_item_count(2).height,
+            TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT + TRANSFER_CARD_HEIGHT + TRANSFER_CARD_GAP
         );
         assert_eq!(
-            progress_window_size_for_item_count(3).height,
-            TRANSFER_WINDOW_MAX_HEIGHT
+            transfer_window_size_for_item_count(3).height,
+            TRANSFER_WINDOW_CARD_ONLY_MAX_HEIGHT
         );
         assert_eq!(
-            progress_window_size_for_item_count(4).height,
-            TRANSFER_WINDOW_MAX_HEIGHT
+            transfer_window_size_for_item_count(4).height,
+            TRANSFER_WINDOW_CARD_ONLY_MAX_HEIGHT
         );
     }
 
     #[test]
     fn native_progress_windows_are_fixed_size_and_open_at_the_requested_height() {
-        let size = progress_window_size_for_item_count(2);
+        let size = transfer_window_size_for_item_count(2);
         let transfer = transfer_window_settings(size);
         let archive = archive_window_settings(size);
+        let defender_size = defender_window_size_for_detail_lines(2);
+        let defender = defender_window_settings(defender_size);
+        let threats_size = defender_threats_window_size(2);
+        let threats = defender_threats_window_settings(2);
 
         assert_eq!(transfer.size, size);
         assert_eq!(archive.size, size);
+        assert_eq!(defender.size, defender_size);
+        assert_eq!(threats.size, threats_size);
         assert!(!transfer.resizable);
         assert!(!archive.resizable);
+        assert!(!defender.resizable);
+        assert!(!threats.resizable);
         assert_eq!(transfer.min_size, Some(size));
         assert_eq!(transfer.max_size, Some(size));
         assert_eq!(archive.min_size, Some(size));
         assert_eq!(archive.max_size, Some(size));
+        assert_eq!(threats.min_size, Some(threats_size));
+        assert_eq!(threats.max_size, Some(threats_size));
 
         #[cfg(target_os = "linux")]
         {
             assert_eq!(
-                main_window_settings(Size::new(1280.0, 760.0))
+                main_window_settings(Size::new(1280.0, 760.0), false)
                     .platform_specific
                     .application_id,
                 crate::platform::LINUX_APPLICATION_ID
@@ -509,10 +555,12 @@ mod tests {
         assert_eq!(size.height, 256);
         assert_eq!(rgba.len(), 256 * 256 * 4);
         assert!(
-            main_window_settings(Size::new(1200.0, 720.0))
+            main_window_settings(Size::new(1200.0, 720.0), true)
                 .icon
                 .is_some()
         );
+        assert!(main_window_settings(Size::new(1200.0, 720.0), true).maximized);
+        assert!(!main_window_settings(Size::new(1200.0, 720.0), false).maximized);
         assert!(
             transfer_window_settings(Size::new(540.0, 220.0))
                 .icon
@@ -523,13 +571,19 @@ mod tests {
                 .icon
                 .is_some()
         );
+        assert!(
+            defender_window_settings(defender_window_size_for_detail_lines(0))
+                .icon
+                .is_some()
+        );
+        assert!(defender_threats_window_settings(1).icon.is_some());
     }
 
     #[test]
     fn progress_window_retries_after_the_compositor_reports_a_scaled_initial_size() {
-        let expected = progress_window_size_for_item_count(2);
+        let expected = transfer_window_size_for_item_count(2);
         assert!(progress_window_needs_resize(
-            Size::new(expected.width, TRANSFER_WINDOW_MIN_HEIGHT),
+            Size::new(expected.width, TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT),
             expected
         ));
         assert!(!progress_window_needs_resize(expected, expected));

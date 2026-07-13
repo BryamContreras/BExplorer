@@ -24,11 +24,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(exit_code) = fs::operations::try_run_elevated_file_action_helper_from_args() {
         std::process::exit(exit_code);
     }
-    #[cfg(target_os = "windows")]
-    if let Some(exit_code) = fs::defender::try_run_elevated_defender_helper_from_args() {
-        std::process::exit(exit_code);
-    }
-
     iced_ui::run(command_line_path())?;
     Ok(())
 }

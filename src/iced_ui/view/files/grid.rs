@@ -154,8 +154,16 @@ impl BExplorerIced {
             .filter(|dialog| dialog.pane == pane && dialog.path == entry.path);
 
         let content: Element<'_, Message> = if metrics.tile {
-            let text_width = metrics.cell_width - metrics.icon_size - 36.0;
-            let is_this_pc_drive = self.is_this_pc_root(pane) && entry.kind == EntryKind::Drive;
+            let is_portable_drive = self.is_this_pc_root(pane)
+                && entry.kind == EntryKind::Drive
+                && entry.drive_kind == Some(DriveKind::Portable);
+            // Portable devices do not have a capacity bar, so their label can
+            // use the spare horizontal room normally reserved for one.
+            let text_width = metrics.cell_width
+                - metrics.icon_size
+                - if is_portable_drive { 24.0 } else { 36.0 };
+            let is_this_pc_drive =
+                self.is_this_pc_root(pane) && entry.kind == EntryKind::Drive && !is_portable_drive;
             let name_height = if is_this_pc_drive {
                 // Drive labels are a single line above their capacity bar.
                 // Do not retain the regular two-line filename reservation here.
@@ -198,30 +206,48 @@ impl BExplorerIced {
                 .into()
             };
             let metadata: Element<'_, Message> = if is_this_pc_drive {
+                let formatting_drive = self.pane(pane).formatting
+                    && self.pane(pane).formatting_path.as_deref() == Some(entry.path.as_path());
+                let capacity_indicator: Element<'_, Message> = if formatting_drive {
+                    drive_formatting_bar(self.pane(pane).search_progress_phase, palette, selected)
+                } else {
+                    drive_capacity_bar(entry.percent_full.unwrap_or(0.0), palette, selected)
+                };
+                let capacity_label = if formatting_drive {
+                    self.localized("Formateando...", "Formatting...").to_owned()
+                } else {
+                    self.localized_drive_capacity_label(entry)
+                };
                 column![
-                    drive_capacity_bar(entry.percent_full.unwrap_or(0.0), palette, selected),
-                    text(ellipsize_to_width(
-                        &self.localized_drive_capacity_label(entry),
-                        text_width,
-                        font_size
-                    ))
-                    .size(font_size - 0.5)
-                    .color(secondary)
-                    .wrapping(iced::widget::text::Wrapping::None),
+                    capacity_indicator,
+                    text(ellipsize_to_width(&capacity_label, text_width, font_size))
+                        .size(font_size - 0.5)
+                        .color(secondary)
+                        .wrapping(iced::widget::text::Wrapping::None),
                 ]
                 .spacing(4)
                 .width(Length::Fixed(text_width))
                 .into()
             } else {
-                text(ellipsize_to_width(
-                    &self.localized_tile_metadata_label(entry),
-                    text_width,
-                    font_size,
-                ))
-                .size(font_size - 0.5)
-                .color(secondary)
-                .wrapping(iced::widget::text::Wrapping::None)
-                .into()
+                // A portable tile needs a readable device type rather than
+                // its protocol name. It deliberately has enough room for the
+                // complete localized label.
+                let metadata_label = if is_portable_drive {
+                    self.localized("Dispositivo portátil", "Portable device")
+                        .to_owned()
+                } else {
+                    self.localized_tile_metadata_label(entry)
+                };
+                let metadata_label = if is_portable_drive {
+                    metadata_label
+                } else {
+                    ellipsize_to_width(&metadata_label, text_width, font_size)
+                };
+                text(metadata_label)
+                    .size(font_size - 0.5)
+                    .color(secondary)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .into()
             };
             row![
                 self.file_entry_icon(
