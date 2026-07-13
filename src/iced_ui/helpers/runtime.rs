@@ -102,6 +102,7 @@ pub(in crate::iced_ui) fn defender_window_size_for_detail_lines(detail_lines: us
     Size::new(TRANSFER_WINDOW_WIDTH, height)
 }
 
+#[cfg(any(test, target_os = "windows"))]
 pub(in crate::iced_ui) fn defender_window_settings(size: Size) -> window::Settings {
     fixed_progress_window_settings(size, None)
 }

@@ -253,6 +253,7 @@ impl BExplorerIced {
         Task::batch([close_scan, close_threats])
     }
 
+    #[cfg(target_os = "windows")]
     pub(in crate::iced_ui) fn ensure_defender_window_task(&mut self) -> Task<Message> {
         if let Some(id) = self.defender_window_id {
             return Task::batch([

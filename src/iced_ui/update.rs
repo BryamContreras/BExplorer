@@ -2112,6 +2112,7 @@ impl BExplorerIced {
             }
             Message::CloseDefenderPanel => self.close_defender_panel(),
             Message::RemediateDefenderThreats => self.remediate_defender_threats_task(),
+            #[cfg(target_os = "windows")]
             Message::DefenderThreatRemediationFinished(result) => {
                 self.defender_threat_remediation_pending = false;
                 let (message, failed) = match result {
@@ -2767,6 +2768,7 @@ impl BExplorerIced {
                     window::gain_focus(id),
                 ])
             }
+            #[cfg(target_os = "windows")]
             Message::DefenderWindowOpened(id) => {
                 self.defender_window_id = Some(id);
                 Task::batch([

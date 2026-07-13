@@ -33,6 +33,19 @@ pub fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// Replaces the contents of a file that the caller already created.
+///
+/// Elevated helpers use this for their response file. In particular, this
+/// must not set `O_CREAT`: Linux can reject an elevated process opening a
+/// user-owned file in a sticky directory such as `/tmp` when
+/// `fs.protected_regular` is enabled, even though the file already exists.
+pub fn write_precreated(path: &Path, bytes: &[u8]) -> Result<()> {
+    let mut file = OpenOptions::new().write(true).truncate(true).open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok(())
+}
+
 fn temporary_sibling(path: &Path, purpose: &str) -> PathBuf {
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let name = path
@@ -122,5 +135,29 @@ mod tests {
             1
         );
         fs::remove_dir_all(root).expect("cleanup atomic write test directory");
+    }
+
+    #[test]
+    fn precreated_write_never_creates_a_missing_response_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock before unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-precreated-write-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create precreated write test directory");
+        let response = root.join("result.json");
+
+        assert!(write_precreated(&response, b"missing").is_err());
+        fs::File::create(&response).expect("precreate result file");
+        write_precreated(&response, br#"{"Ok":1}"#).expect("write precreated result");
+        assert_eq!(
+            fs::read(&response).expect("read precreated result"),
+            br#"{"Ok":1}"#
+        );
+
+        fs::remove_dir_all(root).expect("cleanup precreated write test directory");
     }
 }
