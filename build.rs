@@ -22,6 +22,7 @@ fn main() {
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/UpdateCallbackConsole.h");
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/OpenCallbackConsole.h");
     println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/ExtractCallbackConsole.h");
+    println!("cargo:rerun-if-changed=vendor/7zip-src/C/MtDec.h");
 
     // `cargo check` does not link the native archive library. This opt-in is
     // useful for validating Windows Rust code from a host without a MinGW C++
@@ -806,32 +807,24 @@ fn build_7zip_lib(compiler: &str) {
     }
 }
 
-/// The cc crate only tracks .cpp timestamps.  If a header changes, the
-/// stale object files that include it are silently reused, leading to
-/// mismatched thread_local / extern declarations.  This function
-/// computes a content hash of every header that is known to carry
-/// C++ `thread_local` declarations and nukes the cc crate's cache
-/// whenever that hash changes, guaranteeing a full recompilation.
+/// The cc crate only tracks source timestamps. If a header changes, stale
+/// objects that include it can be silently reused. Hash the headers patched or
+/// shared by BExplorer's native archive build and invalidate the cache whenever
+/// one changes, guaranteeing a full recompilation.
 fn invalidate_cc_cache_if_headers_changed(out_dir: &std::path::Path, root: &std::path::Path) {
     let tracked = [
-        "PercentPrinter.h",
-        "ConsoleClose.h",
-        "UpdateCallbackConsole.h",
-        "ExtractCallbackConsole.h",
-        "OpenCallbackConsole.h",
+        "vendor/7zip-src/CPP/7zip/UI/Console/PercentPrinter.h",
+        "vendor/7zip-src/CPP/7zip/UI/Console/ConsoleClose.h",
+        "vendor/7zip-src/CPP/7zip/UI/Console/UpdateCallbackConsole.h",
+        "vendor/7zip-src/CPP/7zip/UI/Console/ExtractCallbackConsole.h",
+        "vendor/7zip-src/CPP/7zip/UI/Console/OpenCallbackConsole.h",
+        "vendor/7zip-src/C/MtDec.h",
     ];
     let hash_path = out_dir.join("bfp7z_header_hash.txt");
 
     let mut hasher = DefaultHasher::new();
-    for name in &tracked {
-        let path = root
-            .join("vendor")
-            .join("7zip-src")
-            .join("CPP")
-            .join("7zip")
-            .join("UI")
-            .join("Console")
-            .join(name);
+    for relative_path in &tracked {
+        let path = root.join(relative_path);
         if let Ok(content) = fs::read_to_string(&path) {
             content.hash(&mut hasher);
         }
