@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use std::{ffi::OsStr, ffi::OsString};
 
 use serde::{Deserialize, Serialize};
 
@@ -81,10 +83,16 @@ pub struct TransferProgress {
 /// A completed top-level item and the exact destination chosen for it. The
 /// destination can differ from the source filename when Keep Both resolves a
 /// collision, so callers must use this instead of reconstructing a path.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TransferCompletedRoot {
     pub source: PathBuf,
     pub target: PathBuf,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ElevatedTransferResult {
+    pub completed_files: usize,
+    pub completed_roots: Vec<TransferCompletedRoot>,
 }
 
 #[derive(Debug)]
@@ -126,6 +134,7 @@ pub enum TransferMessage {
     Failed {
         job_id: u64,
         error: String,
+        permission_denied: bool,
     },
     Cancelled {
         job_id: u64,
@@ -198,9 +207,117 @@ pub fn run_transfer(job: TransferJob, tx: Sender<TransferMessage>, control: Tran
             let _ = tx.send(TransferMessage::Failed {
                 job_id: job.id,
                 error: error.to_string(),
+                permission_denied: transfer_error_is_permission_denied(&error),
             });
         }
     }
+}
+
+fn transfer_error_is_permission_denied(error: &BExplorerError) -> bool {
+    match error {
+        BExplorerError::Io(error) => error.kind() == std::io::ErrorKind::PermissionDenied,
+        BExplorerError::Operation(message) | BExplorerError::Shell(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("access is denied")
+                || message.contains("acceso denegado")
+                || message.contains("permission denied")
+                || message.contains("os error 5")
+                || message.contains("0x80070005")
+        }
+        _ => false,
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const ELEVATED_TRANSFER_HELPER_ARG: &str = "--bexplorer-elevated-transfer-helper";
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn run_elevated_transfer(job: &TransferJob) -> Result<ElevatedTransferResult> {
+    let (request_path, result_path) = elevated_transfer_paths();
+    crate::utils::atomic_file::write(&request_path, &serde_json::to_vec(job)?)?;
+    fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&result_path)?;
+    let exit_code = crate::platform::shell::run_elevated_current_exe(&[
+        OsString::from(ELEVATED_TRANSFER_HELPER_ARG),
+        request_path.clone().into_os_string(),
+        result_path.clone().into_os_string(),
+    ]);
+    let _ = fs::remove_file(&request_path);
+    let decoded = fs::read(&result_path).ok().and_then(|bytes| {
+        serde_json::from_slice::<std::result::Result<ElevatedTransferResult, String>>(&bytes).ok()
+    });
+    let _ = fs::remove_file(&result_path);
+    if let Some(result) = decoded {
+        return result.map_err(BExplorerError::Operation);
+    }
+    match exit_code {
+        Ok(code) => Err(BExplorerError::Operation(format!(
+            "Elevated transfer failed with exit code {code}"
+        ))),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn run_elevated_transfer(_job: &TransferJob) -> Result<ElevatedTransferResult> {
+    Err(BExplorerError::Operation(
+        "Elevated transfers are currently available on Windows only".into(),
+    ))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn try_run_elevated_transfer_helper_from_args() -> Option<i32> {
+    let mut args = std::env::args_os();
+    let _exe = args.next();
+    if args.next()?.as_os_str() != OsStr::new(ELEVATED_TRANSFER_HELPER_ARG) {
+        return None;
+    }
+    let request_path = PathBuf::from(args.next()?);
+    let result_path = PathBuf::from(args.next()?);
+    Some(run_elevated_transfer_helper(&request_path, &result_path))
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn run_elevated_transfer_helper(request_path: &Path, result_path: &Path) -> i32 {
+    let result = (|| -> Result<ElevatedTransferResult> {
+        let job: TransferJob = serde_json::from_slice(&fs::read(request_path)?)?;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let outcome = run_transfer_inner(&job, &tx, &TransferControl::new())?;
+        Ok(ElevatedTransferResult {
+            completed_files: outcome.completed_files,
+            completed_roots: outcome.completed_roots,
+        })
+    })();
+    let _ = fs::remove_file(request_path);
+    let serialized: std::result::Result<ElevatedTransferResult, String> =
+        result.map_err(|error| error.to_string());
+    let wrote_result = serde_json::to_vec(&serialized)
+        .ok()
+        .and_then(|bytes| fs::write(result_path, bytes).ok())
+        .is_some();
+    if !wrote_result {
+        2
+    } else if serialized.is_ok() {
+        0
+    } else {
+        1
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn elevated_transfer_paths() -> (PathBuf, PathBuf) {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let base = format!("bexplorer-elevated-transfer-{}-{stamp}", std::process::id());
+    let temp = std::env::temp_dir();
+    (
+        temp.join(format!("{base}.request.json")),
+        temp.join(format!("{base}.result.json")),
+    )
 }
 
 fn run_transfer_inner(
@@ -626,15 +743,16 @@ fn unused_transfer_sibling(target: &Path, purpose: &str) -> PathBuf {
 
 fn sync_copied_path(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.is_file() {
-        fs::File::open(path)?.sync_all()?;
-    } else if metadata.is_dir() {
+    if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
             sync_copied_path(&entry?.path())?;
         }
         #[cfg(unix)]
         fs::File::open(path)?.sync_all()?;
     }
+    // Regular files are already flushed through the writable output handle in
+    // `copy_path`. Reopening one with `File::open` and calling `sync_all` fails
+    // with ERROR_ACCESS_DENIED on Windows because that handle is read-only.
     Ok(())
 }
 
@@ -996,6 +1114,34 @@ mod tests {
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
         assert!(artifacts.is_empty(), "temporary artifacts: {artifacts:?}");
+    }
+
+    #[test]
+    fn permission_denied_errors_are_offered_for_elevation() {
+        let error = BExplorerError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(transfer_error_is_permission_denied(&error));
+        assert!(!transfer_error_is_permission_denied(&BExplorerError::Io(
+            std::io::Error::from(std::io::ErrorKind::NotFound)
+        )));
+    }
+
+    #[test]
+    fn elevated_transfer_results_preserve_completed_targets() {
+        let result = ElevatedTransferResult {
+            completed_files: 1,
+            completed_roots: vec![TransferCompletedRoot {
+                source: PathBuf::from("source.txt"),
+                target: PathBuf::from("destination.txt"),
+            }],
+        };
+        let restored: ElevatedTransferResult =
+            serde_json::from_slice(&serde_json::to_vec(&result).expect("serialize result"))
+                .expect("deserialize result");
+        assert_eq!(restored.completed_files, 1);
+        assert_eq!(
+            restored.completed_roots[0].target,
+            Path::new("destination.txt")
+        );
     }
 
     #[test]

@@ -114,6 +114,90 @@ pub(in crate::iced_ui) fn render_progress_footer(
     .into()
 }
 
+/// Builds a filename label that keeps the search token visible with the same
+/// yellow emphasis used by the Windows file search results. Search matching
+/// itself happens in `fs::search`; this only splits the already displayed name
+/// into normal and highlighted spans.
+pub(in crate::iced_ui) fn highlighted_search_text(
+    query: &str,
+    value: &str,
+    color: Color,
+) -> iced::widget::text::Rich<'static, (), Message> {
+    let query = search_highlight_token(query);
+    let ranges = search_match_ranges(value, &query);
+    let mut spans = Vec::new();
+    let mut cursor = 0;
+
+    for (start, end) in ranges {
+        if cursor < start {
+            spans.push(iced::widget::text::Span::new(value[cursor..start].to_owned()).color(color));
+        }
+        spans.push(
+            iced::widget::text::Span::new(value[start..end].to_owned())
+                .color(Color::from_rgb8(38, 35, 24))
+                .background(Color::from_rgb8(255, 220, 82))
+                .padding([0.0, 1.0]),
+        );
+        cursor = end;
+    }
+
+    if cursor < value.len() {
+        spans.push(iced::widget::text::Span::new(value[cursor..].to_owned()).color(color));
+    }
+    if spans.is_empty() {
+        spans.push(iced::widget::text::Span::new(value.to_owned()).color(color));
+    }
+
+    iced::widget::text::Rich::with_spans(spans)
+}
+
+fn search_highlight_token(query: &str) -> String {
+    let query = query.trim();
+    let lower_query = query.to_lowercase();
+    let query = if lower_query.starts_with("*.*") {
+        &query[3..]
+    } else if lower_query.starts_with("*.") {
+        &query[2..]
+    } else {
+        query
+    };
+    query
+        .chars()
+        .filter(|character| !matches!(character, '*' | '?'))
+        .collect()
+}
+
+fn search_match_ranges(value: &str, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let query = query.to_lowercase().chars().collect::<Vec<_>>();
+    let characters = value.char_indices().collect::<Vec<_>>();
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start + query.len() <= characters.len() {
+        let matches = query.iter().enumerate().all(|(offset, expected)| {
+            characters[start + offset]
+                .1
+                .to_lowercase()
+                .eq(std::iter::once(*expected))
+        });
+        if matches {
+            let range_start = characters[start].0;
+            let range_end = characters
+                .get(start + query.len())
+                .map(|(index, _)| *index)
+                .unwrap_or(value.len());
+            ranges.push((range_start, range_end));
+            start += query.len();
+        } else {
+            start += 1;
+        }
+    }
+    ranges
+}
+
 pub(in crate::iced_ui) fn file_group_header(
     label: String,
     palette: Palette,
@@ -345,8 +429,10 @@ pub(in crate::iced_ui) fn transfer_title(item: &TransferDisplayState) -> &'stati
         TransferState::Cancelled => "Transferencia cancelada",
         TransferState::Failed => "Transferencia fallida",
         TransferState::Copying => match item.kind {
-            TransferKind::Copy => "Copiando",
-            TransferKind::Move => "Moviendo",
+            TransferDisplayKind::Copy => "Copiando",
+            TransferDisplayKind::Move => "Moviendo",
+            TransferDisplayKind::Trash => "Moviendo a la papelera",
+            TransferDisplayKind::PermanentDelete => "Eliminando permanentemente",
         },
     }
 }
@@ -354,7 +440,11 @@ pub(in crate::iced_ui) fn transfer_title(item: &TransferDisplayState) -> &'stati
 pub(in crate::iced_ui) fn transfer_state_text(item: &TransferDisplayState) -> &'static str {
     match item.state {
         TransferState::Pending => "Esperando",
-        TransferState::Copying => "Copiando archivos",
+        TransferState::Copying => match item.kind {
+            TransferDisplayKind::Trash => "Moviendo elementos a la papelera",
+            TransferDisplayKind::PermanentDelete => "Eliminando elementos",
+            _ => "Copiando archivos",
+        },
         TransferState::Paused => "Pausado",
         TransferState::Finished => "Completado",
         TransferState::Cancelled => "Cancelado",
@@ -657,4 +747,25 @@ pub(in crate::iced_ui) fn focus_inline_rename_task(_select_end: usize) -> Task<M
         // only a partial selection after focus was restored.
         iced::widget::operation::select_all(id),
     )
+}
+
+#[cfg(test)]
+mod search_highlight_tests {
+    use super::{search_highlight_token, search_match_ranges};
+
+    #[test]
+    fn search_highlight_strips_extension_wildcards_case_insensitively() {
+        assert_eq!(search_highlight_token("*.DLL"), "DLL");
+        assert_eq!(search_highlight_token("*.*png"), "png");
+        assert_eq!(search_highlight_token("report"), "report");
+    }
+
+    #[test]
+    fn search_highlight_ranges_are_case_insensitive_and_non_overlapping() {
+        assert_eq!(
+            search_match_ranges("Report-report", "report"),
+            vec![(0, 6), (7, 13)]
+        );
+        assert_eq!(search_match_ranges("banana", "ana"), vec![(1, 4)]);
+    }
 }

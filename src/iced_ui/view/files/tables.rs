@@ -128,8 +128,10 @@ impl BExplorerIced {
             TransferState::Cancelled => "Transfer cancelled",
             TransferState::Failed => "Transfer failed",
             TransferState::Copying => match item.kind {
-                TransferKind::Copy => "Copying",
-                TransferKind::Move => "Moving",
+                TransferDisplayKind::Copy => "Copying",
+                TransferDisplayKind::Move => "Moving",
+                TransferDisplayKind::Trash => "Moving to recycle bin",
+                TransferDisplayKind::PermanentDelete => "Deleting permanently",
             },
         }
     }
@@ -143,7 +145,11 @@ impl BExplorerIced {
         }
         match item.state {
             TransferState::Pending => "Waiting",
-            TransferState::Copying => "Copying files",
+            TransferState::Copying => match item.kind {
+                TransferDisplayKind::Trash => "Moving items to recycle bin",
+                TransferDisplayKind::PermanentDelete => "Deleting items",
+                _ => "Copying files",
+            },
             TransferState::Paused => "Paused",
             TransferState::Finished => "Completed",
             TransferState::Cancelled => "Cancelled",
@@ -237,30 +243,46 @@ impl BExplorerIced {
             ));
         }
 
-        let content = scrollable(rows)
-            .id(pane_scroll_id(pane))
-            .direction(scrollable::Direction::Both {
-                vertical: scrollable::Scrollbar::default(),
-                horizontal: scrollable::Scrollbar::default(),
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .on_scroll(move |viewport| {
-                Message::PaneScrolled(
-                    pane,
-                    viewport.relative_offset().y,
-                    viewport.absolute_offset().y,
-                    viewport.content_bounds().height > viewport.bounds().height,
-                )
-            })
-            .style(move |theme, status| {
-                explorer_scrollable_style(
-                    palette,
-                    theme,
-                    status,
-                    self.pane(pane).scrollbar_reveal_progress,
-                )
-            });
+        let scroll_content: Element<'_, Message> = if self.current_modifiers.control() {
+            mouse_area(rows)
+                .on_scroll(move |delta| Message::PaneMouseWheel(pane, delta))
+                .into()
+        } else {
+            rows.into()
+        };
+        let content: Element<'_, Message> = if self.current_modifiers.control() {
+            container(scroll_content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .clip(true)
+                .into()
+        } else {
+            scrollable(scroll_content)
+                .id(pane_scroll_id(pane))
+                .direction(scrollable::Direction::Both {
+                    vertical: scrollable::Scrollbar::default(),
+                    horizontal: scrollable::Scrollbar::default(),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_scroll(move |viewport| {
+                    Message::PaneScrolled(
+                        pane,
+                        viewport.relative_offset().y,
+                        viewport.absolute_offset().y,
+                        viewport.content_bounds().height > viewport.bounds().height,
+                    )
+                })
+                .style(move |theme, status| {
+                    explorer_scrollable_style(
+                        palette,
+                        theme,
+                        status,
+                        self.pane(pane).scrollbar_reveal_progress,
+                    )
+                })
+                .into()
+        };
         let base: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fill)

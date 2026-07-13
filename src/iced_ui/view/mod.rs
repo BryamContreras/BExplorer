@@ -204,6 +204,15 @@ impl BExplorerIced {
         if self.transfer_conflict_dialog.is_some() {
             modal_layers.push(opaque(self.transfer_conflict_modal(popup_palette)));
         }
+        if self.elevated_transfer_dialog.is_some() {
+            modal_layers.push(opaque(self.elevated_transfer_modal(palette)));
+        }
+        if self.elevated_delete_dialog.is_some() {
+            modal_layers.push(opaque(self.elevated_delete_modal(palette)));
+        }
+        if self.elevated_file_action_dialog.is_some() {
+            modal_layers.push(opaque(self.elevated_file_action_modal(palette)));
+        }
         if self.archive_dialog.is_some() {
             modal_layers.push(opaque(self.archive_dialog_modal(popup_palette)));
         }

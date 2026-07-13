@@ -2,6 +2,250 @@ use super::*;
 use iced::widget::{column, row};
 
 impl BExplorerIced {
+    pub(in crate::iced_ui) fn elevated_file_action_modal(
+        &self,
+        palette: Palette,
+    ) -> Element<'_, Message> {
+        let Some(pending) = &self.elevated_file_action_dialog else {
+            return Space::new().into();
+        };
+        let permission = if cfg!(target_os = "linux") {
+            self.localized("permisos de root", "root permission")
+        } else {
+            self.localized("permisos de administrador", "administrator permission")
+        };
+        let action = match &pending.action {
+            operations::ElevatedFileAction::CreateFolder { .. } => {
+                self.localized("crear la carpeta", "create the folder")
+            }
+            operations::ElevatedFileAction::CreateFile { .. } => {
+                self.localized("crear el archivo", "create the file")
+            }
+            operations::ElevatedFileAction::Rename { .. } => {
+                self.localized("renombrar el elemento", "rename the item")
+            }
+        };
+        let authentication = if cfg!(target_os = "linux") {
+            self.localized(
+                "Polkit mostrarÃ¡ el campo de contraseÃ±a seguro del sistema.",
+                "Polkit will show the system's secure password prompt.",
+            )
+        } else {
+            self.localized(
+                "Windows mostrarÃ¡ la confirmaciÃ³n UAC.",
+                "Windows will show the UAC confirmation.",
+            )
+        };
+        let panel = column![
+            text(self.localized("Se requieren permisos", "Permission required"))
+                .size(self.font_size() + 2.0)
+                .color(palette.text),
+            text(format!(
+                "{} {action}: {permission}.",
+                self.localized("Esta acciÃ³n requiere", "This action requires")
+            ))
+            .size(self.font_size())
+            .color(palette.text),
+            text(authentication)
+                .size(self.font_size() - 1.0)
+                .color(palette.muted_text),
+            row![
+                Space::new().width(Length::Fill),
+                Button::new(text(self.localized("Cancelar", "Cancel")).size(self.font_size()))
+                    .padding([7, 14])
+                    .on_press(Message::CancelElevatedFileAction)
+                    .style(move |_, status| dialog_button_style(palette, false, status)),
+                Button::new(
+                    text(self.localized("Conceder permisos", "Grant permission"))
+                        .size(self.font_size())
+                        .color(palette.accent_text),
+                )
+                .padding([7, 14])
+                .on_press(Message::ConfirmElevatedFileAction)
+                .style(move |_, status| dialog_button_style(palette, true, status)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(16)
+        .padding(18);
+        let surface = container(panel)
+            .width(470)
+            .style(move |_| elevated_panel_style(palette));
+        container(surface)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .style(move |_| {
+                container::Style::default().background(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    0.24 * palette.text.a,
+                ))
+            })
+            .into()
+    }
+
+    pub(in crate::iced_ui) fn elevated_delete_modal(
+        &self,
+        palette: Palette,
+    ) -> Element<'_, Message> {
+        let Some(pending) = &self.elevated_delete_dialog else {
+            return Space::new().into();
+        };
+        let permission = if cfg!(target_os = "linux") {
+            self.localized("permisos de root", "root permission")
+        } else {
+            self.localized("permisos de administrador", "administrator permission")
+        };
+        let action = if pending.permanent {
+            self.localized("eliminar permanentemente", "delete permanently")
+        } else {
+            self.localized("enviar a la papelera", "move to trash")
+        };
+        let authentication = if cfg!(target_os = "linux") {
+            self.localized(
+                "Polkit mostrará el campo de contraseña seguro del sistema.",
+                "Polkit will show the system's secure password prompt.",
+            )
+        } else {
+            self.localized(
+                "Windows mostrará la confirmación UAC.",
+                "Windows will show the UAC confirmation.",
+            )
+        };
+        let panel = column![
+            text(self.localized("Se requieren permisos", "Permission required"))
+                .size(self.font_size() + 2.0)
+                .color(palette.text),
+            text(format!(
+                "{} {action}: {permission}.",
+                self.localized("No se pudo", "Could not")
+            ))
+            .size(self.font_size())
+            .color(palette.text),
+            text(authentication)
+                .size(self.font_size() - 1.0)
+                .color(palette.muted_text),
+            row![
+                Space::new().width(Length::Fill),
+                Button::new(text(self.localized("Cancelar", "Cancel")).size(self.font_size()))
+                    .padding([7, 14])
+                    .on_press(Message::CancelElevatedDelete)
+                    .style(move |_, status| dialog_button_style(palette, false, status)),
+                Button::new(
+                    text(self.localized("Conceder permisos", "Grant permission"))
+                        .size(self.font_size())
+                        .color(palette.accent_text),
+                )
+                .padding([7, 14])
+                .on_press(Message::ConfirmElevatedDelete)
+                .style(move |_, status| dialog_button_style(palette, true, status)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(16)
+        .padding(18);
+        let surface = container(panel)
+            .width(470)
+            .style(move |_| elevated_panel_style(palette));
+        container(surface)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .style(move |_| {
+                container::Style::default().background(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    0.24 * palette.text.a,
+                ))
+            })
+            .into()
+    }
+
+    pub(in crate::iced_ui) fn elevated_transfer_modal(
+        &self,
+        palette: Palette,
+    ) -> Element<'_, Message> {
+        let Some(pending) = &self.elevated_transfer_dialog else {
+            return Space::new().into();
+        };
+        let action = match pending.job.kind {
+            TransferKind::Copy => self.localized("copiar", "copy"),
+            TransferKind::Move => self.localized("mover", "move"),
+        };
+        let title = if cfg!(target_os = "linux") {
+            self.localized("Permisos de root", "Root permission")
+        } else {
+            self.localized("Permisos de administrador", "Administrator permission")
+        };
+        let explanation = if cfg!(target_os = "linux") {
+            self.localized(
+                "Esta acción requiere permisos de root. Polkit mostrará el campo de contraseña seguro del sistema.",
+                "This action requires root permission. Polkit will show the system's secure password prompt.",
+            )
+        } else {
+            self.localized(
+                "Esta acción requiere permisos de administrador. Windows mostrará la confirmación UAC.",
+                "This action requires administrator permission. Windows will show the UAC confirmation.",
+            )
+        };
+        let panel = column![
+            text(title).size(self.font_size() + 2.0).color(palette.text),
+            text(format!(
+                "{} {} {} {}",
+                self.localized("No tienes permisos para", "You do not have permission to"),
+                action,
+                self.localized("en", "to"),
+                pending.job.destination.display()
+            ))
+            .size(self.font_size())
+            .color(palette.text),
+            text(explanation)
+                .size(self.font_size() - 1.0)
+                .color(palette.muted_text),
+            row![
+                Space::new().width(Length::Fill),
+                Button::new(text(self.localized("Cancelar", "Cancel")).size(self.font_size()))
+                    .padding([7, 14])
+                    .on_press(Message::CancelElevatedTransfer)
+                    .style(move |_, status| dialog_button_style(palette, false, status)),
+                Button::new(
+                    text(self.localized("Conceder permisos", "Grant permission"))
+                        .size(self.font_size())
+                        .color(palette.accent_text),
+                )
+                .padding([7, 14])
+                .on_press(Message::ConfirmElevatedTransfer)
+                .style(move |_, status| dialog_button_style(palette, true, status)),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        ]
+        .spacing(16)
+        .padding(18);
+
+        let surface = container(panel)
+            .width(480)
+            .style(move |_| elevated_panel_style(palette));
+        container(surface)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill)
+            .style(move |_| {
+                container::Style::default().background(Color::from_rgba8(
+                    0,
+                    0,
+                    0,
+                    0.24 * palette.text.a,
+                ))
+            })
+            .into()
+    }
+
     pub(in crate::iced_ui) fn permanent_delete_modal(
         &self,
         palette: Palette,

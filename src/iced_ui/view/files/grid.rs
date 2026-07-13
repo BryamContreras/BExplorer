@@ -74,24 +74,40 @@ impl BExplorerIced {
             ));
         }
 
-        let content = scrollable(grid)
-            .id(pane_scroll_id(pane))
-            .on_scroll(move |viewport| {
-                Message::PaneScrolled(
-                    pane,
-                    viewport.relative_offset().y,
-                    viewport.absolute_offset().y,
-                    viewport.content_bounds().height > viewport.bounds().height,
-                )
-            })
-            .style(move |theme, status| {
-                explorer_scrollable_style(
-                    palette,
-                    theme,
-                    status,
-                    self.pane(pane).scrollbar_reveal_progress,
-                )
-            });
+        let scroll_content: Element<'_, Message> = if self.current_modifiers.control() {
+            mouse_area(grid)
+                .on_scroll(move |delta| Message::PaneMouseWheel(pane, delta))
+                .into()
+        } else {
+            grid.into()
+        };
+        let content: Element<'_, Message> = if self.current_modifiers.control() {
+            container(scroll_content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .clip(true)
+                .into()
+        } else {
+            scrollable(scroll_content)
+                .id(pane_scroll_id(pane))
+                .on_scroll(move |viewport| {
+                    Message::PaneScrolled(
+                        pane,
+                        viewport.relative_offset().y,
+                        viewport.absolute_offset().y,
+                        viewport.content_bounds().height > viewport.bounds().height,
+                    )
+                })
+                .style(move |theme, status| {
+                    explorer_scrollable_style(
+                        palette,
+                        theme,
+                        status,
+                        self.pane(pane).scrollbar_reveal_progress,
+                    )
+                })
+                .into()
+        };
         let base: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -168,13 +184,13 @@ impl BExplorerIced {
                 }
             } else {
                 container(
-                    text(two_line_ellipsize_to_width(
-                        &display_name,
-                        text_width,
-                        font_size,
-                    ))
+                    highlighted_search_text(
+                        self.pane(pane).search_text.as_str(),
+                        &two_line_ellipsize_to_width(&display_name, text_width, font_size),
+                        color,
+                    )
                     .size(font_size)
-                    .color(color)
+                    .width(Length::Fill)
                     .wrapping(iced::widget::text::Wrapping::None),
                 )
                 .height(name_height)
@@ -238,13 +254,12 @@ impl BExplorerIced {
                 )
             } else {
                 container(
-                    text(two_line_ellipsize_to_width(
-                        &display_name,
-                        label_width,
-                        font_size,
-                    ))
+                    highlighted_search_text(
+                        self.pane(pane).search_text.as_str(),
+                        &two_line_ellipsize_to_width(&display_name, label_width, font_size),
+                        color,
+                    )
                     .size(font_size)
-                    .color(color)
                     .width(Length::Fill)
                     .align_x(Horizontal::Center)
                     .wrapping(iced::widget::text::Wrapping::None),

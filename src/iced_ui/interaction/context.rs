@@ -1,6 +1,40 @@
 use super::*;
 
 impl BExplorerIced {
+    pub(in crate::iced_ui) fn queue_open_with_application_icons(
+        &mut self,
+        pane: PaneId,
+        target: ContextTarget,
+    ) -> Task<Message> {
+        let Some(entry) = self.context_entry(pane, target) else {
+            return Task::none();
+        };
+        let applications = shell::open_with_applications(&entry.path).unwrap_or_default();
+        let mut tasks = Vec::new();
+        for application in applications {
+            let Some(icon_path) = application.icon_path else {
+                continue;
+            };
+            let key = thumbnail_data::native_path_icon_cache_key(
+                &icon_path,
+                false,
+                thumbnail_data::NATIVE_ICON_SIZE,
+            );
+            if self.native_icon_cache.contains_key(&key) {
+                continue;
+            }
+            self.native_icon_cache
+                .insert(key.clone(), IcedImageState::Loading);
+            tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
+                cache_key: key,
+                path: icon_path,
+                is_directory: false,
+                size: thumbnail_data::NATIVE_ICON_SIZE,
+            }));
+        }
+        Task::batch(tasks)
+    }
+
     pub(in crate::iced_ui) fn request_context_menu(
         &mut self,
         pane: PaneId,
@@ -13,6 +47,9 @@ impl BExplorerIced {
         self.group_menu_open = None;
         self.new_menu_open = None;
         self.context_archive_submenu = false;
+        self.context_open_with_submenu = false;
+        self.context_open_with_parent_hovered = false;
+        self.context_open_with_submenu_hovered = false;
         self.context_extract_submenu = false;
         self.context_new_submenu = false;
         self.context_archive_parent_hovered = false;
@@ -138,11 +175,26 @@ impl BExplorerIced {
                 self.localized("Documento de texto", "Text document")
                     .to_owned(),
             ],
+            ContextSubmenuKind::OpenWith => {
+                let mut labels = self
+                    .context_entry(menu.pane, menu.target)
+                    .and_then(|entry| shell::open_with_applications(&entry.path).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|application| application.name)
+                    .collect::<Vec<_>>();
+                labels.push(
+                    self.localized("Elegir otra aplicación…", "Choose another app…")
+                        .into(),
+                );
+                labels
+            }
         };
         let width = view::context_submenu_width(&labels);
         let height = match kind {
             ContextSubmenuKind::Archive => 114.0,
             ContextSubmenuKind::Extract | ContextSubmenuKind::New => 78.0,
+            ContextSubmenuKind::OpenWith => (labels.len() as f32 * 36.0 + 46.0).min(320.0),
         };
         let (x, y) = self.context_menu_window_position(menu);
         let submenu_x = if x + 258.0 + width <= self.window_size.width - 8.0 {
@@ -154,6 +206,7 @@ impl BExplorerIced {
             ContextSubmenuKind::Archive => 112.0,
             ContextSubmenuKind::Extract => 146.0,
             ContextSubmenuKind::New => 98.0,
+            ContextSubmenuKind::OpenWith => 42.0,
         };
         let submenu_y =
             (y + offset_y).clamp(8.0, (self.window_size.height - height - 8.0).max(8.0));
@@ -299,6 +352,9 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn dismiss_context_menu(&mut self) {
         self.context_menu = None;
         self.context_archive_submenu = false;
+        self.context_open_with_submenu = false;
+        self.context_open_with_parent_hovered = false;
+        self.context_open_with_submenu_hovered = false;
         self.context_extract_submenu = false;
         self.context_new_submenu = false;
         self.context_archive_parent_hovered = false;
@@ -485,6 +541,11 @@ impl BExplorerIced {
             self.context_extract_submenu = true;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::Extract);
         }
+        if command == ContextCommand::OpenWithMenu {
+            self.context_open_with_submenu = true;
+            self.context_archive_submenu = false;
+            return self.request_context_submenu_backdrop(ContextSubmenuKind::OpenWith);
+        }
         if command == ContextCommand::NewMenu {
             self.context_new_submenu = true;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::New);
@@ -509,6 +570,18 @@ impl BExplorerIced {
             ContextCommand::Open => self.context_open(menu.pane, menu.target),
             ContextCommand::OpenWith => {
                 self.context_open_with(menu.pane, menu.target);
+                Task::none()
+            }
+            ContextCommand::OpenWithMenu => Task::none(),
+            ContextCommand::OpenWithApplication(index) => {
+                let Some(entry) = self.context_entry(menu.pane, menu.target) else {
+                    return Task::none();
+                };
+                let path = entry.path.clone();
+                match shell::open_with_application(&path, index) {
+                    Ok(()) => self.pane_mut(menu.pane).status = "Aplicación abierta".into(),
+                    Err(error) => self.pane_mut(menu.pane).status = error.to_string(),
+                }
                 Task::none()
             }
             ContextCommand::CompressMenu => Task::none(),

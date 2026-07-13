@@ -76,7 +76,7 @@ enum Message {
     ConfirmArchiveDialog,
     CancelArchiveDialog,
     CancelArchive(u64),
-    TrashFinished(PaneId, Result<operations::TrashDeleteOutcome, String>),
+    TrashFinished(PaneId, Vec<PathBuf>, Result<operations::TrashDeleteOutcome, String>),
     UndoLastAction,
     UndoFinished(UndoAction, Result<usize, String>),
     VirtualArchiveExtractFinished(PaneId, PaneId, PathBuf, Result<usize, String>),
@@ -118,6 +118,11 @@ enum Message {
     TitleMenuBackdropsPrepared(Option<iced_image::Handle>, Option<iced_image::Handle>),
     CloseContextMenu,
     ContextArchiveParentEnter,
+    ContextOpenWithParentEnter,
+    ContextOpenWithParentExit,
+    ContextOpenWithSubmenuEnter,
+    ContextOpenWithSubmenuExit,
+    CloseContextOpenWithSubmenuIfUnhovered,
     ContextExtractParentEnter,
     ContextNewParentEnter,
     ContextArchiveParentExit,
@@ -138,7 +143,7 @@ enum Message {
     RenameFinished(RenameState, Result<PathBuf, String>),
     CancelRename,
     ConfirmPermanentDelete,
-    PermanentDeleteFinished(PaneId, Result<usize, String>),
+    PermanentDeleteFinished(PaneId, Vec<PathBuf>, Result<usize, String>),
     CancelPermanentDelete,
     DiskImageMounted(PaneId, PathBuf, Result<PathBuf, String>),
     DriveEjected(PaneId, PathBuf, Result<(), String>),
@@ -155,6 +160,19 @@ enum Message {
     PortableTransferFinished(PaneId, Vec<PathBuf>, bool, Result<usize, String>),
     ResolveTransferConflict(ConflictPolicy),
     CancelTransferConflict,
+    ConfirmElevatedTransfer,
+    CancelElevatedTransfer,
+    ElevatedTransferFinished(PaneId, TransferJob, Result<ElevatedTransferResult, String>),
+    ConfirmElevatedDelete,
+    CancelElevatedDelete,
+    ElevatedDeleteFinished(PaneId, bool, u64, Result<usize, String>),
+    ConfirmElevatedFileAction,
+    CancelElevatedFileAction,
+    ElevatedFileActionFinished(
+        PaneId,
+        operations::ElevatedFileAction,
+        Result<PathBuf, String>,
+    ),
     MainWindowOpened(window::Id),
     TransferWindowOpened(window::Id),
     ArchiveWindowOpened(window::Id),
@@ -306,6 +324,8 @@ enum ContextCommand {
     Properties,
     Open,
     OpenWith,
+    OpenWithMenu,
+    OpenWithApplication(usize),
     CompressMenu,
     ExtractMenu,
     CompressDialog,
@@ -330,6 +350,7 @@ enum ContextSubmenuKind {
     Archive,
     Extract,
     New,
+    OpenWith,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -487,6 +508,37 @@ struct PendingTransferConflict {
     kind: TransferKind,
     clear_clipboard: bool,
     conflicts: Vec<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingElevatedTransfer {
+    pane: PaneId,
+    job: TransferJob,
+    error: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingElevatedDelete {
+    pane: PaneId,
+    paths: Vec<PathBuf>,
+    permanent: bool,
+    transfer_id: u64,
+    error: String,
+}
+
+#[derive(Clone, Debug)]
+struct PendingElevatedFileAction {
+    pane: PaneId,
+    action: operations::ElevatedFileAction,
+    error: String,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveDeleteState {
+    id: u64,
+    pane: PaneId,
+    paths: Vec<PathBuf>,
+    permanent: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -735,7 +787,7 @@ struct FileDragState {
 #[derive(Clone, Debug)]
 struct TransferDisplayState {
     id: u64,
-    kind: TransferKind,
+    kind: TransferDisplayKind,
     state: TransferState,
     current_name: String,
     copied_bytes: u64,
@@ -743,6 +795,14 @@ struct TransferDisplayState {
     files_done: usize,
     total_files: usize,
     bytes_per_second: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransferDisplayKind {
+    Copy,
+    Move,
+    Trash,
+    PermanentDelete,
 }
 
 impl TransferDisplayState {
@@ -760,7 +820,10 @@ impl TransferDisplayState {
 
         Self {
             id: progress.job_id,
-            kind: progress.kind,
+            kind: match progress.kind {
+                TransferKind::Copy => TransferDisplayKind::Copy,
+                TransferKind::Move => TransferDisplayKind::Move,
+            },
             state: progress.state,
             current_name,
             copied_bytes: progress.copied_bytes,

@@ -34,8 +34,8 @@ use crate::fs::defender::{
 };
 use crate::fs::explorer::{self, DriveKind, EntryKind, FileCategory, FileEntry};
 use crate::fs::transfer_queue::{
-    self, ConflictPolicy, TransferCompletedRoot, TransferControl, TransferJob, TransferKind,
-    TransferMessage, TransferProgress, TransferState,
+    self, ConflictPolicy, ElevatedTransferResult, TransferCompletedRoot, TransferControl,
+    TransferJob, TransferKind, TransferMessage, TransferProgress, TransferState,
 };
 use crate::fs::{archive, operations, portable};
 use crate::platform::shell;
@@ -179,6 +179,9 @@ struct BExplorerIced {
     color_picker_fade_target: f32,
     pending_popup_close: Option<PendingPopupClose>,
     context_archive_submenu: bool,
+    context_open_with_submenu: bool,
+    context_open_with_parent_hovered: bool,
+    context_open_with_submenu_hovered: bool,
     context_extract_submenu: bool,
     context_new_submenu: bool,
     context_archive_parent_hovered: bool,
@@ -187,6 +190,7 @@ struct BExplorerIced {
     context_new_submenu_hovered: bool,
     pane_pointer: Option<(PaneId, Point)>,
     current_modifiers: keyboard::Modifiers,
+    view_scroll_accumulator: f32,
     system_theme_mode: iced::theme::Mode,
     file_clipboard: Option<FileClipboardState>,
     last_undo_action: Option<UndoAction>,
@@ -204,6 +208,8 @@ struct BExplorerIced {
     transfer_progress: HashMap<u64, TransferProgress>,
     transfer_batch_totals: HashMap<PaneId, (u64, u64)>,
     transfer_history: VecDeque<TransferHistoryState>,
+    active_deletes: HashMap<u64, ActiveDeleteState>,
+    transfer_progress_phase: f32,
     active_archives: HashMap<u64, ActiveArchiveState>,
     archive_history: VecDeque<ArchiveHistoryState>,
     defender_rx: Option<Receiver<DefenderMessage>>,
@@ -214,6 +220,9 @@ struct BExplorerIced {
     archive_dialog: Option<ArchiveDialogState>,
     permanent_delete_dialog: Option<PendingPermanentDelete>,
     transfer_conflict_dialog: Option<PendingTransferConflict>,
+    elevated_transfer_dialog: Option<PendingElevatedTransfer>,
+    elevated_delete_dialog: Option<PendingElevatedDelete>,
+    elevated_file_action_dialog: Option<PendingElevatedFileAction>,
     pending_new_folder_rename: Option<(PaneId, PathBuf)>,
     pending_file_operations: HashSet<PaneId>,
     mounting_disk_images: HashSet<PathBuf>,
@@ -254,9 +263,9 @@ struct BExplorerIced {
     archive_window_item_count: usize,
 }
 
-pub fn run() -> iced::Result {
+pub fn run(initial_path: Option<PathBuf>) -> iced::Result {
     iced::daemon(
-        BExplorerIced::new,
+        move || BExplorerIced::new(initial_path.clone()),
         BExplorerIced::update,
         BExplorerIced::view_window,
     )
@@ -459,7 +468,7 @@ impl BExplorerIced {
         })
     }
 
-    fn new() -> (Self, Task<Message>) {
+    fn new(initial_path: Option<PathBuf>) -> (Self, Task<Message>) {
         let mut config = AppConfig::load();
         if !available_vibrancy_modes().contains(&config.vibrancy) {
             #[cfg(target_os = "windows")]
@@ -473,24 +482,47 @@ impl BExplorerIced {
         }
         config.vibrancy_active = config.vibrancy != VibrancyMode::None;
         let session = AppSession::load();
-        let mut tabs = session.tabs;
-        if tabs.is_empty() {
-            tabs.push(TabState::new(None));
-        }
-        let active_tab = session.active_tab.min(tabs.len().saturating_sub(1));
-        let split = session.split.and_then(|split| {
-            if split.tab_a < tabs.len() && split.tab_b < tabs.len() && split.tab_a != split.tab_b {
-                Some(SplitRuntime {
-                    primary_tabs: normalize_tabs(split.primary_tabs, split.tab_a, tabs.len()),
-                    secondary_tabs: normalize_tabs(split.secondary_tabs, split.tab_b, tabs.len()),
-                    secondary_tab: split.tab_b,
-                    focused: split.focused,
-                    ratio: split.ratio.clamp(SPLIT_MIN_RATIO, SPLIT_MAX_RATIO),
-                })
+        let launch_path = initial_path.map(|path| {
+            if path.as_os_str() == "~" {
+                paths::home_dir().unwrap_or(path)
             } else {
-                None
+                path
             }
         });
+        let (tabs, active_tab, split) = if let Some(path) = launch_path {
+            (
+                vec![TabState::with_view_mode(Some(path), config.default_view)],
+                0,
+                None,
+            )
+        } else {
+            let mut tabs = session.tabs;
+            if tabs.is_empty() {
+                tabs.push(TabState::new(None));
+            }
+            let active_tab = session.active_tab.min(tabs.len().saturating_sub(1));
+            let split = session.split.and_then(|split| {
+                if split.tab_a < tabs.len()
+                    && split.tab_b < tabs.len()
+                    && split.tab_a != split.tab_b
+                {
+                    Some(SplitRuntime {
+                        primary_tabs: normalize_tabs(split.primary_tabs, split.tab_a, tabs.len()),
+                        secondary_tabs: normalize_tabs(
+                            split.secondary_tabs,
+                            split.tab_b,
+                            tabs.len(),
+                        ),
+                        secondary_tab: split.tab_b,
+                        focused: split.focused,
+                        ratio: split.ratio.clamp(SPLIT_MIN_RATIO, SPLIT_MAX_RATIO),
+                    })
+                } else {
+                    None
+                }
+            });
+            (tabs, active_tab, split)
+        };
 
         let (transfer_tx, transfer_rx) = mpsc::channel();
         let initial_size = Size::new(config.window_size[0], config.window_size[1]);
@@ -536,6 +568,9 @@ impl BExplorerIced {
             color_picker_fade_target: 0.0,
             pending_popup_close: None,
             context_archive_submenu: false,
+            context_open_with_submenu: false,
+            context_open_with_parent_hovered: false,
+            context_open_with_submenu_hovered: false,
             context_extract_submenu: false,
             context_new_submenu: false,
             context_archive_parent_hovered: false,
@@ -544,6 +579,7 @@ impl BExplorerIced {
             context_new_submenu_hovered: false,
             pane_pointer: None,
             current_modifiers: keyboard::Modifiers::default(),
+            view_scroll_accumulator: 0.0,
             system_theme_mode: iced::theme::Mode::None,
             file_clipboard: None,
             last_undo_action: None,
@@ -561,6 +597,8 @@ impl BExplorerIced {
             transfer_progress: HashMap::new(),
             transfer_batch_totals: HashMap::new(),
             transfer_history: VecDeque::new(),
+            active_deletes: HashMap::new(),
+            transfer_progress_phase: 0.0,
             active_archives: HashMap::new(),
             archive_history: VecDeque::new(),
             defender_rx: None,
@@ -571,6 +609,9 @@ impl BExplorerIced {
             archive_dialog: None,
             permanent_delete_dialog: None,
             transfer_conflict_dialog: None,
+            elevated_transfer_dialog: None,
+            elevated_delete_dialog: None,
+            elevated_file_action_dialog: None,
             pending_new_folder_rename: None,
             pending_file_operations: HashSet::new(),
             mounting_disk_images: HashSet::new(),

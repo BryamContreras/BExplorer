@@ -44,6 +44,25 @@ impl BExplorerIced {
         self.cancel_recursive_search(pane);
         self.sync_pane_view_mode_from_tab(pane);
         let path = self.tab_for_pane(pane).path.clone();
+        if path.is_none() && !self.sidebar_storage_entries.is_empty() {
+            let cached_entries = self.sidebar_storage_entries.clone();
+            let available_paths = cached_entries
+                .iter()
+                .map(|entry| entry.path.clone())
+                .collect::<HashSet<_>>();
+            let state = self.pane_mut(pane);
+            state.request_id += 1;
+            state.loading = false;
+            state.search_progress_phase = 0.0;
+            state.status = format!("{} elements", cached_entries.len());
+            state.folder_entries = None;
+            state.entries = cached_entries;
+            state.selected.retain(|path| available_paths.contains(path));
+            state.selection_anchor = None;
+            state.mark_entries_changed();
+            state.has_vertical_overflow = false;
+            return self.queue_visible_images(pane);
+        }
         let show_hidden = self.config.show_hidden;
         let request_id = {
             let state = self.pane_mut(pane);
