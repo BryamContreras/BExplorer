@@ -161,6 +161,7 @@ enum Message {
     CancelDefenderScan,
     CloseDefenderPanel,
     RemediateDefenderThreats,
+    #[cfg(target_os = "windows")]
     DefenderThreatRemediationFinished(Result<usize, String>),
     OpenWindowsSecurity,
     PortableClipboardPrepared(PaneId, Result<Vec<PathBuf>, String>),
@@ -185,6 +186,7 @@ enum Message {
     MainWindowOpened(window::Id),
     TransferWindowOpened(window::Id),
     ArchiveWindowOpened(window::Id),
+    #[cfg(target_os = "windows")]
     DefenderWindowOpened(window::Id),
     DefenderThreatsWindowOpened(window::Id),
     ReopenTransferWindow(window::Id, Option<Point>),

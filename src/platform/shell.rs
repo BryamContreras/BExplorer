@@ -14,7 +14,7 @@ use crate::utils::errors::{BExplorerError, Result};
 mod clipboard;
 mod defender;
 mod disk;
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod elevation;
 mod format;
 
@@ -89,6 +89,7 @@ pub fn open_with(path: &Path) -> Result<()> {
 #[derive(Clone, Debug)]
 pub struct OpenWithApplication {
     pub name: String,
+    #[cfg(target_os = "windows")]
     pub(crate) id: String,
     pub(crate) icon_path: Option<PathBuf>,
 }
@@ -152,7 +153,7 @@ pub fn format_drive(
     format::format_drive(path, filesystem, label, quick, allocation_unit_size)
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
     elevation::run_elevated_current_exe(args)
 }

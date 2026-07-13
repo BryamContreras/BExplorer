@@ -2,8 +2,9 @@
 //!
 //! Mutter does not expose `Shell.BlurEffect` to ordinary Wayland clients.
 //! Blur My Shell runs inside GNOME Shell and can attach that effect to selected
-//! application actors. BExplorer only manages its own whitelist/blacklist
-//! entry and leaves every other extension preference untouched.
+//! application actors. BExplorer manages its own whitelist/blacklist entry
+//! and keeps focused-window blur enabled so selecting the effect does not
+//! produce transparency without blur while the explorer is in use.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -57,9 +58,23 @@ pub(super) fn set_application_blur(enabled: bool) -> Result<bool> {
     })?;
 
     set_value(&schema_dir, "blur", "true")?;
+    keep_focused_window_blurred(&schema_dir)?;
     update_application_lists(&schema_dir, true)?;
     crate::utils::log::info("GNOME Blur My Shell application blur registered for BExplorer");
     Ok(true)
+}
+
+fn keep_focused_window_blurred(schema_dir: &Path) -> Result<()> {
+    if get_value(schema_dir, "dynamic-opacity")?
+        .trim()
+        .eq_ignore_ascii_case("true")
+    {
+        set_value(schema_dir, "dynamic-opacity", "false")?;
+        crate::utils::log::info(
+            "Disabled Blur My Shell dynamic opacity so focused BExplorer windows stay blurred",
+        );
+    }
+    Ok(())
 }
 
 fn update_application_lists(schema_dir: &Path, enabled: bool) -> Result<()> {

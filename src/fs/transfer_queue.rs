@@ -295,7 +295,7 @@ fn run_elevated_transfer_helper(request_path: &Path, result_path: &Path) -> i32 
         result.map_err(|error| error.to_string());
     let wrote_result = serde_json::to_vec(&serialized)
         .ok()
-        .and_then(|bytes| fs::write(result_path, bytes).ok())
+        .and_then(|bytes| crate::utils::atomic_file::write_precreated(result_path, &bytes).ok())
         .is_some();
     if !wrote_result {
         2
