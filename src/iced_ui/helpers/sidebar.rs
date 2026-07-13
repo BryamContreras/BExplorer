@@ -78,7 +78,7 @@ pub(in crate::iced_ui) fn sidebar_items_for_section(
 ) -> Vec<SidebarItem> {
     match section {
         SidebarSection::Favorites => sidebar_favorite_items(config, spanish),
-        SidebarSection::Places => sidebar_place_items(),
+        SidebarSection::Places => sidebar_place_items(spanish),
         SidebarSection::Storage => sidebar_storage_items(storage_entries, spanish),
         SidebarSection::Portable => sidebar_portable_items(storage_entries),
         SidebarSection::Network => vec![SidebarItem {
@@ -124,7 +124,7 @@ pub(in crate::iced_ui) fn sidebar_favorite_items(
         .collect()
 }
 
-pub(in crate::iced_ui) fn sidebar_place_items() -> Vec<SidebarItem> {
+pub(in crate::iced_ui) fn sidebar_place_items(spanish: bool) -> Vec<SidebarItem> {
     let mut items = vec![SidebarItem {
         label: String::from(THIS_PC_LABEL),
         target: SidebarTarget::Navigate(None),
@@ -133,13 +133,37 @@ pub(in crate::iced_ui) fn sidebar_place_items() -> Vec<SidebarItem> {
     }];
     for place in paths::common_places() {
         items.push(SidebarItem {
-            label: place.label,
+            label: localized_common_place_label(place.kind, spanish).to_owned(),
             target: SidebarTarget::Navigate(Some(place.path)),
             icon: "dir",
             context_drive_index: None,
         });
     }
     items
+}
+
+pub(in crate::iced_ui) fn localized_common_place_label(
+    kind: paths::CommonPlaceKind,
+    spanish: bool,
+) -> &'static str {
+    use paths::CommonPlaceKind;
+
+    match (kind, spanish) {
+        (CommonPlaceKind::Home, true) => "Inicio",
+        (CommonPlaceKind::Desktop, true) => "Escritorio",
+        (CommonPlaceKind::Downloads, true) => "Descargas",
+        (CommonPlaceKind::Documents, true) => "Documentos",
+        (CommonPlaceKind::Music, true) => "Música",
+        (CommonPlaceKind::Pictures, true) => "Imágenes",
+        (CommonPlaceKind::Videos, true) => "Videos",
+        (CommonPlaceKind::Home, false) => "Home",
+        (CommonPlaceKind::Desktop, false) => "Desktop",
+        (CommonPlaceKind::Downloads, false) => "Downloads",
+        (CommonPlaceKind::Documents, false) => "Documents",
+        (CommonPlaceKind::Music, false) => "Music",
+        (CommonPlaceKind::Pictures, false) => "Pictures",
+        (CommonPlaceKind::Videos, false) => "Videos",
+    }
 }
 
 pub(in crate::iced_ui) fn sidebar_storage_items(

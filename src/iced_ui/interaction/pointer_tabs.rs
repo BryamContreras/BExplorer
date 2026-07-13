@@ -175,6 +175,8 @@ impl BExplorerIced {
             SplitSide::Left => PaneId::Primary,
             SplitSide::Right => PaneId::Secondary,
         });
+        self.sync_pane_search_from_tab(PaneId::Primary);
+        self.sync_pane_search_from_tab(PaneId::Secondary);
         self.save_session();
 
         Task::batch([

@@ -422,8 +422,14 @@ impl BExplorerIced {
         } else {
             self.active_tab = index;
         }
+        self.sync_pane_search_from_tab(pane);
         self.save_session();
         self.start_navigation_load(pane)
+    }
+
+    pub(in crate::iced_ui) fn sync_pane_search_from_tab(&mut self, pane: PaneId) {
+        let search_text = self.tab_for_pane(pane).search_text.clone();
+        self.pane_mut(pane).search_text = search_text;
     }
 
     pub(in crate::iced_ui) fn set_view_mode_for_pane(&mut self, pane: PaneId, mode: ViewMode) {

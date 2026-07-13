@@ -109,6 +109,14 @@ impl BExplorerIced {
                     .as_ref()
                     .filter(|(pending_pane, _)| *pending_pane == pane)
                     .cloned();
+                let pending_reveal = self
+                    .pending_reveal_in_new_tab
+                    .as_ref()
+                    .filter(|(pending_pane, location, _)| {
+                        *pending_pane == pane
+                            && self.tab_for_pane(pane).path.as_ref() == Some(location)
+                    })
+                    .cloned();
                 let state = self.pane_mut(pane);
                 if state.request_id != request_id {
                     return Task::none();
@@ -144,6 +152,9 @@ impl BExplorerIced {
                 state.has_vertical_overflow = false;
                 if pending_new_folder.is_some() {
                     self.pending_new_folder_rename = None;
+                }
+                if pending_reveal.is_some() {
+                    self.pending_reveal_in_new_tab = None;
                 }
                 let mut tasks = vec![
                     self.queue_visible_images(pane),
@@ -192,6 +203,15 @@ impl BExplorerIced {
                         .position(|entry| entry.path == path)
                 {
                     tasks.push(self.context_begin_rename(pane, ContextTarget::Entry(index)));
+                }
+                if let Some((_, _, path)) = pending_reveal
+                    && let Some(index) = self
+                        .pane(pane)
+                        .entries
+                        .iter()
+                        .position(|entry| entry.path == path)
+                {
+                    self.select_single(pane, index);
                 }
                 if !self.pane(pane).search_text.trim().is_empty() {
                     tasks.push(self.start_recursive_search(pane));
@@ -291,7 +311,11 @@ impl BExplorerIced {
             }
             Message::CloseTab(pane, slot) => {
                 self.tab_drag = None;
+                if self.tabs.len() == 1 && self.tab_index_at(pane, slot).is_some() {
+                    return self.update(Message::WindowClose);
+                }
                 self.close_tab(pane, slot);
+                self.sync_pane_search_from_tab(pane);
                 self.save_session();
                 self.start_navigation_load(pane)
             }
@@ -304,6 +328,7 @@ impl BExplorerIced {
                 let was_active = self.tab_index_for_pane(pane) == tab_index;
                 self.set_active_tab_for_pane(pane, tab_index);
                 if !was_active {
+                    self.sync_pane_search_from_tab(pane);
                     self.save_session();
                 }
                 self.tab_drag = Some(TabDragState {
@@ -595,6 +620,7 @@ impl BExplorerIced {
                 // explicitly after the layout state exists so keyboard actions,
                 // tab highlighting, and preview ownership all move with it.
                 self.focus_pane(PaneId::Secondary);
+                self.sync_pane_search_from_tab(PaneId::Secondary);
                 self.save_session();
                 self.start_navigation_load(PaneId::Secondary)
             }
@@ -1138,7 +1164,11 @@ impl BExplorerIced {
             },
             Message::SearchChanged(pane, value) => {
                 self.focus_pane(pane);
-                self.pane_mut(pane).search_text = value;
+                self.pane_mut(pane).search_text = value.clone();
+                let tab_index = self.tab_index_for_pane(pane);
+                if let Some(tab) = self.tabs.get_mut(tab_index) {
+                    tab.search_text = value;
+                }
                 Task::batch([self.refresh_search(pane), focus_search_input_task(pane)])
             }
             Message::ToggleSearchModeMenu(pane) => {

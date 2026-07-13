@@ -233,6 +233,7 @@ struct BExplorerIced {
     elevated_delete_dialog: Option<PendingElevatedDelete>,
     elevated_file_action_dialog: Option<PendingElevatedFileAction>,
     pending_new_folder_rename: Option<(PaneId, PathBuf)>,
+    pending_reveal_in_new_tab: Option<(PaneId, PathBuf, PathBuf)>,
     pending_file_operations: HashSet<PaneId>,
     mounting_disk_images: HashSet<PathBuf>,
     // A text-input submit and the global key listener can observe the same
@@ -631,6 +632,7 @@ impl BExplorerIced {
             elevated_delete_dialog: None,
             elevated_file_action_dialog: None,
             pending_new_folder_rename: None,
+            pending_reveal_in_new_tab: None,
             pending_file_operations: HashSet::new(),
             mounting_disk_images: HashSet::new(),
             suppress_open_after_rename_until: None,
@@ -664,8 +666,10 @@ impl BExplorerIced {
         app.sidebar_storage_entries = explorer::load_storage_cache();
 
         app.reset_fixed_root_presentation(PaneId::Primary);
+        app.sync_pane_search_from_tab(PaneId::Primary);
         if app.split.is_some() {
             app.reset_fixed_root_presentation(PaneId::Secondary);
+            app.sync_pane_search_from_tab(PaneId::Secondary);
         }
         let (main_window_id, open_main_window) =
             window::open(main_window_settings(initial_size, initial_window_maximized));

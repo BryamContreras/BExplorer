@@ -333,6 +333,42 @@ mod tests {
     }
 
     #[test]
+    fn common_sidebar_places_follow_the_interface_language() {
+        use crate::utils::paths::CommonPlaceKind;
+
+        let kinds = [
+            CommonPlaceKind::Desktop,
+            CommonPlaceKind::Downloads,
+            CommonPlaceKind::Documents,
+            CommonPlaceKind::Music,
+            CommonPlaceKind::Pictures,
+            CommonPlaceKind::Videos,
+        ];
+        assert_eq!(
+            kinds.map(|kind| localized_common_place_label(kind, true)),
+            [
+                "Escritorio",
+                "Descargas",
+                "Documentos",
+                "Música",
+                "Imágenes",
+                "Videos",
+            ]
+        );
+        assert_eq!(
+            kinds.map(|kind| localized_common_place_label(kind, false)),
+            [
+                "Desktop",
+                "Downloads",
+                "Documents",
+                "Music",
+                "Pictures",
+                "Videos",
+            ]
+        );
+    }
+
+    #[test]
     fn network_printers_use_the_printer_fallback_icon() {
         let mut printer = test_entry("Office printer", EntryKind::Drive, None);
         printer.drive_kind = Some(DriveKind::NetworkPrinter);

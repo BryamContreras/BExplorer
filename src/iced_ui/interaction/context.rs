@@ -537,6 +537,7 @@ impl BExplorerIced {
                             entry.kind.is_container() && !explorer::is_virtual_path(&entry.path)
                         });
                 let base_height = if has_extract_action { 404.0 } else { 368.0 };
+                let search_result_rows = usize::from(self.pane(menu.pane).folder_entries.is_some());
                 let advanced_rows = self
                     .context_entry(menu.pane, menu.target)
                     .map(|entry| {
@@ -552,7 +553,7 @@ impl BExplorerIced {
                             )
                     })
                     .unwrap_or(0);
-                let base_height = base_height + advanced_rows as f32 * 36.0;
+                let base_height = base_height + (advanced_rows + search_result_rows) as f32 * 36.0;
                 if terminal_available {
                     base_height
                 } else {
@@ -648,6 +649,9 @@ impl BExplorerIced {
             ContextCommand::Open => self.context_open(menu.pane, menu.target),
             ContextCommand::OpenWith => self.context_open_with(menu.pane, menu.target),
             ContextCommand::OpenWithMenu => Task::none(),
+            ContextCommand::OpenFileLocation => {
+                self.context_open_file_location(menu.pane, menu.target)
+            }
             ContextCommand::OpenWithApplication(index) => {
                 let Some(entry) = self.context_entry(menu.pane, menu.target) else {
                     return Task::none();

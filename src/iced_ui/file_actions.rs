@@ -762,6 +762,21 @@ impl BExplorerIced {
         Task::none()
     }
 
+    pub(super) fn context_open_file_location(
+        &mut self,
+        pane: PaneId,
+        target: ContextTarget,
+    ) -> Task<Message> {
+        let Some(entry) = self.context_entry(pane, target) else {
+            return Task::none();
+        };
+        let Some(location) = containing_location(&entry.path) else {
+            return self.report_error(pane, "The file location is not available");
+        };
+        self.pending_reveal_in_new_tab = Some((pane, location.clone(), entry.path.clone()));
+        self.open_path_in_new_tab(pane, Some(location))
+    }
+
     pub(super) fn context_open_terminal(
         &mut self,
         pane: PaneId,
@@ -1578,4 +1593,25 @@ fn parse_allocation_unit_size(value: &str) -> Option<u64> {
         .parse::<u64>()
         .ok()
         .and_then(|number| number.checked_mul(multiplier))
+}
+
+fn containing_location(path: &Path) -> Option<PathBuf> {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+}
+
+#[cfg(test)]
+mod file_location_tests {
+    use super::containing_location;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn search_result_location_is_its_containing_directory() {
+        assert_eq!(
+            containing_location(Path::new("folder/nested/report.txt")),
+            Some(PathBuf::from("folder/nested"))
+        );
+        assert_eq!(containing_location(Path::new("report.txt")), None);
+    }
 }

@@ -292,6 +292,7 @@ impl BExplorerIced {
         let menu_height = self.context_menu_height(menu_state);
         let is_entry = matches!(menu_state.target, ContextTarget::Entry(_));
         let is_sidebar_drive = matches!(menu_state.target, ContextTarget::SidebarDrive(_));
+        let is_search_result = is_entry && self.pane(menu_state.pane).folder_entries.is_some();
         let extractable_archive = self
             .context_entry(menu_state.pane, menu_state.target)
             .is_some_and(|entry| {
@@ -415,30 +416,37 @@ impl BExplorerIced {
                 palette,
             ));
             if !drive_entry {
-                items = items
-                    .push(
-                        mouse_area(context_menu_row(
-                            "open-with",
-                            self.localized("Abrir con", "Open with"),
-                            Some(ContextMenuTrailing::Icon("chev-right")),
-                            ContextCommand::OpenWithMenu,
-                            palette,
-                        ))
-                        .on_enter(Message::ContextOpenWithParentEnter)
-                        .on_exit(Message::ContextOpenWithParentExit),
-                    )
-                    .push(context_separator(palette))
-                    .push(
-                        mouse_area(context_menu_row(
-                            "archive",
-                            self.localized("Comprimir", "Compress"),
-                            Some(ContextMenuTrailing::Icon("chev-right")),
-                            ContextCommand::CompressMenu,
-                            palette,
-                        ))
-                        .on_enter(Message::ContextArchiveParentEnter)
-                        .on_exit(Message::ContextArchiveParentExit),
-                    );
+                items = items.push(
+                    mouse_area(context_menu_row(
+                        "open-with",
+                        self.localized("Abrir con", "Open with"),
+                        Some(ContextMenuTrailing::Icon("chev-right")),
+                        ContextCommand::OpenWithMenu,
+                        palette,
+                    ))
+                    .on_enter(Message::ContextOpenWithParentEnter)
+                    .on_exit(Message::ContextOpenWithParentExit),
+                );
+                if is_search_result {
+                    items = items.push(context_menu_row(
+                        "folder",
+                        self.localized("Abrir ubicación del archivo", "Open file location"),
+                        None,
+                        ContextCommand::OpenFileLocation,
+                        palette,
+                    ));
+                }
+                items = items.push(context_separator(palette)).push(
+                    mouse_area(context_menu_row(
+                        "archive",
+                        self.localized("Comprimir", "Compress"),
+                        Some(ContextMenuTrailing::Icon("chev-right")),
+                        ContextCommand::CompressMenu,
+                        palette,
+                    ))
+                    .on_enter(Message::ContextArchiveParentEnter)
+                    .on_exit(Message::ContextArchiveParentExit),
+                );
                 if extractable_archive {
                     items = items.push(
                         mouse_area(context_menu_row(

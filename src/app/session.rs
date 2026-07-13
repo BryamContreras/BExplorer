@@ -17,6 +17,11 @@ pub struct TabState {
     pub group_mode: GroupMode,
     #[serde(default = "default_group_ascending")]
     pub group_ascending: bool,
+    /// Search state is kept per tab while the application is running, but a
+    /// restored session starts from the folder itself instead of immediately
+    /// replaying an old query.
+    #[serde(skip)]
+    pub search_text: String,
 }
 
 impl TabState {
@@ -34,6 +39,7 @@ impl TabState {
             view_mode,
             group_mode: default_group_mode(),
             group_ascending: default_group_ascending(),
+            search_text: String::new(),
         }
     }
 

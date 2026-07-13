@@ -345,6 +345,7 @@ enum ContextCommand {
     OpenWith,
     OpenWithMenu,
     OpenWithApplication(usize),
+    OpenFileLocation,
     CompressMenu,
     ExtractMenu,
     CompressDialog,
