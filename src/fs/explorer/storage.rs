@@ -153,6 +153,15 @@ fn decode_linux_mount_field(value: &str) -> String {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn linux_mount_is_storage_candidate(mount: &LinuxMount) -> bool {
+    let partition_type = linux_udev_partition_type(&mount.major_minor);
+    linux_mount_is_storage_candidate_with_partition_type(mount, partition_type.as_deref())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mount_is_storage_candidate_with_partition_type(
+    mount: &LinuxMount,
+    partition_type: Option<&str>,
+) -> bool {
     if mount.mount_point == Path::new("/") {
         return true;
     }
@@ -165,6 +174,9 @@ fn linux_mount_is_storage_candidate(mount: &LinuxMount) -> bool {
     if linux_fs_type_is_virtual(&fs_type) {
         return false;
     }
+    if linux_mount_is_firmware_partition(mount, partition_type) {
+        return false;
+    }
 
     linux_fs_type_is_network(&fs_type)
         || mount.source.starts_with("/dev/")
@@ -172,6 +184,65 @@ fn linux_mount_is_storage_candidate(mount: &LinuxMount) -> bool {
         || mount.mount_point.starts_with("/media")
         || mount.mount_point.starts_with("/mnt")
         || mount.mount_point.starts_with("/run/media")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mount_is_firmware_partition(
+    mount: &LinuxMount,
+    partition_type: Option<&str>,
+) -> bool {
+    linux_path_is_firmware_mount(&mount.mount_point, &mount.fs_type)
+        || partition_type.is_some_and(linux_partition_type_is_firmware)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_path_is_firmware_mount(path: &Path, fs_type: &str) -> bool {
+    path == Path::new("/boot/efi")
+        || path == Path::new("/efi")
+        || (path == Path::new("/boot") && linux_fs_type_is_fat(fs_type))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_fs_type_is_fat(fs_type: &str) -> bool {
+    matches!(
+        fs_type.trim().to_ascii_lowercase().as_str(),
+        "fat" | "fat12" | "fat16" | "fat32" | "msdos" | "vfat"
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_partition_type_is_firmware(partition_type: &str) -> bool {
+    matches!(
+        partition_type.trim().to_ascii_lowercase().as_str(),
+        // GPT EFI System Partition and Extended Boot Loader Partition.
+        "c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+            | "bc13c2ff-59e6-4262-a352-b275fd6f7172"
+            // MBR EFI System Partition identifier, as reported by udev.
+            | "0xef"
+            | "ef"
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_udev_partition_type(major_minor: &str) -> Option<String> {
+    if major_minor.is_empty()
+        || !major_minor
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b':')
+    {
+        return None;
+    }
+
+    let data = fs::read_to_string(
+        Path::new("/run/udev/data").join(format!("b{major_minor}")),
+    )
+    .ok()?;
+    data.lines().find_map(|line| {
+        line.strip_prefix("E:ID_PART_ENTRY_TYPE=")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]

@@ -232,6 +232,16 @@ pub fn load_storage_cache() -> Vec<FileEntry> {
     cache
         .entries
         .into_iter()
+        .filter(|_entry| {
+            #[cfg(all(unix, not(target_os = "macos")))]
+            {
+                !linux_path_is_firmware_mount(&_entry.path, &_entry.file_system)
+            }
+            #[cfg(not(all(unix, not(target_os = "macos"))))]
+            {
+                true
+            }
+        })
         .map(|entry| FileEntry {
             name: entry.name,
             path: entry.path,
@@ -1409,6 +1419,42 @@ mod tests {
         assert!(!linux_mount_is_storage_candidate(&proc_mount));
         assert!(linux_mount_is_storage_candidate(&smb_mount));
         assert_eq!(linux_drive_kind(&smb_mount), DriveKind::Network);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn filters_linux_firmware_partitions_but_keeps_regular_vfat_storage() {
+        let mounted_esp = LinuxMount {
+            major_minor: "259:1".into(),
+            mount_point: PathBuf::from("/boot/efi"),
+            fs_type: "vfat".into(),
+            source: "/dev/nvme0n1p1".into(),
+        };
+        let auto_mounted_esp = LinuxMount {
+            major_minor: "259:1".into(),
+            mount_point: PathBuf::from("/media/dev/EFI"),
+            fs_type: "vfat".into(),
+            source: "/dev/nvme0n1p1".into(),
+        };
+        let usb = LinuxMount {
+            major_minor: "8:17".into(),
+            mount_point: PathBuf::from("/media/dev/CAMERA"),
+            fs_type: "vfat".into(),
+            source: "/dev/sdb1".into(),
+        };
+
+        assert!(!linux_mount_is_storage_candidate_with_partition_type(
+            &mounted_esp,
+            None,
+        ));
+        assert!(!linux_mount_is_storage_candidate_with_partition_type(
+            &auto_mounted_esp,
+            Some("c12a7328-f81f-11d2-ba4b-00a0c93ec93b"),
+        ));
+        assert!(linux_mount_is_storage_candidate_with_partition_type(
+            &usb,
+            Some("0x0c"),
+        ));
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

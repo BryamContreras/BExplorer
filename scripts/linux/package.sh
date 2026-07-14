@@ -25,18 +25,14 @@ rm -rf "$APPDIR" "$DEBROOT"
 mkdir -p \
   "$APPDIR/usr/bin" \
   "$APPDIR/usr/share/applications" \
-  "$APPDIR/usr/share/icons/hicolor" \
+  "$APPDIR/usr/share/pixmaps" \
   "$APPDIR/usr/share/metainfo" \
   "$APPDIR/usr/share/polkit-1/actions" \
   "$APPDIR/usr/share/doc/bexplorer"
 
 install -m 0755 "$ROOT_DIR/target/$TARGET/release/bexplorer" "$APPDIR/usr/bin/bexplorer"
 install -m 0644 "$ROOT_DIR/assets/linux/bexplorer.desktop" "$APPDIR/usr/share/applications/bexplorer.desktop"
-for ICON in "$ROOT_DIR"/assets/linux/hicolor/*x*/apps/bexplorer.png; do
-  ICON_SIZE=$(basename -- "$(dirname -- "$(dirname -- "$ICON")")")
-  mkdir -p "$APPDIR/usr/share/icons/hicolor/$ICON_SIZE/apps"
-  install -m 0644 "$ICON" "$APPDIR/usr/share/icons/hicolor/$ICON_SIZE/apps/bexplorer.png"
-done
+install -m 0644 "$ROOT_DIR/assets/icons/appicon.png" "$APPDIR/usr/share/pixmaps/bexplorer.png"
 install -m 0644 "$ROOT_DIR/assets/linux/io.github.BryamContreras.BExplorer.metainfo.xml" "$APPDIR/usr/share/metainfo/io.github.BryamContreras.BExplorer.metainfo.xml"
 install -m 0644 "$ROOT_DIR/assets/linux/io.github.BryamContreras.BExplorer.policy" "$APPDIR/usr/share/polkit-1/actions/io.github.BryamContreras.BExplorer.policy"
 install -m 0644 "$ROOT_DIR/README.md" "$APPDIR/usr/share/doc/bexplorer/README.md"
