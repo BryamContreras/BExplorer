@@ -48,6 +48,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # Iced's Wayland clipboard owns the data-device that receives file drops.
 # Keep the tiny extension in-tree so it can forward URI drops to BExplorer.
 smithay-clipboard = { path = "vendor/smithay-clipboard" }
+# Iced 0.14 does not forward XDG/X11 startup activation tokens to winit.
+# Keep the focused runtime patch in-tree until the upstream issue is fixed.
+iced_winit = { path = "vendor/iced-winit" }
 
 [profile.dev]
 # `cargo run` is used during day-to-day development. A modest optimization
