@@ -466,6 +466,21 @@ mod tests {
         assert_eq!(fallback_icon_label(&printer), "portable");
     }
 
+    #[test]
+    fn printer_fallback_icon_is_renderable() {
+        let options = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_data(icon_svg("printer"), &options)
+            .expect("printer fallback should be a valid SVG");
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(24, 24).expect("printer icon pixmap");
+        resvg::render(
+            &tree,
+            resvg::tiny_skia::Transform::identity(),
+            &mut pixmap.as_mut(),
+        );
+
+        assert!(pixmap.data().chunks_exact(4).any(|pixel| pixel[3] > 0));
+    }
+
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn secondary_linux_local_drive_requests_a_hard_disk_icon() {

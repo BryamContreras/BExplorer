@@ -537,7 +537,60 @@ const ICON_EJECT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org
 const ICON_FORMAT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="4.1" y="7.4" width="15.8" height="10.2" rx="1.7" fill="none" stroke="#000" stroke-width="1.65"/><path d="M7.2 14.3h4.3M7.2 11.1h2.2" fill="none" stroke="#000" stroke-width="1.55" stroke-linecap="round"/><path d="M15.7 5.1a4.4 4.4 0 0 1 2.9 4.15M19 9.25l-.4-2.65-2.45 1.1" fill="none" stroke="#000" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_FILE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/></svg>"##;
 const ICON_PC: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="1.1" y="2.15" width="21.8" height="15.35" rx="1.55" fill="#294b55" stroke="#f7fcff" stroke-width=".42" stroke-opacity=".72"/><rect x="1.5" y="2.55" width="21" height="14.55" rx="1.2" fill="none" stroke="#132f38" stroke-width=".72"/><rect x="2.85" y="3.65" width="18.3" height="11.75" rx=".38" fill="#08bfe8"/><path d="M2.85 3.65h18.3V15.4z" fill="#087fa7" opacity=".2"/><path d="M10.45 17.4h3.1v2.3h3.4c.6 0 1.1.48 1.1 1.08v.47H5.95v-.47c0-.6.5-1.08 1.1-1.08h3.4z" fill="#294b55" stroke="#f7fcff" stroke-width=".35" stroke-opacity=".6"/><path d="M5.95 21.25h12.1" fill="none" stroke="#132f38" stroke-width=".75" stroke-linecap="round"/></svg>"##;
-const ICON_PRINTER: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7.1 2.7h9.8v5.65H7.1z" fill="#e9f1f3" stroke="#90a7ae" stroke-width=".7" stroke-linejoin="round"/><path d="M8.15 3.7h7.7v1.1h-7.7z" fill="#c8d8dc" opacity=".72"/><rect x="2.65" y="7.75" width="18.7" height="9.15" rx="1.7" fill="#2b444d" stroke="#10232a" stroke-width=".85"/><path d="M3.5 9.05h17v5.1h-17z" fill="#385761" opacity=".68"/><rect x="16.65" y="9.65" width="1.28" height="1.28" rx=".4" fill="#64c7df"/><path d="M6.1 13.25h11.8v7.35H6.1z" fill="#eef5f6" stroke="#94a9af" stroke-width=".7" stroke-linejoin="round"/><path d="M8.1 15.55h7.8M8.1 17.7h5.7" fill="none" stroke="#607980" stroke-width=".9" stroke-linecap="round"/><path d="M6.1 13.25h11.8v1.15H6.1z" fill="#d7e3e6"/><path d="M4.35 17.05h15.3" fill="none" stroke="#0d2026" stroke-opacity=".48" stroke-width=".65"/></svg>"##;
+const ICON_PRINTER: &[u8] = br##"
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="printer-paper" x1="0" y1="0" x2=".18" y2="1">
+      <stop offset="0" stop-color="#fff"/>
+      <stop offset=".72" stop-color="#eef0f2"/>
+      <stop offset="1" stop-color="#cdd2d6"/>
+    </linearGradient>
+    <linearGradient id="printer-top" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#687784"/>
+      <stop offset=".16" stop-color="#566472"/>
+      <stop offset=".76" stop-color="#3b4854"/>
+      <stop offset="1" stop-color="#2b353f"/>
+    </linearGradient>
+    <linearGradient id="printer-front" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#424e58"/>
+      <stop offset=".17" stop-color="#252f38"/>
+      <stop offset=".8" stop-color="#36424c"/>
+      <stop offset="1" stop-color="#5d6872"/>
+    </linearGradient>
+    <linearGradient id="printer-edge" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#a9b3bb" stop-opacity=".72"/>
+      <stop offset=".12" stop-color="#4d5963" stop-opacity=".18"/>
+      <stop offset=".82" stop-color="#141c23" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#9ca7af" stop-opacity=".58"/>
+    </linearGradient>
+    <linearGradient id="printer-roller" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#062b38"/>
+      <stop offset=".48" stop-color="#18bad6"/>
+      <stop offset="1" stop-color="#041820"/>
+    </linearGradient>
+    <radialGradient id="printer-led">
+      <stop offset="0" stop-color="#e0ffff"/>
+      <stop offset=".35" stop-color="#69f5f6"/>
+      <stop offset="1" stop-color="#19aabc"/>
+    </radialGradient>
+  </defs>
+  <path d="M5.5 8.15V4.45c0-.7.55-1.25 1.25-1.25h10.5c.7 0 1.25.55 1.25 1.25v3.7" fill="none" stroke="#596773" stroke-width=".62"/>
+  <path d="M7.05 1.55h9.9c.5 0 .9.4.9.9v5.98H6.15V2.45c0-.5.4-.9.9-.9z" fill="url(#printer-paper)" stroke="#fff" stroke-opacity=".82" stroke-width=".22"/>
+  <path d="M6.65 3.05h10.7" stroke="#fff" stroke-opacity=".36" stroke-width=".38" stroke-linecap="round"/>
+  <path d="M3.65 7.15h16.7c.72 0 1.36.46 1.6 1.14l.83 2.55c.38 1.13-.36 2.02-1.53 2.02H2.75c-1.17 0-1.91-.89-1.53-2.02l.83-2.55c.24-.68.88-1.14 1.6-1.14z" fill="url(#printer-top)" stroke="#94a1ab" stroke-width=".24"/>
+  <path d="M1.75 11.74c.31.34.76.51 1.25.51h18c.49 0 .94-.17 1.25-.51" fill="none" stroke="#d2d8dc" stroke-opacity=".68" stroke-width=".2"/>
+  <path d="M1.45 11.52c.12.82.24 1.43.3 1.85v4.63c0 .5.4.9.9.9h18.7c.5 0 .9-.4.9-.9v-4.63c.06-.42.18-1.03.3-1.85-.12.78-.5 1.35-1.15 1.72H2.6c-.65-.37-1.03-.94-1.15-1.72z" fill="url(#printer-front)" stroke="#151d24" stroke-width=".26"/>
+  <path d="M2.35 13.48h19.3" stroke="url(#printer-edge)" stroke-width=".3"/>
+  <rect x="5.15" y="15.05" width="13.7" height="3.91" rx=".55" fill="#02070b" stroke="#687782" stroke-opacity=".68" stroke-width=".18"/>
+  <path d="M5.55 16.12h1.75v2.3H5.4c-.14-.77-.09-1.54.15-2.3zm10.98 0h1.92c.24.76.29 1.53.15 2.3h-2.07z" fill="url(#printer-roller)"/>
+  <path d="M6.1 16.08h11.8l.4 6.02c.03.4-.28.72-.68.72H6.38c-.4 0-.71-.32-.68-.72z" fill="url(#printer-paper)" stroke="#fff" stroke-opacity=".72" stroke-width=".2"/>
+  <path d="M6.3 16.22h11.4l.1 1.24H6.2z" fill="#d8dcdf"/>
+  <path d="M8.05 19.08h7.9M8.05 20.67h5.25" fill="none" stroke="#7b828a" stroke-width=".55"/>
+  <circle cx="19.4" cy="10.25" r=".69" fill="#1b313a" stroke="#526a74" stroke-width=".18"/>
+  <circle cx="19.4" cy="10.25" r=".43" fill="url(#printer-led)"/>
+  <path d="M1.75 17.15c.03.82.34 1.37.95 1.67m19.55-1.67c-.03.82-.34 1.37-.95 1.67" fill="none" stroke="#a5afb7" stroke-opacity=".28" stroke-width=".2" stroke-linecap="round"/>
+</svg>
+"##;
 const ICON_LINK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M10 8.5 11.5 7a4 4 0 0 1 5.7 5.7l-2 2a4 4 0 0 1-5.7 0" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/><path d="m14 15.5-1.5 1.5a4 4 0 0 1-5.7-5.7l2-2a4 4 0 0 1 5.7 0" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
 const ICON_RECENT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="7.5" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 7.5V12l3 2" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_NETWORK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="5.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><circle cx="6" cy="18.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><circle cx="18" cy="18.5" r="2" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 7.5v4.5M12 12 7.5 17M12 12l4.5 5" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round"/></svg>"##;

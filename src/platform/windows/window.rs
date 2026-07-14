@@ -12,7 +12,8 @@ pub fn apply_small_window_corners(
     use raw_window_handle::RawWindowHandle;
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Dwm::{
-        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute,
+        DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
+        DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute,
     };
     use windows::Win32::Graphics::Gdi::{CreateRoundRectRgn, DeleteObject, HRGN, SetWindowRgn};
     use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
@@ -28,6 +29,16 @@ pub fn apply_small_window_corners(
         DWMWCP_ROUND
     };
     unsafe {
+        // Winit keeps native non-client styles so resize and Snap continue to
+        // work, then extends the client area over them. During the first OLE
+        // file drag DWM can briefly compose that latent frame anyway. Disable
+        // only DWM's non-client rendering; keep the styles and geometry intact.
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_NCRENDERING_POLICY,
+            &DWMNCRP_DISABLED as *const _ as *const _,
+            std::mem::size_of_val(&DWMNCRP_DISABLED) as u32,
+        )?;
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
