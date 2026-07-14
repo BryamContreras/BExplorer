@@ -274,12 +274,18 @@ impl BExplorerIced {
         let presentation_opacity = self.entry_presentation_opacity(entry, selected);
         let table_font_size = (self.font_size() - 0.5).max(11.0);
         let text_color = if selected {
-            selected_item_text_color(palette, false)
+            translucent_color(
+                selected_item_text_color(palette, false),
+                presentation_opacity,
+            )
         } else {
             translucent_color(palette.text, presentation_opacity)
         };
         let meta_color = if selected {
-            selected_item_text_color(palette, true)
+            translucent_color(
+                selected_item_text_color(palette, true),
+                presentation_opacity,
+            )
         } else {
             translucent_color(palette.muted_text, presentation_opacity)
         };

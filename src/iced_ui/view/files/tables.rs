@@ -21,9 +21,11 @@ impl BExplorerIced {
         if let Some(kind) = entry.drive_kind {
             let label = if self.is_spanish() {
                 match kind {
+                    DriveKind::System => "Unidad del sistema",
                     DriveKind::Local => "Disco local",
                     DriveKind::External => "Unidad externa",
                     DriveKind::Usb => "Unidad USB",
+                    DriveKind::DiskImage => "Imagen de disco montada",
                     DriveKind::Network => "Unidad de red",
                     DriveKind::NetworkComputer => "Equipo de red",
                     DriveKind::NetworkPrinter => "Impresora de red",

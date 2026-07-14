@@ -190,9 +190,12 @@ pub(in crate::iced_ui) fn sidebar_storage_items(
     // ordered ascending by name. Keep the source index for contextual eject
     // actions, since `storage_entries` itself remains in its cached order.
     entries.sort_by(|(_, left), (_, right)| {
-        left.type_label()
-            .to_ascii_lowercase()
-            .cmp(&right.type_label().to_ascii_lowercase())
+        compare_system_drive_first(left, right)
+            .then_with(|| {
+                left.type_label()
+                    .to_ascii_lowercase()
+                    .cmp(&right.type_label().to_ascii_lowercase())
+            })
             .then_with(|| explorer::compare_names_case_insensitive(&left.name, &right.name))
     });
 
@@ -208,6 +211,19 @@ pub(in crate::iced_ui) fn sidebar_storage_items(
                 .then_some(index),
         })
         .collect()
+}
+
+pub(in crate::iced_ui) fn sidebar_native_icon_cache_key(
+    path: &Path,
+    storage_entries: &[FileEntry],
+) -> PathBuf {
+    storage_entries
+        .iter()
+        .find(|entry| entry.path == path)
+        .map(thumbnail_data::native_entry_icon_cache_key)
+        .unwrap_or_else(|| {
+            thumbnail_data::native_path_icon_cache_key(path, true, thumbnail_data::NATIVE_ICON_SIZE)
+        })
 }
 
 pub(in crate::iced_ui) fn sidebar_portable_items(

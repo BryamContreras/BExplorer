@@ -1,5 +1,31 @@
 use super::*;
 
+const CUT_ENTRY_OPACITY: f32 = 0.62;
+const HIDDEN_ENTRY_OPACITY: f32 = 0.68;
+
+pub(in crate::iced_ui) fn clipboard_path_is_pending_cut(
+    clipboard: Option<&FileClipboardState>,
+    path: &Path,
+) -> bool {
+    clipboard.is_some_and(|clipboard| {
+        clipboard.cut && clipboard.paths.iter().any(|candidate| candidate == path)
+    })
+}
+
+pub(in crate::iced_ui) fn file_entry_presentation_opacity(
+    hidden: bool,
+    selected: bool,
+    pending_cut: bool,
+) -> f32 {
+    let hidden_opacity = if hidden && !selected {
+        HIDDEN_ENTRY_OPACITY
+    } else {
+        1.0
+    };
+    let cut_opacity = if pending_cut { CUT_ENTRY_OPACITY } else { 1.0 };
+    hidden_opacity.min(cut_opacity)
+}
+
 impl BExplorerIced {
     /// Start loading a different location without briefly rendering the
     /// previous location under the new path and view settings.
@@ -348,6 +374,11 @@ impl BExplorerIced {
             .collect::<Vec<_>>();
         icon_paths.extend(self.config.favorites.iter().cloned());
         icon_paths.extend(self.config.recent_paths.iter().cloned());
+        icon_paths.extend(
+            self.sidebar_storage_entries
+                .iter()
+                .map(|entry| entry.path.clone()),
+        );
         icon_paths.push(filesystem_root_path());
 
         let mut seen = HashSet::new();
@@ -363,6 +394,14 @@ impl BExplorerIced {
         if explorer::is_virtual_path(path) {
             return Task::none();
         }
+        if let Some(entry) = self
+            .sidebar_storage_entries
+            .iter()
+            .find(|entry| entry.path == path)
+            .cloned()
+        {
+            return self.queue_sidebar_storage_icon(&entry);
+        }
         let cache_key = thumbnail_data::native_path_icon_cache_key(
             path,
             true,
@@ -377,6 +416,23 @@ impl BExplorerIced {
             cache_key,
             path: path.to_path_buf(),
             is_directory: true,
+            size: thumbnail_data::NATIVE_ICON_SIZE,
+        })
+    }
+
+    fn queue_sidebar_storage_icon(&mut self, entry: &FileEntry) -> Task<Message> {
+        let Some((cache_key, path, is_directory)) = native_icon_request_for_entry(entry) else {
+            return Task::none();
+        };
+        if self.native_icon_cache.contains_key(&cache_key) {
+            return Task::none();
+        }
+        self.native_icon_cache
+            .insert(cache_key.clone(), IcedImageState::Loading);
+        load_iced_image_task(IcedImageJob::NativeIcon {
+            cache_key,
+            path,
+            is_directory,
             size: thumbnail_data::NATIVE_ICON_SIZE,
         })
     }
@@ -534,11 +590,11 @@ impl BExplorerIced {
         entry: &FileEntry,
         selected: bool,
     ) -> f32 {
-        if entry.is_hidden && !selected {
-            0.68
-        } else {
-            1.0
-        }
+        file_entry_presentation_opacity(
+            entry.is_hidden,
+            selected,
+            clipboard_path_is_pending_cut(self.file_clipboard.as_ref(), &entry.path),
+        )
     }
 
     pub(in crate::iced_ui) fn tab_index_for_pane(&self, pane: PaneId) -> usize {

@@ -190,7 +190,7 @@ impl BExplorerIced {
             let close_threats = self
                 .defender_threats_window_id
                 .take()
-                .map(window::close)
+                .map(|id| self.close_window_task(id))
                 .unwrap_or_else(Task::none);
 
             let (sender, receiver) = mpsc::channel();
@@ -243,12 +243,12 @@ impl BExplorerIced {
         let close_scan = self
             .defender_window_id
             .take()
-            .map(window::close)
+            .map(|id| self.close_window_task(id))
             .unwrap_or_else(Task::none);
         let close_threats = self
             .defender_threats_window_id
             .take()
-            .map(window::close)
+            .map(|id| self.close_window_task(id))
             .unwrap_or_else(Task::none);
         Task::batch([close_scan, close_threats])
     }
@@ -291,7 +291,7 @@ impl BExplorerIced {
         let close_scan = self
             .defender_window_id
             .take()
-            .map(window::close)
+            .map(|id| self.close_window_task(id))
             .unwrap_or_else(Task::none);
         if let Some(id) = self.defender_threats_window_id {
             return Task::batch([

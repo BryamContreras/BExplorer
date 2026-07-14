@@ -404,9 +404,25 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
         return thumbnail_data::virtual_native_icon_request(entry);
     }
 
+    // Linux icon themes infer removable media from mount paths such as
+    // `/media/...`. Secondary fixed disks are commonly automounted there too,
+    // so the path alone makes them look like USB sticks. Once storage
+    // detection has classified a drive as local, ask the theme for the same
+    // hard-disk icon class used by the filesystem root.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let icon_lookup_path = if entry.kind == EntryKind::Drive
+        && matches!(entry.drive_kind, Some(DriveKind::System | DriveKind::Local))
+    {
+        PathBuf::from("/")
+    } else {
+        entry.path.clone()
+    };
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let icon_lookup_path = entry.path.clone();
+
     Some((
         thumbnail_data::native_entry_icon_cache_key(entry),
-        entry.path.clone(),
+        icon_lookup_path,
         matches!(entry.kind, EntryKind::Folder | EntryKind::Drive),
     ))
 }
@@ -714,6 +730,25 @@ pub(in crate::iced_ui) struct Palette {
 }
 
 impl Palette {
+    /// Backgrounds for independent native utility windows. These must use the
+    /// same client-surface alpha as the main window; `overlay_*` is purposely
+    /// denser and is reserved for modal cards drawn over existing content.
+    pub(in crate::iced_ui) fn native_utility_backgrounds(self) -> (Color, Color) {
+        (self.page_bg, self.title_bg)
+    }
+
+    /// Utility cards sit on an already tinted native window surface. Keeping
+    /// the regular input fill here would compose two dense alpha layers and
+    /// hide the compositor blur. A light tint preserves the card boundary;
+    /// without a native effect the normal opaque input surface is retained.
+    pub(in crate::iced_ui) fn native_utility_card_background(self, vibrancy_active: bool) -> Color {
+        if vibrancy_active {
+            translucent_color(self.input_bg, 0.18)
+        } else {
+            self.input_bg
+        }
+    }
+
     pub(in crate::iced_ui) fn with_opacity(mut self, opacity: f32) -> Self {
         let opacity = opacity.clamp(0.0, 1.0);
         for color in [
@@ -799,9 +834,8 @@ impl Palette {
             let gnome_application_blur = false;
 
             // Intensity controls how much of the native/compositor backdrop is
-            // allowed through. The previous scale left the window mostly
-            // opaque even at 90%, making KWin's blur impossible to perceive.
-            // Keep a readable floor while making the high end visibly glassy.
+            // allowed through. Keep a readable floor while leaving enough of
+            // KWin's native blur visible at the high end.
             let alpha = vibrancy_surface_alpha(
                 config.vibrancy_intensity,
                 config.vibrancy,
@@ -846,7 +880,17 @@ pub(in crate::iced_ui) fn vibrancy_surface_alpha(
     if intensity <= f32::EPSILON {
         return 1.0;
     }
-    let base_alpha = (1.0 - intensity * 0.68).clamp(0.32, 1.0);
+    // KWin surfaces are layered inside the main window, so the old 0.32 floor
+    // made large empty areas look almost transparent. A 0.50 floor keeps the
+    // composed window near 75% opacity at the strongest setting while the
+    // blur remains clearly visible. Other platforms retain their native
+    // tuning, including Windows Acrylic below.
+    let transparency_span = if cfg!(target_os = "linux") && mode == VibrancyMode::Blur {
+        0.50
+    } else {
+        0.68
+    };
+    let base_alpha = (1.0 - intensity * transparency_span).clamp(1.0 - transparency_span, 1.0);
     // Windows Acrylic already supplies a native backdrop. Let a little more
     // of it show through without changing the KWin blur tuning.
     if mode == VibrancyMode::Acrylic {

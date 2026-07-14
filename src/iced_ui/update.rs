@@ -550,6 +550,14 @@ impl BExplorerIced {
                     self.color_picker_fade_target,
                     elapsed,
                 );
+                self.file_drag_fade_progress = advance_popup_animation(
+                    self.file_drag_fade_progress,
+                    self.file_drag_fade_target,
+                    elapsed,
+                );
+                if self.file_drag_fade_progress <= 0.0 && self.file_drag_fade_target <= 0.0 {
+                    self.file_drag_fade_snapshot = None;
+                }
                 let close_finished =
                     self.pending_popup_close
                         .is_some_and(|pending| match pending {
@@ -564,6 +572,7 @@ impl BExplorerIced {
                 if !self.sidebar_animation_active()
                     && !self.preview_panel_animation_active()
                     && !self.popup_fade_animation_active()
+                    && !self.file_drag_fade_animation_active()
                 {
                     self.last_animation_frame = None;
                 }
@@ -1066,7 +1075,7 @@ impl BExplorerIced {
             Message::CancelFormatDialog => self.cancel_format_dialog(),
             Message::DismissErrorDialog => self.request_popup_close(PendingPopupClose::ErrorDialog),
             Message::FormatFinished(pane, path, result) => match result {
-                Ok(()) => {
+                Ok(outcome) => {
                     let status = format!(
                         "{} {}",
                         self.localized("Unidad formateada:", "Drive formatted:"),
@@ -1077,12 +1086,49 @@ impl BExplorerIced {
                     state.formatting = false;
                     state.formatting_path = None;
                     state.status = status;
-                    if self.tab_for_pane(pane).path.is_none() {
-                        self.sidebar_storage_entries.clear();
-                        self.start_load(pane)
-                    } else {
-                        Task::batch([self.start_load(pane), self.refresh_sidebar_storage()])
+
+                    let affected_tabs = self
+                        .tabs
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, tab)| {
+                            tab.path
+                                .as_ref()
+                                .is_some_and(|tab_path| tab_path.starts_with(&path))
+                                .then_some(index)
+                        })
+                        .collect::<HashSet<_>>();
+                    if !affected_tabs.is_empty() {
+                        for index in &affected_tabs {
+                            if let Some(tab) = self.tabs.get_mut(*index) {
+                                tab.navigate_to(outcome.mount_path.clone());
+                            }
+                        }
+                        self.save_session();
                     }
+
+                    let mut tasks = vec![self.refresh_sidebar_storage()];
+                    for candidate in [PaneId::Primary, PaneId::Secondary] {
+                        if candidate == PaneId::Secondary && self.split.is_none() {
+                            continue;
+                        }
+                        if affected_tabs.contains(&self.tab_index_for_pane(candidate)) {
+                            tasks.push(self.start_navigation_load(candidate));
+                        }
+                    }
+                    if let Some(warning) = outcome.warning {
+                        tasks.push(
+                            self.show_error_dialog(
+                                self.localized(
+                                    "Formato completado con advertencia",
+                                    "Formatting completed with a warning",
+                                )
+                                .to_owned(),
+                                warning,
+                            ),
+                        );
+                    }
+                    Task::batch(tasks)
                 }
                 Err(error) => {
                     let state = self.pane_mut(pane);
@@ -1553,7 +1599,9 @@ impl BExplorerIced {
                 let Some(path) = path else {
                     return Task::none();
                 };
-                self.file_drag = None;
+                if let Some(drag) = self.file_drag.take() {
+                    self.fade_out_file_drag_overlay(&drag);
+                }
                 self.file_drag_suppressed_click = None;
                 self.last_entry_click = None;
                 self.focus_pane(pane);
@@ -1574,6 +1622,7 @@ impl BExplorerIced {
                     .is_some_and(|drag| drag.drop_target == Some((pane, index)))
                 {
                     self.file_drag.as_mut().expect("checked above").drop_target = None;
+                    self.refresh_file_drag_fade_snapshot();
                 }
                 Task::none()
             }
@@ -1591,6 +1640,7 @@ impl BExplorerIced {
                         .as_mut()
                         .expect("checked above")
                         .sidebar_destination = None;
+                    self.refresh_file_drag_fade_snapshot();
                 }
                 Task::none()
             }
@@ -2663,6 +2713,9 @@ impl BExplorerIced {
                 let split_resize_dirty = matches!(self.resize_drag, Some(ResizeDrag::Split { .. }));
                 let sidebar_section_drag = self.sidebar_section_drag.take();
                 let file_drag = self.file_drag.take();
+                if let Some(drag) = &file_drag {
+                    self.fade_out_file_drag_overlay(drag);
+                }
                 if self.resize_drag.is_some() {
                     save_config(&self.config);
                 }
@@ -2839,7 +2892,21 @@ impl BExplorerIced {
                     Task::none()
                 }
             }
+            Message::WindowCloseRequested(id) => {
+                if self.main_window_id == Some(id) {
+                    self.update(Message::WindowClose)
+                } else if self.transfer_window_id == Some(id)
+                    || self.archive_window_id == Some(id)
+                    || self.defender_window_id == Some(id)
+                    || self.defender_threats_window_id == Some(id)
+                {
+                    self.close_window_task(id)
+                } else {
+                    Task::none()
+                }
+            }
             Message::WindowClosed(id) => {
+                self.closing_windows.remove(&id);
                 if self.main_window_id == Some(id) {
                     self.save_session();
                     save_config(&self.config);
@@ -2881,7 +2948,7 @@ impl BExplorerIced {
                     && let Some(id) = self.transfer_window_id.take()
                 {
                     self.transfer_window_item_count = 0;
-                    tasks.push(window::close(id));
+                    tasks.push(self.close_window_task(id));
                 } else {
                     tasks.push(self.sync_transfer_window_size_task());
                 }
@@ -2889,7 +2956,7 @@ impl BExplorerIced {
                     && let Some(id) = self.archive_window_id.take()
                 {
                     self.archive_window_item_count = 0;
-                    tasks.push(window::close(id));
+                    tasks.push(self.close_window_task(id));
                 } else {
                     tasks.push(self.sync_archive_window_size_task());
                 }
@@ -3028,8 +3095,13 @@ impl BExplorerIced {
                     if progress_window_needs_resize(size, expected) {
                         sync_fixed_progress_window_size_task(id, expected)
                     } else {
-                        Task::none()
+                        self.apply_window_corners_only_task_for(id)
                     }
+                } else if self.transfer_window_id == Some(id)
+                    || self.archive_window_id == Some(id)
+                    || self.defender_window_id == Some(id)
+                {
+                    self.apply_window_corners_only_task_for(id)
                 } else {
                     Task::none()
                 }
@@ -3089,10 +3161,16 @@ impl BExplorerIced {
                 }
             }
             Message::WindowClose => {
+                if self
+                    .main_window_id
+                    .is_some_and(|id| self.closing_windows.contains(&id))
+                {
+                    return Task::none();
+                }
                 self.save_session();
                 save_config(&self.config);
                 if let Some(id) = self.main_window_id {
-                    window::close(id)
+                    self.close_application_task(id)
                 } else {
                     iced::exit()
                 }

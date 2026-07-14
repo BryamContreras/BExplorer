@@ -122,6 +122,29 @@ pub fn prepare_external_file_drag(display: RawDisplayHandle, window: RawWindowHa
     let _ = (display, window);
 }
 
+/// Releases integrations that borrow a native window before that window is
+/// destroyed. Backends without borrowed per-window resources are a no-op.
+pub fn release_external_window_resources(display: RawDisplayHandle, window: RawWindowHandle) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    linux::release_native_window_resources(display, window);
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let _ = (display, window);
+}
+
+/// Releases every integration borrowing objects from a native display.
+///
+/// This must run while the display is still alive. It is used during
+/// application shutdown because auxiliary windows may still own KWin blur
+/// contexts when the main window closes.
+pub fn release_external_display_resources(display: RawDisplayHandle) {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    linux::release_native_display_resources(display);
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    let _ = display;
+}
+
 /// Starts an operating-system file drag so another application can receive
 /// real file references, rather than an in-app approximation.
 pub fn start_external_file_drag(
@@ -185,6 +208,20 @@ pub fn take_external_file_drops(
     }
 }
 
+/// Returns an event-driven notification channel for completed native file
+/// drops. Platforms whose window backend already reports `FileDropped` return
+/// a disconnected receiver because no auxiliary listener is necessary.
+pub fn external_file_drop_receiver() -> std::sync::mpsc::Receiver<()> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return linux::native_file_drop_receiver();
+
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        receiver
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub use windows::PortableDeviceSession;
 
@@ -215,6 +252,8 @@ pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
 pub fn apply_window_corners(
     window: &WindowHandle<'_>,
     _display: &DisplayHandle<'_>,
+    _width: u32,
+    _height: u32,
     radius: u32,
 ) -> Result<()> {
     windows::apply_small_window_corners(window, radius)
@@ -225,6 +264,9 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
     mode: VibrancyMode,
     intensity: u8,
     dark: bool,
+    _width: u32,
+    _height: u32,
+    _radius: u32,
 ) -> Result<bool> {
     #[cfg(target_os = "windows")]
     {
@@ -293,7 +335,14 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
                 )),
             }
         }
-        match linux::apply_window_blur(window, mode == VibrancyMode::Blur, intensity) {
+        match linux::apply_window_blur(
+            window,
+            mode == VibrancyMode::Blur,
+            intensity,
+            _width,
+            _height,
+            _radius,
+        ) {
             Ok(active) => Ok(active),
             Err(error) => {
                 crate::utils::log::info(format!(
@@ -309,15 +358,19 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
 pub fn apply_window_corners(
     window: &WindowHandle<'_>,
     display: &DisplayHandle<'_>,
+    width: u32,
+    height: u32,
     radius: u32,
 ) -> Result<()> {
-    linux::apply_window_corners(window, display, radius)
+    linux::apply_window_corners(window, display, width, height, radius)
 }
 
 #[cfg(target_os = "macos")]
 pub fn apply_window_corners(
     _window: &WindowHandle<'_>,
     _display: &DisplayHandle<'_>,
+    _width: u32,
+    _height: u32,
     _radius: u32,
 ) -> Result<()> {
     Ok(())

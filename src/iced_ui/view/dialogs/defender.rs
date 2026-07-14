@@ -8,6 +8,8 @@ impl BExplorerIced {
         &self,
         palette: Palette,
     ) -> Element<'_, Message> {
+        let (window_bg, window_title_bg) = palette.native_utility_backgrounds();
+        let card_bg = palette.native_utility_card_background(self.config.vibrancy_active);
         let progress = self.defender_progress.as_ref();
         let summary = self.defender_summary.as_ref();
         let active = self.defender_active();
@@ -193,7 +195,7 @@ impl BExplorerIced {
         .width(Length::Fill)
         .style(move |_| {
             container::Style::default()
-                .background(palette.overlay_title_bg)
+                .background(window_title_bg)
                 .border(border::rounded(border::top(WINDOW_RADIUS - 1.0)))
         });
 
@@ -207,7 +209,7 @@ impl BExplorerIced {
             .center_y(Length::Fixed(card_height))
             .style(move |_| {
                 container::Style::default()
-                    .background(palette.input_bg)
+                    .background(card_bg)
                     .border(border::rounded(6).color(palette.border).width(1))
             });
         let content = scrollable(container(card).width(Length::Fill).padding([6, 4]))
@@ -216,7 +218,7 @@ impl BExplorerIced {
         let body = container(content)
             .width(Length::Fill)
             .height(Length::Fixed(body_height))
-            .style(move |_| container::Style::default().background(palette.overlay_bg));
+            .style(move |_| container::Style::default().background(window_bg));
         let inner_panel = container(
             column![title_bar, body]
                 .width(Length::Fill)
@@ -227,7 +229,7 @@ impl BExplorerIced {
         .clip(true)
         .style(move |_| {
             container::Style::default()
-                .background(palette.overlay_bg)
+                .background(window_bg)
                 .border(border::rounded(WINDOW_RADIUS - WINDOW_BORDER_WIDTH))
         });
         let panel = container(inner_panel)
@@ -258,6 +260,8 @@ impl BExplorerIced {
         &self,
         palette: Palette,
     ) -> Element<'_, Message> {
+        let (window_bg, window_title_bg) = palette.native_utility_backgrounds();
+        let card_bg = palette.native_utility_card_background(self.config.vibrancy_active);
         let threats = self
             .defender_summary
             .as_ref()
@@ -301,7 +305,7 @@ impl BExplorerIced {
         .width(Length::Fill)
         .style(move |_| {
             container::Style::default()
-                .background(palette.overlay_title_bg)
+                .background(window_title_bg)
                 .border(border::rounded(border::top(WINDOW_RADIUS - 1.0)))
         });
 
@@ -349,13 +353,11 @@ impl BExplorerIced {
                     .height(Length::Fixed(DEFENDER_THREAT_CARD_HEIGHT))
                     .clip(true)
                     .style(move |_| {
-                        container::Style::default()
-                            .background(palette.input_bg)
-                            .border(
-                                border::rounded(6)
-                                    .color(Color::from_rgb8(170, 68, 68))
-                                    .width(1),
-                            )
+                        container::Style::default().background(card_bg).border(
+                            border::rounded(6)
+                                .color(Color::from_rgb8(170, 68, 68))
+                                .width(1),
+                        )
                     }),
             );
         }
@@ -454,7 +456,7 @@ impl BExplorerIced {
         let body = container(content)
             .width(Length::Fill)
             .height(Length::Fixed(body_height))
-            .style(move |_| container::Style::default().background(palette.overlay_bg));
+            .style(move |_| container::Style::default().background(window_bg));
         let inner_panel = container(
             column![title_bar, body]
                 .width(Length::Fill)
@@ -465,7 +467,7 @@ impl BExplorerIced {
         .clip(true)
         .style(move |_| {
             container::Style::default()
-                .background(palette.overlay_bg)
+                .background(window_bg)
                 .border(border::rounded(WINDOW_RADIUS - WINDOW_BORDER_WIDTH))
         });
         let panel = container(inner_panel)

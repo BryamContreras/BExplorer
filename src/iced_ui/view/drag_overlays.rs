@@ -140,7 +140,16 @@ impl BExplorerIced {
     }
 
     pub(super) fn file_drag_overlay(&self, palette: Palette) -> Option<Element<'_, Message>> {
-        let drag = self.file_drag.as_ref().filter(|drag| drag.dragging)?;
+        let fade = self.file_drag_fade_progress.clamp(0.0, 1.0);
+        if fade <= 0.0 {
+            return None;
+        }
+        let drag = self
+            .file_drag
+            .as_ref()
+            .filter(|drag| drag.dragging)
+            .or(self.file_drag_fade_snapshot.as_ref())?;
+        let palette = palette.with_opacity(fade);
         let extracts_archive_entries = drag
             .sources
             .iter()
@@ -220,46 +229,39 @@ impl BExplorerIced {
         };
         let message = ellipsize_to_width(&message, 236.0, self.font_size());
         let hint = ellipsize_to_width(&hint, 236.0, (self.font_size() - 1.0).max(10.0));
-        let preview_stack = self.file_drag_preview_stack(drag, palette);
-        let card = column![
-            container(Space::new())
-                .height(2)
-                .width(Length::Fill)
-                .style(move |_| container::Style::default().background(accent_gradient(palette))),
-            container(
-                row![
-                    preview_stack,
-                    column![
-                        text(message)
-                            .size(self.font_size())
-                            .color(palette.text)
-                            .wrapping(iced::widget::text::Wrapping::None),
-                        text(hint)
-                            .size((self.font_size() - 1.0).max(10.0))
-                            .color(palette.muted_text),
-                    ]
-                    .spacing(2)
-                    .width(Length::Fill),
+        let preview_stack = self.file_drag_preview_stack(drag, palette, fade);
+        let card = container(
+            row![
+                preview_stack,
+                column![
+                    text(message)
+                        .size(self.font_size())
+                        .color(palette.text)
+                        .wrapping(iced::widget::text::Wrapping::None),
+                    text(hint)
+                        .size((self.font_size() - 1.0).max(10.0))
+                        .color(palette.muted_text),
                 ]
-                .spacing(9)
-                .align_y(Alignment::Center)
+                .spacing(2)
                 .width(Length::Fill),
-            )
-            .padding([8, 10])
-            .clip(true),
-        ]
-        .spacing(0)
-        .width(296);
+            ]
+            .spacing(9)
+            .align_y(Alignment::Center)
+            .width(Length::Fill),
+        )
+        .width(296)
+        .padding([8, 10])
+        .clip(true);
         let card = container(card).clip(true).style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
                 .border(
                     border::rounded(6)
-                        .color(translucent_color(palette.accent, 0.78))
+                        .color(translucent_color(palette.accent, 0.78 * fade))
                         .width(1),
                 )
                 .shadow(iced::Shadow {
-                    color: Color::from_rgba8(0, 0, 0, 0.34),
+                    color: Color::from_rgba8(0, 0, 0, 0.34 * fade),
                     offset: Vector::new(0.0, 5.0),
                     blur_radius: 12.0,
                 })
@@ -276,6 +278,7 @@ impl BExplorerIced {
         &self,
         drag: &FileDragState,
         palette: Palette,
+        fade: f32,
     ) -> Element<'_, Message> {
         const SINGLE_PREVIEW_SIZE: f32 = 34.0;
         const GROUP_PREVIEW_SIZE: f32 = 30.0;
@@ -309,6 +312,7 @@ impl BExplorerIced {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .content_fit(ContentFit::Cover)
+                    .opacity(fade)
                     .into()
             } else {
                 container(inline_icon(
@@ -331,11 +335,11 @@ impl BExplorerIced {
                         .background(palette.table_bg)
                         .border(
                             border::rounded(4)
-                                .color(translucent_color(palette.accent_text, 0.88))
+                                .color(translucent_color(palette.accent_text, 0.88 * fade))
                                 .width(1.5),
                         )
                         .shadow(iced::Shadow {
-                            color: Color::from_rgba8(0, 0, 0, 0.38),
+                            color: Color::from_rgba8(0, 0, 0, 0.38 * fade),
                             offset: Vector::new(1.0, 1.0),
                             blur_radius: 3.0,
                         })

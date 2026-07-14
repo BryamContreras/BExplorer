@@ -68,6 +68,10 @@ La compatibilidad continua se valida especialmente en:
   mosaicos.
 - Soporte para unidades locales, extraibles, ISO montadas, rutas UNC, red,
   montajes Linux, WPD/MTP en Windows y dispositivos GVfs/FUSE en Linux.
+- Formateo de discos que no sean del sistema con elevacion nativa en Windows y
+  UDisks2/Polkit en Linux. Linux permite discos externos y discos locales
+  secundarios, pero bloquea el disco fisico del sistema, firmware, imagenes
+  loop, RAID y almacenamiento por capas antes de desmontar y formatear.
 - Descubrimiento progresivo de red con cache.
 - Copiar, cortar y pegar compatible con el portapapeles de Windows; en Linux se
   usan helpers MIME nativos cuando existen, con fallback de texto.
@@ -100,7 +104,9 @@ actual usa piezas comunes del sistema:
 - Freedesktop Icon Theme y Shared MIME Info para iconos de archivos;
 - cache XDG de thumbnails antes de generar miniaturas propias;
 - portapapeles MIME con `wl-copy`/`wl-paste`, `xclip` o `xsel` cuando existen;
-- UDisks2 mediante `udisksctl` para montar/expulsar ISO o unidades;
+- UDisks2 mediante `udisksctl` para montar/expulsar ISO o unidades, y mediante
+  su API D-Bus estable para formatear discos que no sean del sistema con
+  autorizacion Polkit;
 - Polkit mediante `pkexec` para reintentos elevados;
 - `gio`, Samba y Avahi como descubrimiento de red de mejor esfuerzo;
 - dispositivos MTP ya montados por GVfs/FUSE bajo `/run/user/.../gvfs`;
@@ -122,7 +128,8 @@ Integraciones opcionales recomendadas en Linux:
 
 - `wl-clipboard`, `xclip` o `xsel`;
 - `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop`;
-- `udisks2`;
+- `udisks2` y las herramientas de filesystem correspondientes (`e2fsprogs`,
+  `dosfstools`, `exfatprogs`, `ntfs-3g`, `btrfs-progs`, `xfsprogs`);
 - `polkit`;
 - `xdg-utils`, GLib/GVfs;
 - `smbclient`, `smbtree` y opcionalmente Avahi;
@@ -182,8 +189,9 @@ Consulta `THIRD_PARTY_NOTICES.md` y los archivos originales en
 La configuracion y la sesion se escriben en archivos temporales hermanos, se
 sincronizan y se reemplazan atomicamente. Las copias con conflicto `Reemplazar`
 tambien usan una copia preparada y sincronizada antes de modificar el destino.
-La suite actual ejecuta 98 pruebas, incluyendo una regresion que fuerza
-un fallo durante un reemplazo y verifica que el destino original se conserva.
+La suite incluye una regresion que fuerza un fallo durante un reemplazo y
+verifica que el destino original se conserva, ademas de protecciones para el
+formateo de almacenamiento en Linux.
 
 Los paquetes portables de Windows incluyen checksum, pero pueden mostrar una
 advertencia de SmartScreen hasta que exista un instalador firmado. Consulta

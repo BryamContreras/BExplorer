@@ -7,8 +7,8 @@
 use std::ffi::c_void;
 use std::io::Result;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Mutex, OnceLock};
-use std::sync::mpsc::{self, Receiver};
 
 use sctk::reexports::calloop::channel::{self, Sender};
 use sctk::reexports::client::Connection;
@@ -19,6 +19,7 @@ mod state;
 mod worker;
 
 static FILE_DROPS: OnceLock<Mutex<Vec<Vec<PathBuf>>>> = OnceLock::new();
+static FILE_DROP_NOTIFIER: OnceLock<Mutex<Option<SyncSender<()>>>> = OnceLock::new();
 
 /// Retrieves local paths dropped onto the Wayland surface associated with the
 /// clipboard. This is intentionally process-global: toolkits own the
@@ -32,12 +33,38 @@ pub fn take_file_drops() -> Vec<Vec<PathBuf>> {
         .unwrap_or_default()
 }
 
+/// Subscribes to completed Wayland file drops without polling.
+///
+/// Only one application receiver is needed. If a drop completed immediately
+/// before the receiver was installed, registration emits a notification for
+/// the already queued paths.
+pub fn file_drop_receiver() -> Receiver<()> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    if let Ok(mut notifier) = FILE_DROP_NOTIFIER.get_or_init(|| Mutex::new(None)).lock() {
+        *notifier = Some(sender.clone());
+    }
+
+    let has_pending_drop = FILE_DROPS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .is_ok_and(|drops| !drops.is_empty());
+    if has_pending_drop {
+        let _ = sender.try_send(());
+    }
+    receiver
+}
+
 pub(crate) fn push_file_drop(paths: Vec<PathBuf>) {
     if paths.is_empty() {
         return;
     }
     if let Ok(mut drops) = FILE_DROPS.get_or_init(|| Mutex::new(Vec::new())).lock() {
         drops.push(paths);
+    }
+    if let Ok(notifier) = FILE_DROP_NOTIFIER.get_or_init(|| Mutex::new(None)).lock()
+        && let Some(sender) = notifier.as_ref()
+    {
+        let _ = sender.try_send(());
     }
 }
 
@@ -125,5 +152,23 @@ impl Drop for Clipboard {
         if let Some(clipboard_thread) = self.clipboard_thread.take() {
             let _ = clipboard_thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn completed_file_drop_wakes_receiver_without_polling() {
+        let _ = take_file_drops();
+        let receiver = file_drop_receiver();
+        let paths = vec![PathBuf::from("/tmp/event-driven-drop")];
+
+        push_file_drop(paths.clone());
+
+        assert_eq!(receiver.recv_timeout(Duration::from_millis(100)), Ok(()));
+        assert_eq!(take_file_drops(), vec![paths]);
     }
 }

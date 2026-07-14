@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crate::utils::errors::{BExplorerError, Result};
 
+pub use crate::platform::shell::{FormatDriveIdentity, FormatDriveOutcome};
+
 #[derive(Clone, Debug)]
 pub struct TrashUndoRecord {
     pub id: OsString,
@@ -304,14 +306,26 @@ pub fn available_format_filesystems(path: &Path) -> Vec<String> {
     crate::platform::shell::available_format_filesystems(path)
 }
 
+pub fn format_drive_identity(path: &Path) -> Result<Option<FormatDriveIdentity>> {
+    crate::platform::shell::format_drive_identity(path)
+}
+
 pub fn format_drive(
     path: &Path,
     filesystem: &str,
     label: &str,
     quick: bool,
     allocation_unit_size: Option<u64>,
-) -> Result<()> {
-    crate::platform::shell::format_drive(path, filesystem, label, quick, allocation_unit_size)
+    expected_identity: Option<&FormatDriveIdentity>,
+) -> Result<FormatDriveOutcome> {
+    crate::platform::shell::format_drive(
+        path,
+        filesystem,
+        label,
+        quick,
+        allocation_unit_size,
+        expected_identity,
+    )
 }
 
 #[allow(dead_code)]

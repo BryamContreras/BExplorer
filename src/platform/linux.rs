@@ -153,8 +153,22 @@ pub fn cached_desktop_thumbnail(path: &Path) -> Option<NativeIconImage> {
 pub fn apply_window_corners(
     window_handle: &WindowHandle<'_>,
     display_handle: &DisplayHandle<'_>,
+    width: u32,
+    height: u32,
     radius: u32,
 ) -> Result<()> {
+    if matches!(display_handle.as_raw(), RawDisplayHandle::Wayland(_))
+        && matches!(window_handle.as_raw(), RawWindowHandle::Wayland(_))
+    {
+        return kwin_blur::update_window_blur_region(
+            display_handle.as_raw(),
+            window_handle.as_raw(),
+            width,
+            height,
+            radius,
+        );
+    }
+
     let (RawDisplayHandle::Xlib(display_handle), RawWindowHandle::Xlib(window_handle)) =
         (display_handle.as_raw(), window_handle.as_raw())
     else {
@@ -176,6 +190,9 @@ pub fn apply_window_blur<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
     window: &W,
     enabled: bool,
     intensity: u8,
+    width: u32,
+    height: u32,
+    radius: u32,
 ) -> Result<bool> {
     #[cfg(target_os = "linux")]
     {
@@ -201,7 +218,14 @@ pub fn apply_window_blur<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
         };
     }
 
-    kwin_blur::set_window_blur(display_handle.as_raw(), window_handle.as_raw(), enabled)?;
+    kwin_blur::set_window_blur(
+        display_handle.as_raw(),
+        window_handle.as_raw(),
+        enabled,
+        width,
+        height,
+        radius,
+    )?;
     Ok(enabled)
 }
 
@@ -267,6 +291,19 @@ pub fn prepare_native_file_drag(
     wayland_drag::prepare(raw_display_handle, raw_window_handle);
 }
 
+pub fn release_native_window_resources(
+    raw_display_handle: RawDisplayHandle,
+    raw_window_handle: RawWindowHandle,
+) {
+    kwin_blur::release_window(raw_display_handle, raw_window_handle);
+    wayland_drag::release_window(raw_display_handle, raw_window_handle);
+}
+
+pub fn release_native_display_resources(raw_display_handle: RawDisplayHandle) {
+    kwin_blur::release_display(raw_display_handle);
+    wayland_drag::release_display(raw_display_handle);
+}
+
 pub fn take_native_file_drops(
     raw_display_handle: RawDisplayHandle,
     raw_window_handle: RawWindowHandle,
@@ -283,6 +320,10 @@ pub fn take_native_file_drops(
         ));
     }
     (drops, false)
+}
+
+pub fn native_file_drop_receiver() -> std::sync::mpsc::Receiver<()> {
+    smithay_clipboard::file_drop_receiver()
 }
 
 pub fn start_file_drag(

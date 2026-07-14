@@ -1,7 +1,22 @@
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 use std::path::Path;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::process::Command;
 
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+use super::{FormatDriveIdentity, FormatDriveOutcome};
+#[cfg(not(all(unix, not(target_os = "macos"))))]
 use crate::utils::errors::{BExplorerError, Result};
+
+#[cfg(all(unix, not(target_os = "macos")))]
+mod linux;
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(super) use linux::{available_format_filesystems, format_drive, format_drive_identity};
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+pub(super) fn format_drive_identity(_path: &Path) -> Result<Option<FormatDriveIdentity>> {
+    Ok(None)
+}
 
 #[cfg(target_os = "windows")]
 pub(super) fn available_format_filesystems(path: &Path) -> Vec<String> {
@@ -24,7 +39,8 @@ pub(super) fn format_drive(
     label: &str,
     quick: bool,
     allocation_unit_size: Option<u64>,
-) -> Result<()> {
+    _expected_identity: Option<&FormatDriveIdentity>,
+) -> Result<FormatDriveOutcome> {
     let drive = path
         .to_str()
         .filter(|value| value.len() >= 2 && value.as_bytes().get(1) == Some(&b':'))
@@ -91,7 +107,10 @@ pub(super) fn format_drive(
         .filter(|detail| !detail.is_empty());
     let _ = std::fs::remove_file(&error_file);
     if status.success() {
-        Ok(())
+        Ok(FormatDriveOutcome {
+            mount_path: Some(path.to_path_buf()),
+            warning: None,
+        })
     } else {
         let message = detail.unwrap_or_else(|| {
             format!(
@@ -104,63 +123,6 @@ pub(super) fn format_drive(
             path.display()
         )))
     }
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(super) fn available_format_filesystems(_path: &Path) -> Vec<String> {
-    [
-        ("ext4", "mkfs.ext4"),
-        ("btrfs", "mkfs.btrfs"),
-        ("xfs", "mkfs.xfs"),
-        ("exfat", "mkfs.exfat"),
-        ("vfat", "mkfs.vfat"),
-        ("ntfs", "mkfs.ntfs"),
-    ]
-    .into_iter()
-    .filter(|(_, command)| command_exists(command))
-    .map(|(filesystem, _)| filesystem.to_owned())
-    .collect()
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-pub(super) fn format_drive(
-    path: &Path,
-    filesystem: &str,
-    label: &str,
-    _quick: bool,
-    _allocation_unit_size: Option<u64>,
-) -> Result<()> {
-    if !command_exists("udisksctl") {
-        return Err(BExplorerError::Operation(
-            "udisksctl is required to format drives safely".into(),
-        ));
-    }
-    let source = linux_mount_source_for_path(path).ok_or_else(|| {
-        BExplorerError::Operation(format!(
-            "Could not find the block device for {}",
-            path.display()
-        ))
-    })?;
-    let mut unmount = Command::new("udisksctl");
-    unmount.args(["unmount", "--block-device"]).arg(&source);
-    run_udisks_command(&mut unmount, "Could not unmount drive")?;
-
-    let filesystem = filesystem.trim().to_ascii_lowercase();
-    let supported = ["ext4", "btrfs", "xfs", "exfat", "vfat", "ntfs"];
-    if !supported.contains(&filesystem.as_str()) {
-        return Err(BExplorerError::Operation(format!(
-            "Unsupported Linux file system: {filesystem}"
-        )));
-    }
-    let mut format = Command::new("udisksctl");
-    format
-        .args(["format", "--block-device"])
-        .arg(&source)
-        .args(["--type", filesystem.as_str()]);
-    if !label.trim().is_empty() {
-        format.args(["--label", label]);
-    }
-    run_udisks_command(&mut format, "Could not format drive")
 }
 
 #[cfg(target_os = "macos")]
@@ -178,7 +140,8 @@ pub(super) fn format_drive(
     label: &str,
     _quick: bool,
     _allocation_unit_size: Option<u64>,
-) -> Result<()> {
+    _expected_identity: Option<&FormatDriveIdentity>,
+) -> Result<FormatDriveOutcome> {
     let filesystem = match filesystem.to_ascii_lowercase().as_str() {
         "apfs" => "APFS",
         "exfat" => "ExFAT",
@@ -195,7 +158,10 @@ pub(super) fn format_drive(
         .status()
         .map_err(|error| BExplorerError::Shell(error.to_string()))?;
     if status.success() {
-        Ok(())
+        Ok(FormatDriveOutcome {
+            mount_path: Some(path.to_path_buf()),
+            warning: None,
+        })
     } else {
         Err(BExplorerError::Operation(format!(
             "Could not format {} (diskutil exit code {}).",
@@ -217,7 +183,8 @@ pub(super) fn format_drive(
     _label: &str,
     _quick: bool,
     _allocation_unit_size: Option<u64>,
-) -> Result<()> {
+    _expected_identity: Option<&FormatDriveIdentity>,
+) -> Result<FormatDriveOutcome> {
     Err(BExplorerError::Operation(
         "Drive formatting is not supported on this platform".into(),
     ))
@@ -237,65 +204,4 @@ fn powershell_encoded_command(script: &str) -> String {
 #[cfg(target_os = "windows")]
 fn powershell_single_quoted(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn command_exists(command: &str) -> bool {
-    std::env::var_os("PATH")
-        .into_iter()
-        .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .any(|directory| directory.join(command).is_file())
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn linux_mount_source_for_path(path: &Path) -> Option<std::path::PathBuf> {
-    let text = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
-    text.lines()
-        .filter_map(parse_mountinfo_source)
-        .filter_map(|(mount_point, source)| {
-            path.starts_with(&mount_point)
-                .then_some((mount_point, source))
-        })
-        .max_by_key(|(mount_point, _)| mount_point.as_os_str().len())
-        .map(|(_, source)| source)
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn parse_mountinfo_source(line: &str) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
-    let (before, after) = line.split_once(" - ")?;
-    let before = before.split_whitespace().collect::<Vec<_>>();
-    let after = after.split_whitespace().collect::<Vec<_>>();
-    if before.len() < 5 || after.len() < 2 {
-        return None;
-    }
-    Some((
-        std::path::PathBuf::from(decode_mount_field(before[4])),
-        std::path::PathBuf::from(decode_mount_field(after[1])),
-    ))
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn decode_mount_field(value: &str) -> String {
-    value
-        .replace("\\040", " ")
-        .replace("\\011", "\t")
-        .replace("\\012", "\n")
-        .replace("\\134", "\\")
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn run_udisks_command(command: &mut Command, context: &str) -> Result<()> {
-    let output = command
-        .output()
-        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(BExplorerError::Operation(if detail.is_empty() {
-            context.to_owned()
-        } else {
-            format!("{context}: {detail}")
-        }))
-    }
 }

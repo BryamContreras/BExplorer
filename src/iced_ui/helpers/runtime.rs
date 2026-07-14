@@ -32,6 +32,9 @@ pub(in crate::iced_ui) fn main_window_settings(size: Size, maximized: bool) -> w
         decorations: false,
         resizable: true,
         transparent: true,
+        // The application owns the shutdown sequence so borrowed native
+        // resources can be released before winit destroys the window.
+        exit_on_close_request: false,
         icon: app_window_icon(),
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {
@@ -76,6 +79,7 @@ fn fixed_progress_window_settings(size: Size, position: Option<Point>) -> window
         decorations: false,
         resizable: false,
         transparent: true,
+        exit_on_close_request: false,
         icon: app_window_icon(),
         #[cfg(target_os = "linux")]
         platform_specific: window::settings::PlatformSpecific {
@@ -84,6 +88,32 @@ fn fixed_progress_window_settings(size: Size, position: Option<Point>) -> window
         },
         ..window::Settings::default()
     }
+}
+
+pub(in crate::iced_ui) fn close_window_after_native_cleanup(id: window::Id) -> Task<Message> {
+    window::run(id, move |native_window| {
+        if let (Ok(display_handle), Ok(window_handle)) = (
+            native_window.display_handle(),
+            native_window.window_handle(),
+        ) {
+            crate::platform::release_external_window_resources(
+                display_handle.as_raw(),
+                window_handle.as_raw(),
+            );
+        }
+        Message::Noop
+    })
+    .chain(window::close(id))
+}
+
+pub(in crate::iced_ui) fn close_application_after_native_cleanup(id: window::Id) -> Task<Message> {
+    window::run(id, move |native_window| {
+        if let Ok(display_handle) = native_window.display_handle() {
+            crate::platform::release_external_display_resources(display_handle.as_raw());
+        }
+        Message::Noop
+    })
+    .chain(window::close(id))
 }
 
 pub(in crate::iced_ui) fn transfer_window_settings(size: Size) -> window::Settings {
@@ -202,15 +232,36 @@ pub(in crate::iced_ui) fn async_progress_tick_stream() -> impl iced::futures::St
     periodic_message_stream(Duration::from_millis(33), Message::AsyncProgressTick)
 }
 
-pub(in crate::iced_ui) fn external_drag_tick_stream(
-    active: &bool,
-) -> impl iced::futures::Stream<Item = Message> + use<> {
-    let interval = if *active {
-        Duration::from_millis(16)
-    } else {
-        Duration::from_millis(100)
-    };
-    periodic_message_stream(interval, Message::PollExternalFileDrag)
+pub(in crate::iced_ui) fn external_drag_tick_stream() -> impl iced::futures::Stream<Item = Message>
+{
+    periodic_message_stream(Duration::from_millis(16), Message::PollExternalFileDrag)
+}
+
+pub(in crate::iced_ui) fn external_drag_polling_required(
+    preparing_drag: bool,
+    native_drag_active: bool,
+) -> bool {
+    preparing_drag || native_drag_active
+}
+
+pub(in crate::iced_ui) fn external_file_drop_stream() -> impl iced::futures::Stream<Item = Message>
+{
+    use iced::futures::channel::mpsc;
+
+    iced::stream::channel(1, move |output: mpsc::Sender<Message>| async move {
+        thread::spawn(move || {
+            let receiver = crate::platform::external_file_drop_receiver();
+            let mut output = output;
+            while receiver.recv().is_ok() {
+                if let Err(error) = output.try_send(Message::PollExternalFileDrag)
+                    && error.is_disconnected()
+                {
+                    break;
+                }
+            }
+        });
+        iced::futures::future::pending::<()>().await;
+    })
 }
 
 pub(in crate::iced_ui) fn search_tick_stream() -> impl iced::futures::Stream<Item = Message> {

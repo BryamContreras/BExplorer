@@ -38,6 +38,7 @@ pub(in crate::iced_ui) fn compare_entries_for_view(
     sort_column: TableColumn,
     sort_ascending: bool,
 ) -> std::cmp::Ordering {
+    let system_drive_order = compare_system_drive_first(left, right);
     let container_order = right.kind.is_container().cmp(&left.kind.is_container());
     let group_order = compare_entries_by_group(left, right, group_mode);
     let group_order = if group_ascending {
@@ -57,7 +58,8 @@ pub(in crate::iced_ui) fn compare_entries_for_view(
         container_order
     };
 
-    primary_order
+    system_drive_order
+        .then(primary_order)
         .then(secondary_order)
         .then_with(|| {
             let order = compare_entries_by_column(left, right, sort_column);
@@ -68,6 +70,15 @@ pub(in crate::iced_ui) fn compare_entries_for_view(
             }
         })
         .then_with(|| explorer::compare_names_case_insensitive(&left.name, &right.name))
+}
+
+pub(in crate::iced_ui) fn compare_system_drive_first(
+    left: &FileEntry,
+    right: &FileEntry,
+) -> std::cmp::Ordering {
+    let left_is_system = left.drive_kind == Some(DriveKind::System);
+    let right_is_system = right.drive_kind == Some(DriveKind::System);
+    right_is_system.cmp(&left_is_system)
 }
 
 pub(in crate::iced_ui) fn compare_entries_by_group(

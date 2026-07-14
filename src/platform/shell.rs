@@ -21,6 +21,24 @@ mod format;
 #[cfg(target_os = "windows")]
 pub use defender::WindowsDefenderScanResult;
 
+#[derive(Clone, Debug)]
+pub struct FormatDriveOutcome {
+    pub mount_path: Option<PathBuf>,
+    pub warning: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FormatDriveIdentity {
+    components: Vec<String>,
+}
+
+impl FormatDriveIdentity {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    pub(in crate::platform::shell) fn from_components(components: Vec<String>) -> Self {
+        Self { components }
+    }
+}
+
 #[cfg_attr(test, allow(dead_code))]
 #[derive(Clone, Debug)]
 pub struct ClipboardFiles {
@@ -147,14 +165,26 @@ pub fn available_format_filesystems(path: &Path) -> Vec<String> {
     format::available_format_filesystems(path)
 }
 
+pub fn format_drive_identity(path: &Path) -> Result<Option<FormatDriveIdentity>> {
+    format::format_drive_identity(path)
+}
+
 pub fn format_drive(
     path: &Path,
     filesystem: &str,
     label: &str,
     quick: bool,
     allocation_unit_size: Option<u64>,
-) -> Result<()> {
-    format::format_drive(path, filesystem, label, quick, allocation_unit_size)
+    expected_identity: Option<&FormatDriveIdentity>,
+) -> Result<FormatDriveOutcome> {
+    format::format_drive(
+        path,
+        filesystem,
+        label,
+        quick,
+        allocation_unit_size,
+        expected_identity,
+    )
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]

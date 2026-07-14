@@ -242,6 +242,9 @@ struct BExplorerIced {
     suppress_open_after_rename_until: Option<Instant>,
     rubber_band: Option<RubberBandSelection>,
     file_drag: Option<FileDragState>,
+    file_drag_fade_snapshot: Option<FileDragState>,
+    file_drag_fade_progress: f32,
+    file_drag_fade_target: f32,
     file_drag_suppressed_click: Option<(PaneId, usize)>,
     native_external_drag_active: bool,
     pending_external_file_drops: Vec<PathBuf>,
@@ -268,6 +271,7 @@ struct BExplorerIced {
     sidebar_pointer_inside: bool,
     window_maximized: bool,
     main_window_id: Option<window::Id>,
+    closing_windows: HashSet<window::Id>,
     transfer_window_id: Option<window::Id>,
     transfer_window_item_count: usize,
     archive_window_id: Option<window::Id>,
@@ -640,6 +644,9 @@ impl BExplorerIced {
             suppress_open_after_rename_until: None,
             rubber_band: None,
             file_drag: None,
+            file_drag_fade_snapshot: None,
+            file_drag_fade_progress: 0.0,
+            file_drag_fade_target: 0.0,
             file_drag_suppressed_click: None,
             native_external_drag_active: false,
             pending_external_file_drops: Vec::new(),
@@ -658,6 +665,7 @@ impl BExplorerIced {
             accent_hue_pointer: None,
             window_maximized: initial_window_maximized,
             main_window_id: None,
+            closing_windows: HashSet::new(),
             transfer_window_id: None,
             transfer_window_item_count: 0,
             archive_window_id: None,
@@ -818,6 +826,8 @@ impl BExplorerIced {
             self.main_window_id,
             self.transfer_window_id,
             self.archive_window_id,
+            self.defender_window_id,
+            self.defender_threats_window_id,
         ]
         .into_iter()
         .flatten()
@@ -831,6 +841,22 @@ impl BExplorerIced {
         self.apply_window_appearance_task_for(id, true)
     }
 
+    fn close_window_task(&mut self, id: window::Id) -> Task<Message> {
+        if self.closing_windows.insert(id) {
+            close_window_after_native_cleanup(id)
+        } else {
+            Task::none()
+        }
+    }
+
+    fn close_application_task(&mut self, id: window::Id) -> Task<Message> {
+        if self.closing_windows.insert(id) {
+            close_application_after_native_cleanup(id)
+        } else {
+            Task::none()
+        }
+    }
+
     fn sync_main_window_maximized_task(&self, id: window::Id) -> Task<Message> {
         window::is_maximized(id).map(move |maximized| Message::WindowMaximizedState(id, maximized))
     }
@@ -840,6 +866,27 @@ impl BExplorerIced {
             1.0
         } else {
             WINDOW_RADIUS
+        }
+    }
+
+    fn window_appearance_size(&self, id: window::Id) -> Size {
+        if self.main_window_id == Some(id) {
+            self.window_size
+        } else if self.transfer_window_id == Some(id) {
+            self.transfer_window_size()
+        } else if self.archive_window_id == Some(id) {
+            self.archive_window_size()
+        } else if self.defender_window_id == Some(id) {
+            self.defender_window_size()
+        } else if self.defender_threats_window_id == Some(id) {
+            let threat_count = self
+                .defender_summary
+                .as_ref()
+                .map(|summary| summary.threats.len())
+                .unwrap_or_default();
+            defender_threats_window_size(threat_count)
+        } else {
+            self.window_size
         }
     }
 
@@ -936,6 +983,9 @@ impl BExplorerIced {
         }
         .round()
         .max(1.0) as u32;
+        let size = self.window_appearance_size(id);
+        let width = size.width.ceil().max(1.0) as u32;
+        let height = size.height.ceil().max(1.0) as u32;
         let vibrancy = self.config.vibrancy;
         let vibrancy_intensity = self.config.vibrancy_intensity;
         let dark = self.is_dark_theme();
@@ -945,8 +995,13 @@ impl BExplorerIced {
                 native_window.window_handle(),
                 native_window.display_handle(),
             ) {
-                let _ =
-                    crate::platform::apply_window_corners(&window_handle, &display_handle, radius);
+                let _ = crate::platform::apply_window_corners(
+                    &window_handle,
+                    &display_handle,
+                    width,
+                    height,
+                    radius,
+                );
                 if cancel_autoplay {
                     #[cfg(target_os = "windows")]
                     let _ = crate::platform::install_autoplay_cancel(&window_handle);
@@ -959,6 +1014,9 @@ impl BExplorerIced {
                     vibrancy,
                     vibrancy_intensity,
                     dark,
+                    width,
+                    height,
+                    radius,
                 )
                 .unwrap_or_else(|error| {
                     crate::utils::log::info(format!(
@@ -999,6 +1057,7 @@ impl BExplorerIced {
         let animation_frame = if self.sidebar_animation_active()
             || self.preview_panel_animation_active()
             || self.popup_fade_animation_active()
+            || self.file_drag_fade_animation_active()
         {
             window::frames().map(Message::AnimationFrame)
         } else {
@@ -1014,10 +1073,22 @@ impl BExplorerIced {
         } else {
             Subscription::none()
         };
-        // Wayland delivers file drops through the data-device queue instead
-        // of Winit's `FileDropped` event. Pump it lightly while idle too.
-        let external_drag_tick =
-            Subscription::run_with(self.native_external_drag_active, external_drag_tick_stream);
+        // Poll the custom Wayland source only while a BExplorer drag is being
+        // prepared or remains active. Incoming drops arrive through the
+        // blocking event-driven subscription below and need no idle timer.
+        let external_drag_tick = if external_drag_polling_required(
+            self.file_drag.is_some(),
+            self.native_external_drag_active,
+        ) {
+            Subscription::run(external_drag_tick_stream)
+        } else {
+            Subscription::none()
+        };
+        let external_file_drops = if cfg!(all(unix, not(target_os = "macos"))) {
+            Subscription::run(external_file_drop_stream)
+        } else {
+            Subscription::none()
+        };
         let search_tick = if self.search_in_progress() {
             Subscription::run(search_tick_stream)
         } else {
@@ -1036,6 +1107,7 @@ impl BExplorerIced {
 
         Subscription::batch([
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
+            window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
             keyboard_events,
             pointer_events,
@@ -1044,6 +1116,7 @@ impl BExplorerIced {
             scrollbar_tick,
             async_progress_tick,
             external_drag_tick,
+            external_file_drops,
             search_tick,
             system_theme_changes,
             storage_changes,

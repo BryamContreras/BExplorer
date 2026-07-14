@@ -53,6 +53,10 @@ readable fallback when those optional services are unavailable.
 - Details, list, icons, large icons, extra-large icons, and tile views.
 - Local drives, removable drives, mounted ISO images, UNC paths, network
   locations, Linux mount points, and Windows MTP portable devices.
+- Non-system drive formatting with native Windows elevation or UDisks2/Polkit
+  on Linux. Linux permits external drives and secondary local disks while
+  blocking the physical system disk, firmware, loop, layered, and RAID
+  devices, then unmounts and remounts the selected filesystem safely.
 - Progressive network discovery with cached results.
 - Windows Explorer-compatible file clipboard for regular file paths, plus
   native MIME clipboard helpers and a text/URI-list fallback for Linux.
@@ -145,6 +149,7 @@ blocking the UI.
 | MTP portable devices | WPD/MTP | Mounted GVfs/FUSE devices | Not supported |
 | Network discovery | Native providers | GVfs/Samba/Avahi | Mounted SMB only |
 | ISO mount/eject | Supported | UDisks2 | Experimental |
+| Non-system drive format | Format-Volume | UDisks2 D-Bus | Experimental |
 | Window blur | Native Windows effects | KWin / Blur My Shell | Experimental |
 | Windows Defender scan | Supported | N/A | N/A |
 
@@ -178,8 +183,10 @@ the batching only limits how many widgets are constructed at once.
 On Linux, file icons are resolved through the Freedesktop icon theme layout and
 Shared MIME Info database. Image thumbnails first try the standard XDG
 thumbnail cache and then fall back to BExplorer's internal thumbnail generation.
-Disk image mount/eject uses UDisks2 through `udisksctl` when available, elevated
-retry uses Polkit through `pkexec`, and network discovery uses available
+Disk image mount/eject uses UDisks2 through `udisksctl` when available.
+Non-system drive formatting uses the stable UDisks2 D-Bus API so authorization
+is handled by the distribution's Polkit policy. Elevated file-operation retry
+uses Polkit through `pkexec`, and network discovery uses available
 Freedesktop/GVfs, Avahi, and Samba command-line helpers.
 
 KDE Plasma/Wayland uses KWin's optional native blur protocol. GNOME/Mutter does
@@ -264,7 +271,9 @@ Optional Linux integrations:
 - `wl-clipboard`, `xclip`, or `xsel` for file clipboard MIME interoperability.
 - `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` for native
   drag-out to other applications on Wayland.
-- `udisks2` for ISO/USB mount and eject actions.
+- `udisks2` for ISO/USB mount, eject, and non-system drive formatting actions.
+- Filesystem tools such as `e2fsprogs`, `dosfstools`, `exfatprogs`, `ntfs-3g`,
+  `btrfs-progs`, and `xfsprogs` for the corresponding Linux format choices.
 - `polkit` with `pkexec` for elevated retry.
 - `xdg-utils` and GLib/GVfs (`gio`) for default app opening and mounted devices.
 - Samba tools such as `smbclient`/`smbtree`, and optionally Avahi, for network

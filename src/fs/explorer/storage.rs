@@ -198,6 +198,7 @@ fn linux_mount_is_firmware_partition(
 #[cfg(all(unix, not(target_os = "macos")))]
 fn linux_path_is_firmware_mount(path: &Path, fs_type: &str) -> bool {
     path == Path::new("/boot/efi")
+        || path == Path::new("/boot/firmware")
         || path == Path::new("/efi")
         || (path == Path::new("/boot") && linux_fs_type_is_fat(fs_type))
 }
@@ -225,10 +226,19 @@ fn linux_partition_type_is_firmware(partition_type: &str) -> bool {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn linux_udev_partition_type(major_minor: &str) -> Option<String> {
+    linux_udev_property(major_minor, "ID_PART_ENTRY_TYPE")
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_udev_property(major_minor: &str, property: &str) -> Option<String> {
     if major_minor.is_empty()
         || !major_minor
             .bytes()
             .all(|byte| byte.is_ascii_digit() || byte == b':')
+        || property.is_empty()
+        || !property
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
     {
         return None;
     }
@@ -237,8 +247,9 @@ fn linux_udev_partition_type(major_minor: &str) -> Option<String> {
         Path::new("/run/udev/data").join(format!("b{major_minor}")),
     )
     .ok()?;
+    let prefix = format!("E:{property}=");
     data.lines().find_map(|line| {
-        line.strip_prefix("E:ID_PART_ENTRY_TYPE=")
+        line.strip_prefix(&prefix)
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned)
@@ -415,6 +426,9 @@ fn linux_mount_label(path: &Path) -> String {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn linux_drive_kind(mount: &LinuxMount) -> DriveKind {
     let fs_type = mount.fs_type.to_ascii_lowercase();
+    if linux_mount_point_is_system(&mount.mount_point) {
+        return DriveKind::System;
+    }
     if linux_fs_type_is_network(&fs_type) {
         return DriveKind::Network;
     }
@@ -422,7 +436,7 @@ fn linux_drive_kind(mount: &LinuxMount) -> DriveKind {
         return DriveKind::Optical;
     }
     if linux_mount_source_is_loop(mount) {
-        return DriveKind::External;
+        return DriveKind::DiskImage;
     }
     if matches!(fs_type.as_str(), "ramfs" | "tmpfs") {
         return DriveKind::RamDisk;
@@ -430,12 +444,45 @@ fn linux_drive_kind(mount: &LinuxMount) -> DriveKind {
     if linux_mount_source_is_removable(mount) {
         return DriveKind::Usb;
     }
+    if linux_mount_source_is_usb(mount) {
+        return DriveKind::External;
+    }
     DriveKind::Local
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mount_point_is_system(path: &Path) -> bool {
+    path == Path::new("/")
+        || path == Path::new("/home")
+        || path == Path::new("/opt")
+        || path == Path::new("/srv")
+        || path == Path::new("/usr")
+        || path == Path::new("/var")
+        || path.starts_with("/boot")
+        || path.starts_with("/efi")
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn linux_mount_source_is_removable(mount: &LinuxMount) -> bool {
     linux_mount_block_name(mount).is_some_and(|name| linux_block_flag_is_one(&name, "removable"))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_mount_source_is_usb(mount: &LinuxMount) -> bool {
+    linux_udev_property(&mount.major_minor, "ID_BUS")
+        .is_some_and(|bus| bus.eq_ignore_ascii_case("usb"))
+        || linux_mount_block_name(mount).is_some_and(|name| linux_block_is_on_usb_bus(&name))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_block_is_on_usb_bus(block_name: &str) -> bool {
+    let Ok(device_path) = fs::canonicalize(Path::new("/sys/class/block").join(block_name)) else {
+        return false;
+    };
+    device_path.ancestors().any(|ancestor| {
+        fs::canonicalize(ancestor.join("subsystem"))
+            .is_ok_and(|subsystem| subsystem == Path::new("/sys/bus/usb"))
+    })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]

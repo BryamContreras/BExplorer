@@ -7,6 +7,7 @@ impl BExplorerIced {
         item: TransferDisplayState,
         palette: Palette,
     ) -> Element<'_, Message> {
+        let card_bg = palette.native_utility_card_background(self.config.vibrancy_active);
         let progress = if item.total_bytes == 0 {
             0.0
         } else {
@@ -161,7 +162,7 @@ impl BExplorerIced {
             .clip(true)
             .style(move |_| {
                 container::Style::default()
-                    .background(palette.input_bg)
+                    .background(card_bg)
                     .border(border::rounded(6).color(palette.border).width(1))
             })
             .into()
@@ -171,6 +172,7 @@ impl BExplorerIced {
         &self,
         palette: Palette,
     ) -> Element<'_, Message> {
+        let (window_bg, window_title_bg) = palette.native_utility_backgrounds();
         let items = self.transfer_items();
         let panel_height = transfer_window_size_for_item_count(items.len()).height;
         let inner_height = (panel_height - WINDOW_BORDER_WIDTH * 2.0).max(0.0);
@@ -199,7 +201,7 @@ impl BExplorerIced {
         .width(Length::Fill)
         .style(move |_| {
             container::Style::default()
-                .background(palette.overlay_title_bg)
+                .background(window_title_bg)
                 .border(border::rounded(border::top(WINDOW_RADIUS - 1.0)))
         });
 
@@ -246,7 +248,7 @@ impl BExplorerIced {
         let body = container(content)
             .width(Length::Fill)
             .height(Length::Fixed(body_height))
-            .style(move |_| container::Style::default().background(palette.overlay_bg));
+            .style(move |_| container::Style::default().background(window_bg));
 
         let inner_panel = container(
             column![title_bar, body]
@@ -258,7 +260,7 @@ impl BExplorerIced {
         .clip(true)
         .style(move |_| {
             container::Style::default()
-                .background(palette.overlay_bg)
+                .background(window_bg)
                 .border(border::rounded(WINDOW_RADIUS - WINDOW_BORDER_WIDTH))
         });
 

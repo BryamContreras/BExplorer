@@ -373,7 +373,7 @@ impl BExplorerIced {
             return Task::none();
         };
         self.transfer_window_item_count = 0;
-        window::close(id)
+        self.close_window_task(id)
     }
 
     pub(super) fn reopen_transfer_window_task(
@@ -388,7 +388,8 @@ impl BExplorerIced {
         ));
         self.transfer_window_id = Some(new_id);
         self.transfer_window_item_count = item_count;
-        window::close(old_id).chain(open_task.map(Message::TransferWindowOpened))
+        self.close_window_task(old_id)
+            .chain(open_task.map(Message::TransferWindowOpened))
     }
 
     pub(super) fn sync_transfer_window_size_task(&mut self) -> Task<Message> {
@@ -854,7 +855,19 @@ impl BExplorerIced {
                 ),
             );
         };
+        let drive_identity = match operations::format_drive_identity(&entry.path) {
+            Ok(identity) => identity,
+            Err(error) => return self.report_error(pane, error.to_string()),
+        };
         let display_name = entry.name.clone();
+        // Linux automounters commonly use the filesystem UUID as the mount
+        // directory when a volume has no label. Reusing that directory name
+        // would exceed the label limit of filesystems such as ext4 or XFS and
+        // make an otherwise valid format fail. Start empty and let the user
+        // choose an intentional label there.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let volume_label = String::new();
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
         let volume_label = entry
             .name
             .rsplit_once(" (")
@@ -867,6 +880,7 @@ impl BExplorerIced {
             capacity: entry.size,
             file_systems,
             file_system: default_file_system,
+            drive_identity,
             volume_label,
             allocation_unit_size: self.localized("Predeterminado", "Default").to_owned(),
             quick_format: true,
@@ -889,6 +903,7 @@ impl BExplorerIced {
         let filesystem = dialog.file_system.clone();
         let label = dialog.volume_label.trim().to_owned();
         let quick = dialog.quick_format;
+        let drive_identity = dialog.drive_identity;
         self.format_dialog = None;
         self.popup_backdrop = None;
         let state = self.pane_mut(pane);
@@ -907,6 +922,7 @@ impl BExplorerIced {
                     &label,
                     quick,
                     allocation_unit_size,
+                    drive_identity.as_ref(),
                 )
             }),
             move |result| Message::FormatFinished(pane, path, result),
@@ -1432,7 +1448,8 @@ impl BExplorerIced {
         ));
         self.archive_window_id = Some(new_id);
         self.archive_window_item_count = item_count;
-        window::close(old_id).chain(open_task.map(Message::ArchiveWindowOpened))
+        self.close_window_task(old_id)
+            .chain(open_task.map(Message::ArchiveWindowOpened))
     }
 
     pub(super) fn sync_archive_window_size_task(&mut self) -> Task<Message> {

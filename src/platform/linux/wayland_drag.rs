@@ -137,6 +137,45 @@ pub fn prepare(raw_display_handle: RawDisplayHandle, raw_window_handle: RawWindo
     });
 }
 
+pub(super) fn release_window(
+    raw_display_handle: RawDisplayHandle,
+    raw_window_handle: RawWindowHandle,
+) {
+    let Some((display_ptr, surface_ptr)) = wayland_handles(raw_display_handle, raw_window_handle)
+    else {
+        return;
+    };
+    release_matching_context(|context| {
+        context.display_ptr == display_ptr && context.surface_ptr == surface_ptr
+    });
+}
+
+pub(super) fn release_display(raw_display_handle: RawDisplayHandle) {
+    let Some(display_ptr) = wayland_display(raw_display_handle) else {
+        return;
+    };
+    release_matching_context(|context| context.display_ptr == display_ptr);
+}
+
+fn release_matching_context(matches: impl FnOnce(&WaylandDragContext) -> bool) {
+    let released = CONTEXT.with(|cell| {
+        let mut context = cell.borrow_mut();
+        if context.as_ref().is_some_and(matches) {
+            context.take()
+        } else {
+            None
+        }
+    });
+
+    if released.is_some() {
+        // Drop the guest Backend while winit's foreign wl_display is still
+        // valid. Leaving this to TLS destruction can run after the display
+        // and makes an otherwise clean Wayland exit undefined.
+        drop(released);
+        crate::utils::log::info("Wayland native drag bridge released before window close");
+    }
+}
+
 pub fn start_file_drag(
     paths: Vec<PathBuf>,
     raw_display_handle: RawDisplayHandle,
@@ -768,15 +807,19 @@ fn wayland_handles(
     raw_display_handle: RawDisplayHandle,
     raw_window_handle: RawWindowHandle,
 ) -> Option<(usize, usize)> {
-    let display = match raw_display_handle {
-        RawDisplayHandle::Wayland(handle) => handle.display.as_ptr() as usize,
-        _ => return None,
-    };
+    let display = wayland_display(raw_display_handle)?;
     let surface = match raw_window_handle {
         RawWindowHandle::Wayland(handle) => handle.surface.as_ptr() as usize,
         _ => return None,
     };
     Some((display, surface))
+}
+
+fn wayland_display(raw_display_handle: RawDisplayHandle) -> Option<usize> {
+    match raw_display_handle {
+        RawDisplayHandle::Wayland(handle) => Some(handle.display.as_ptr() as usize),
+        _ => None,
+    }
 }
 
 fn receive_offer_pipe(offer: &WlDataOffer, mime_type: String) -> std::io::Result<fs::File> {

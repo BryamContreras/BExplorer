@@ -1,6 +1,21 @@
 use super::*;
 
 impl BExplorerIced {
+    pub(in crate::iced_ui) fn refresh_file_drag_fade_snapshot(&mut self) {
+        let Some(drag) = self.file_drag.as_ref().filter(|drag| drag.dragging) else {
+            return;
+        };
+        self.file_drag_fade_snapshot = Some(drag.clone());
+        self.file_drag_fade_target = 1.0;
+    }
+
+    pub(in crate::iced_ui) fn fade_out_file_drag_overlay(&mut self, drag: &FileDragState) {
+        if drag.dragging {
+            self.file_drag_fade_snapshot = Some(drag.clone());
+            self.file_drag_fade_target = 0.0;
+        }
+    }
+
     pub(in crate::iced_ui) fn start_rubber_band_selection(&mut self, pane: PaneId) {
         if self.file_drag.is_some() {
             return;
@@ -113,6 +128,7 @@ impl BExplorerIced {
         let Some(drag) = self.file_drag.take() else {
             return Task::none();
         };
+        self.fade_out_file_drag_overlay(&drag);
 
         let pane = drag.source_pane;
         let count = drag.sources.len();
@@ -181,36 +197,35 @@ impl BExplorerIced {
         pane: PaneId,
         point: Point,
     ) {
-        let Some(drag) = self.file_drag.as_mut() else {
-            return;
-        };
-        if drag.dragging {
-            return;
+        if let Some(drag) = self.file_drag.as_mut()
+            && !drag.dragging
+        {
+            if pane != drag.source_pane {
+                drag.dragging = true;
+            } else if let Some(start) = drag.start_pane_point {
+                if pointer_moved_beyond(start, point, FILE_DRAG_START_THRESHOLD) {
+                    drag.dragging = true;
+                }
+            } else {
+                drag.start_pane_point = Some(point);
+            }
         }
-        if pane != drag.source_pane {
-            drag.dragging = true;
-            return;
-        }
-        let Some(start) = drag.start_pane_point else {
-            drag.start_pane_point = Some(point);
-            return;
-        };
-        if pointer_moved_beyond(start, point, FILE_DRAG_START_THRESHOLD) {
-            drag.dragging = true;
-        }
+        self.refresh_file_drag_fade_snapshot();
     }
 
     pub(in crate::iced_ui) fn update_file_drag_cursor_position(&mut self, position: Point) {
-        let Some(drag) = self.file_drag.as_mut() else {
-            return;
-        };
-        let Some(start) = drag.start_cursor else {
-            drag.start_cursor = Some(position);
-            return;
-        };
-        if !drag.dragging && pointer_moved_beyond(start, position, FILE_DRAG_START_THRESHOLD) {
-            drag.dragging = true;
+        if let Some(drag) = self.file_drag.as_mut() {
+            if let Some(start) = drag.start_cursor {
+                if !drag.dragging
+                    && pointer_moved_beyond(start, position, FILE_DRAG_START_THRESHOLD)
+                {
+                    drag.dragging = true;
+                }
+            } else {
+                drag.start_cursor = Some(position);
+            }
         }
+        self.refresh_file_drag_fade_snapshot();
     }
 
     pub(in crate::iced_ui) fn set_file_drag_target(&mut self, pane: PaneId, index: usize) {
@@ -229,6 +244,7 @@ impl BExplorerIced {
             drag.sidebar_destination = None;
             drag.drop_target = Some((pane, index));
         }
+        self.refresh_file_drag_fade_snapshot();
     }
 
     pub(in crate::iced_ui) fn set_file_drag_sidebar_target(
@@ -246,6 +262,7 @@ impl BExplorerIced {
             drag.drop_target = None;
             drag.sidebar_destination = Some((pane, destination));
         }
+        self.refresh_file_drag_fade_snapshot();
     }
 
     pub(in crate::iced_ui) fn is_file_drag_target(&self, pane: PaneId, index: usize) -> bool {

@@ -216,6 +216,36 @@ mod tests {
     }
 
     #[test]
+    fn cut_entry_is_dimmed_until_copy_replaces_the_clipboard() {
+        let path = PathBuf::from("pending.txt");
+        let cut = FileClipboardState {
+            paths: vec![path.clone()],
+            cut: true,
+        };
+        let copied = FileClipboardState {
+            paths: vec![path.clone()],
+            cut: false,
+        };
+
+        assert!(crate::iced_ui::navigation::clipboard_path_is_pending_cut(
+            Some(&cut),
+            &path,
+        ));
+        assert!(!crate::iced_ui::navigation::clipboard_path_is_pending_cut(
+            Some(&copied),
+            &path,
+        ));
+        assert_eq!(
+            crate::iced_ui::navigation::file_entry_presentation_opacity(false, true, true),
+            0.62,
+        );
+        assert_eq!(
+            crate::iced_ui::navigation::file_entry_presentation_opacity(false, false, false),
+            1.0,
+        );
+    }
+
+    #[test]
     fn vibrancy_keeps_main_surfaces_and_overlays_readable() {
         let config = AppConfig {
             vibrancy: VibrancyMode::Blur,
@@ -245,6 +275,28 @@ mod tests {
     }
 
     #[test]
+    fn native_utility_windows_share_the_main_window_surface_alpha() {
+        let config = AppConfig {
+            vibrancy: VibrancyMode::Blur,
+            vibrancy_intensity: 90,
+            vibrancy_active: true,
+            ..AppConfig::default()
+        };
+        let palette = Palette::from_config(&config, true);
+        let (window_bg, window_title_bg) = palette.native_utility_backgrounds();
+
+        assert_eq!(window_bg, palette.page_bg);
+        assert_eq!(window_title_bg, palette.title_bg);
+        assert_ne!(window_bg.a, palette.overlay_bg.a);
+        assert_ne!(window_title_bg.a, palette.overlay_title_bg.a);
+
+        let translucent_card = palette.native_utility_card_background(true);
+        let opaque_card = palette.native_utility_card_background(false);
+        assert!((translucent_card.a - 0.18).abs() < f32::EPSILON);
+        assert_eq!(opaque_card, palette.input_bg);
+    }
+
+    #[test]
     fn gnome_application_blur_avoids_multiplying_two_aggressive_alpha_stages() {
         let compositor_alpha = vibrancy_surface_alpha(60, VibrancyMode::Blur, false);
         let gnome_alpha = vibrancy_surface_alpha(60, VibrancyMode::Blur, true);
@@ -254,6 +306,16 @@ mod tests {
         assert_eq!(gnome_alpha, 1.0);
         assert_eq!(strongest_gnome_alpha, 1.0);
         assert_eq!(vibrancy_surface_alpha(0, VibrancyMode::Blur, true), 1.0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kwin_blur_keeps_a_readable_surface_opacity_floor() {
+        let middle = vibrancy_surface_alpha(50, VibrancyMode::Blur, false);
+        let strongest = vibrancy_surface_alpha(100, VibrancyMode::Blur, false);
+
+        assert!((middle - 0.75).abs() < f32::EPSILON);
+        assert!((strongest - 0.50).abs() < f32::EPSILON);
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -404,6 +466,43 @@ mod tests {
         assert_eq!(fallback_icon_label(&printer), "portable");
     }
 
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn secondary_linux_local_drive_requests_a_hard_disk_icon() {
+        let mut local = test_entry("PRUEBAS", EntryKind::Drive, None);
+        local.path = PathBuf::from("/media/dev/PRUEBAS");
+        local.drive_kind = Some(DriveKind::Local);
+
+        let (_, lookup_path, is_directory) =
+            native_icon_request_for_entry(&local).expect("local drive icon request");
+        assert_eq!(lookup_path, Path::new("/"));
+        assert!(is_directory);
+
+        local.drive_kind = Some(DriveKind::Usb);
+        let (_, lookup_path, _) =
+            native_icon_request_for_entry(&local).expect("USB drive icon request");
+        assert_eq!(lookup_path, Path::new("/media/dev/PRUEBAS"));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn sidebar_uses_the_classified_drive_icon_instead_of_the_mount_path_icon() {
+        let mut local = test_entry("PRUEBAS", EntryKind::Drive, None);
+        local.path = PathBuf::from("/media/dev/PRUEBAS");
+        local.drive_kind = Some(DriveKind::Local);
+
+        let key = sidebar_native_icon_cache_key(&local.path, &[local.clone()]);
+        assert_eq!(key, thumbnail_data::native_entry_icon_cache_key(&local));
+        assert_ne!(
+            key,
+            thumbnail_data::native_path_icon_cache_key(
+                &local.path,
+                true,
+                thumbnail_data::NATIVE_ICON_SIZE,
+            )
+        );
+    }
+
     #[test]
     fn address_breadcrumbs_include_this_pc_and_each_directory_level() {
         let path = filesystem_root_path().join("home").join("dev");
@@ -502,6 +601,34 @@ mod tests {
     }
 
     #[test]
+    fn system_drive_stays_first_independently_of_group_and_sort_direction() {
+        let mut system = test_entry("Filesystem", EntryKind::Drive, Some(100));
+        system.drive_kind = Some(DriveKind::System);
+        let mut local = test_entry("PRUEBAS", EntryKind::Drive, Some(10));
+        local.drive_kind = Some(DriveKind::Local);
+
+        for (group_mode, group_ascending, sort_ascending) in [
+            (GroupMode::None, true, true),
+            (GroupMode::None, true, false),
+            (GroupMode::Type, true, true),
+            (GroupMode::Type, false, false),
+        ] {
+            let mut entries = [local.clone(), system.clone()];
+            entries.sort_by(|left, right| {
+                compare_entries_for_view(
+                    left,
+                    right,
+                    group_mode,
+                    group_ascending,
+                    TableColumn::Name,
+                    sort_ascending,
+                )
+            });
+            assert_eq!(entries[0].drive_kind, Some(DriveKind::System));
+        }
+    }
+
+    #[test]
     fn detail_column_sort_keeps_directories_first_and_toggles_direction() {
         let folder = test_entry("carpeta", EntryKind::Folder, None);
         let small = test_entry("small.bin", EntryKind::File, Some(1));
@@ -584,6 +711,10 @@ mod tests {
         assert!(!archive.resizable);
         assert!(!defender.resizable);
         assert!(!threats.resizable);
+        assert!(!transfer.exit_on_close_request);
+        assert!(!archive.exit_on_close_request);
+        assert!(!defender.exit_on_close_request);
+        assert!(!threats.exit_on_close_request);
         assert_eq!(transfer.min_size, Some(size));
         assert_eq!(transfer.max_size, Some(size));
         assert_eq!(archive.min_size, Some(size));
@@ -604,6 +735,19 @@ mod tests {
                 crate::platform::LINUX_APPLICATION_ID
             );
         }
+    }
+
+    #[test]
+    fn main_window_uses_the_controlled_shutdown_path() {
+        let settings = main_window_settings(Size::new(1280.0, 760.0), false);
+        assert!(!settings.exit_on_close_request);
+    }
+
+    #[test]
+    fn external_drag_polling_sleeps_until_a_drag_is_prepared_or_active() {
+        assert!(!external_drag_polling_required(false, false));
+        assert!(external_drag_polling_required(true, false));
+        assert!(external_drag_polling_required(false, true));
     }
 
     #[test]

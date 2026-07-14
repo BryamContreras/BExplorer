@@ -42,6 +42,10 @@ impl BExplorerIced {
                 > f32::EPSILON
     }
 
+    pub(in crate::iced_ui) fn file_drag_fade_animation_active(&self) -> bool {
+        (self.file_drag_fade_progress - self.file_drag_fade_target).abs() > f32::EPSILON
+    }
+
     pub(in crate::iced_ui) fn scrollbar_animation_active(&self) -> bool {
         let now = Instant::now();
         [PaneId::Primary, PaneId::Secondary]

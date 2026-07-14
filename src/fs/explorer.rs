@@ -127,9 +127,11 @@ impl FileCategory {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum DriveKind {
+    System,
     Local,
     External,
     Usb,
+    DiskImage,
     Network,
     NetworkComputer,
     NetworkPrinter,
@@ -145,9 +147,11 @@ pub enum DriveKind {
 impl DriveKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::System => "System Drive",
             Self::Local => "Local Disk",
             Self::External => "External Drive",
             Self::Usb => "USB Drive",
+            Self::DiskImage => "Mounted Disk Image",
             Self::Network => "Network Drive",
             Self::NetworkComputer => "Network Computer",
             Self::NetworkPrinter => "Network Printer",
@@ -162,11 +166,25 @@ impl DriveKind {
     }
 
     pub fn is_ejectable(self) -> bool {
-        matches!(self, Self::External | Self::Usb | Self::Optical)
+        matches!(
+            self,
+            Self::External | Self::Usb | Self::DiskImage | Self::Optical
+        )
     }
 
     pub fn is_formatable(self) -> bool {
-        matches!(self, Self::Local | Self::External | Self::Usb)
+        #[cfg(target_os = "windows")]
+        {
+            matches!(self, Self::Local | Self::External | Self::Usb)
+        }
+        #[cfg(target_os = "linux")]
+        {
+            matches!(self, Self::Local | Self::External | Self::Usb)
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        {
+            matches!(self, Self::External | Self::Usb)
+        }
     }
 }
 
@@ -1423,6 +1441,28 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
+    fn linux_allows_formatting_secondary_local_disks_but_not_system_mounts() {
+        let system = LinuxMount {
+            major_minor: "8:1".into(),
+            mount_point: PathBuf::from("/"),
+            fs_type: "ext4".into(),
+            source: "/dev/sda1".into(),
+        };
+        let secondary = LinuxMount {
+            major_minor: "999:998".into(),
+            mount_point: PathBuf::from("/media/dev/PRUEBAS"),
+            fs_type: "ext4".into(),
+            source: "/dev/test-data".into(),
+        };
+
+        assert_eq!(linux_drive_kind(&system), DriveKind::System);
+        assert!(!linux_drive_kind(&system).is_formatable());
+        assert_eq!(linux_drive_kind(&secondary), DriveKind::Local);
+        assert!(linux_drive_kind(&secondary).is_formatable());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
     fn filters_linux_firmware_partitions_but_keeps_regular_vfat_storage() {
         let mounted_esp = LinuxMount {
             major_minor: "259:1".into(),
@@ -1435,6 +1475,12 @@ mod tests {
             mount_point: PathBuf::from("/media/dev/EFI"),
             fs_type: "vfat".into(),
             source: "/dev/nvme0n1p1".into(),
+        };
+        let ubuntu_firmware = LinuxMount {
+            major_minor: "179:1".into(),
+            mount_point: PathBuf::from("/boot/firmware"),
+            fs_type: "vfat".into(),
+            source: "/dev/mmcblk0p1".into(),
         };
         let usb = LinuxMount {
             major_minor: "8:17".into(),
@@ -1450,6 +1496,10 @@ mod tests {
         assert!(!linux_mount_is_storage_candidate_with_partition_type(
             &auto_mounted_esp,
             Some("c12a7328-f81f-11d2-ba4b-00a0c93ec93b"),
+        ));
+        assert!(!linux_mount_is_storage_candidate_with_partition_type(
+            &ubuntu_firmware,
+            None,
         ));
         assert!(linux_mount_is_storage_candidate_with_partition_type(
             &usb,
@@ -1480,7 +1530,8 @@ mod tests {
             source: "/dev/loop7p2".into(),
         };
 
-        assert_eq!(linux_drive_kind(&mount), DriveKind::External);
+        assert_eq!(linux_drive_kind(&mount), DriveKind::DiskImage);
         assert!(linux_drive_kind(&mount).is_ejectable());
+        assert!(!linux_drive_kind(&mount).is_formatable());
     }
 }

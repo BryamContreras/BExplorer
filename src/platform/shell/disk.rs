@@ -1,9 +1,15 @@
+#[cfg(all(unix, not(target_os = "macos")))]
+use std::collections::HashMap;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "windows")]
 use std::process::Stdio;
+#[cfg(all(unix, not(target_os = "macos")))]
+use zbus::blocking::{Connection, Proxy};
+#[cfg(all(unix, not(target_os = "macos")))]
+use zbus::zvariant::{OwnedObjectPath, Value};
 
 use crate::utils::errors::{BExplorerError, Result};
 
@@ -424,6 +430,12 @@ pub(super) fn eject_drive(path: &Path) -> Result<()> {
             path.display()
         ))
     })?;
+    let loop_block = linux_loop_base_for_block(&block);
+    let physical_drive = if loop_block.is_none() {
+        Some(linux_udisks_drive_for_block(&block)?)
+    } else {
+        None
+    };
 
     let unmount = Command::new("udisksctl")
         .args(["unmount", "--block-device"])
@@ -434,7 +446,7 @@ pub(super) fn eject_drive(path: &Path) -> Result<()> {
         return Err(command_error("Could not unmount drive", &unmount));
     }
 
-    if let Some(loop_block) = linux_loop_base_for_block(&block) {
+    if let Some(loop_block) = loop_block {
         run_udisks_status(
             Command::new("udisksctl")
                 .args(["loop-delete", "--block-device"])
@@ -442,14 +454,141 @@ pub(super) fn eject_drive(path: &Path) -> Result<()> {
             "Could not delete loop device",
         )
     } else {
-        let power_block = linux_parent_block_device(&block).unwrap_or(block);
-        run_udisks_status(
-            Command::new("udisksctl")
-                .args(["power-off", "--block-device"])
-                .arg(power_block),
-            "Could not power off drive",
-        )
+        let Some(drive) = physical_drive else {
+            return Err(BExplorerError::Shell(
+                "Could not resolve the physical drive before ejecting it".into(),
+            ));
+        };
+        match linux_drive_removal_action(&drive) {
+            LinuxDriveRemovalAction::Eject => linux_eject_udisks_drive(&drive.object_path),
+            LinuxDriveRemovalAction::PowerOff => {
+                let power_block = linux_parent_block_device(&block).unwrap_or(block);
+                run_udisks_status(
+                    Command::new("udisksctl")
+                        .args(["power-off", "--block-device"])
+                        .arg(power_block),
+                    "Could not power off drive",
+                )
+            }
+            // Some removable-media readers expose neither Eject nor PowerOff.
+            // A successful unmount is the complete safe-removal operation for
+            // those devices and must not be reported as a failure.
+            LinuxDriveRemovalAction::UnmountOnly => Ok(()),
+        }
     }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Clone, Debug)]
+struct LinuxUdisksDrive {
+    object_path: OwnedObjectPath,
+    optical: bool,
+    ejectable: bool,
+    can_power_off: bool,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinuxDriveRemovalAction {
+    Eject,
+    PowerOff,
+    UnmountOnly,
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_drive_removal_action(drive: &LinuxUdisksDrive) -> LinuxDriveRemovalAction {
+    if drive.optical || (drive.ejectable && !drive.can_power_off) {
+        LinuxDriveRemovalAction::Eject
+    } else if drive.can_power_off {
+        LinuxDriveRemovalAction::PowerOff
+    } else {
+        LinuxDriveRemovalAction::UnmountOnly
+    }
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_udisks_drive_for_block(block: &Path) -> Result<LinuxUdisksDrive> {
+    const SERVICE: &str = "org.freedesktop.UDisks2";
+    let connection = Connection::system()
+        .map_err(|error| BExplorerError::Shell(format!("Could not connect to UDisks2: {error}")))?;
+    let manager = Proxy::new(
+        &connection,
+        SERVICE,
+        "/org/freedesktop/UDisks2/Manager",
+        "org.freedesktop.UDisks2.Manager",
+    )
+    .map_err(|error| BExplorerError::Shell(format!("Could not access UDisks2: {error}")))?;
+    let block_path = block.to_string_lossy().into_owned();
+    let mut specification = HashMap::<&str, Value<'_>>::new();
+    specification.insert("path", Value::from(block_path.as_str()));
+    let options = HashMap::<&str, Value<'_>>::new();
+    let devices: Vec<OwnedObjectPath> = manager
+        .call("ResolveDevice", &(specification, options))
+        .map_err(|error| {
+            BExplorerError::Shell(format!(
+                "Could not resolve optical or removable drive: {error}"
+            ))
+        })?;
+    let [block_object] = devices.as_slice() else {
+        return Err(BExplorerError::Shell(format!(
+            "UDisks2 resolved {} to {} block devices",
+            block.display(),
+            devices.len()
+        )));
+    };
+    let block_proxy = Proxy::new(
+        &connection,
+        SERVICE,
+        block_object.as_str(),
+        "org.freedesktop.UDisks2.Block",
+    )
+    .map_err(|error| BExplorerError::Shell(format!("Could not inspect UDisks2 block: {error}")))?;
+    let drive_path: OwnedObjectPath = block_proxy.get_property("Drive").map_err(|error| {
+        BExplorerError::Shell(format!("Could not locate UDisks2 drive: {error}"))
+    })?;
+    if drive_path.as_str() == "/" {
+        return Err(BExplorerError::Shell(
+            "The selected block device has no ejectable physical drive".into(),
+        ));
+    }
+    let drive_proxy = Proxy::new(
+        &connection,
+        SERVICE,
+        drive_path.as_str(),
+        "org.freedesktop.UDisks2.Drive",
+    )
+    .map_err(|error| BExplorerError::Shell(format!("Could not inspect UDisks2 drive: {error}")))?;
+    Ok(LinuxUdisksDrive {
+        object_path: drive_path.clone(),
+        optical: drive_proxy.get_property("Optical").map_err(|error| {
+            BExplorerError::Shell(format!("Could not inspect optical drive state: {error}"))
+        })?,
+        ejectable: drive_proxy.get_property("Ejectable").map_err(|error| {
+            BExplorerError::Shell(format!("Could not inspect drive eject support: {error}"))
+        })?,
+        can_power_off: drive_proxy.get_property("CanPowerOff").map_err(|error| {
+            BExplorerError::Shell(format!(
+                "Could not inspect drive power-off support: {error}"
+            ))
+        })?,
+    })
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_eject_udisks_drive(drive_path: &OwnedObjectPath) -> Result<()> {
+    let connection = Connection::system()
+        .map_err(|error| BExplorerError::Shell(format!("Could not connect to UDisks2: {error}")))?;
+    let drive = Proxy::new(
+        &connection,
+        "org.freedesktop.UDisks2",
+        drive_path.as_str(),
+        "org.freedesktop.UDisks2.Drive",
+    )
+    .map_err(|error| BExplorerError::Shell(format!("Could not access UDisks2 drive: {error}")))?;
+    let options = HashMap::<&str, Value<'_>>::new();
+    drive
+        .call::<_, _, ()>("Eject", &(options,))
+        .map_err(|error| BExplorerError::Shell(format!("Could not eject optical media: {error}")))
 }
 
 #[cfg(target_os = "macos")]
@@ -765,6 +904,34 @@ mod tests {
         assert_eq!(
             decode_mountinfo_field("/media/My\\040Disk"),
             "/media/My Disk"
+        );
+    }
+
+    #[test]
+    fn linux_removal_uses_eject_for_optical_media_and_power_off_for_usb() {
+        let drive = |optical, ejectable, can_power_off| LinuxUdisksDrive {
+            object_path: OwnedObjectPath::try_from("/org/freedesktop/UDisks2/drives/TestDrive")
+                .unwrap(),
+            optical,
+            ejectable,
+            can_power_off,
+        };
+
+        assert_eq!(
+            linux_drive_removal_action(&drive(true, true, false)),
+            LinuxDriveRemovalAction::Eject
+        );
+        assert_eq!(
+            linux_drive_removal_action(&drive(false, false, true)),
+            LinuxDriveRemovalAction::PowerOff
+        );
+        assert_eq!(
+            linux_drive_removal_action(&drive(false, true, true)),
+            LinuxDriveRemovalAction::PowerOff
+        );
+        assert_eq!(
+            linux_drive_removal_action(&drive(false, false, false)),
+            LinuxDriveRemovalAction::UnmountOnly
         );
     }
 }

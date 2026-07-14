@@ -137,12 +137,18 @@ impl BExplorerIced {
             self.pane(pane).selected.contains(&entry.path) || self.is_file_drag_target(pane, index);
         let presentation_opacity = self.entry_presentation_opacity(entry, selected);
         let color = if selected {
-            selected_item_text_color(palette, false)
+            translucent_color(
+                selected_item_text_color(palette, false),
+                presentation_opacity,
+            )
         } else {
             translucent_color(palette.text, presentation_opacity)
         };
         let secondary = if selected {
-            selected_item_text_color(palette, true)
+            translucent_color(
+                selected_item_text_color(palette, true),
+                presentation_opacity,
+            )
         } else {
             translucent_color(palette.muted_text, presentation_opacity)
         };
