@@ -27,6 +27,13 @@ pub(in crate::iced_ui) fn file_entry_presentation_opacity(
 }
 
 impl BExplorerIced {
+    pub(in crate::iced_ui) fn track_startup_initial_load(&mut self, pane: PaneId) {
+        let storage_root = self.tab_for_pane(pane).path.is_none();
+        let request_id = self.pane(pane).request_id;
+        self.startup
+            .wait_for_initial_load(pane, request_id, storage_root);
+    }
+
     /// Start loading a different location without briefly rendering the
     /// previous location under the new path and view settings.
     pub(in crate::iced_ui) fn start_navigation_load(&mut self, pane: PaneId) -> Task<Message> {

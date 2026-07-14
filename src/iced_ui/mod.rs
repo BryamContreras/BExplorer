@@ -109,6 +109,7 @@ const DETAIL_COLUMN_HANDLE_WIDTH: f32 = 6.0;
 const INITIAL_RENDER_LIMIT: usize = 500;
 const RENDER_BATCH_SIZE: usize = 500;
 const MAX_SEARCH_EVENTS_PER_TICK: usize = 2;
+const STARTUP_BUSY_DELAY: Duration = Duration::from_millis(400);
 const RUBBER_BAND_MIN_SIZE: f32 = 4.0;
 const TRANSFER_MAX_PARALLEL: usize = 3;
 const TRANSFER_CARD_HEIGHT: f32 = 96.0;
@@ -270,6 +271,7 @@ struct BExplorerIced {
     sidebar_visible: bool,
     sidebar_pointer_inside: bool,
     window_maximized: bool,
+    startup: StartupState,
     main_window_id: Option<window::Id>,
     closing_windows: HashSet<window::Id>,
     transfer_window_id: Option<window::Id>,
@@ -487,6 +489,8 @@ impl BExplorerIced {
     }
 
     fn new(initial_path: Option<PathBuf>) -> (Self, Task<Message>) {
+        let startup_started_at = Instant::now();
+        let mut startup = StartupState::default();
         let mut config = AppConfig::load();
         if !available_vibrancy_modes().contains(&config.vibrancy) {
             #[cfg(target_os = "windows")]
@@ -500,6 +504,7 @@ impl BExplorerIced {
         }
         config.vibrancy_active = config.vibrancy != VibrancyMode::None;
         let session = AppSession::load();
+        startup.mark_restoration_complete();
         let launch_path = initial_path.map(|path| {
             if path.as_os_str() == "~" {
                 paths::home_dir().unwrap_or(path)
@@ -664,6 +669,7 @@ impl BExplorerIced {
             accent_hue_dragging: false,
             accent_hue_pointer: None,
             window_maximized: initial_window_maximized,
+            startup,
             main_window_id: None,
             closing_windows: HashSet::new(),
             transfer_window_id: None,
@@ -692,10 +698,16 @@ impl BExplorerIced {
             .as_ref()
             .is_some_and(|_| app.tab_for_pane(PaneId::Secondary).path.is_none());
         let sidebar_icons = app.queue_sidebar_icons();
+        let primary_load = app.start_load(PaneId::Primary);
+        app.track_startup_initial_load(PaneId::Primary);
         let mut tasks = vec![
             open_main_window.map(Message::MainWindowOpened),
-            app.start_load(PaneId::Primary),
+            primary_load,
             sidebar_icons,
+            Task::perform(
+                delay(STARTUP_BUSY_DELAY.saturating_sub(startup_started_at.elapsed())),
+                |_| Message::StartupBusyThresholdReached,
+            ),
         ];
         if !primary_starts_at_storage_root && !secondary_starts_at_storage_root {
             tasks.push(app.refresh_sidebar_storage());
@@ -706,7 +718,9 @@ impl BExplorerIced {
         if app.split.is_some()
             && (!secondary_starts_at_storage_root || !primary_starts_at_storage_root)
         {
-            tasks.push(app.start_load(PaneId::Secondary));
+            let secondary_load = app.start_load(PaneId::Secondary);
+            app.track_startup_initial_load(PaneId::Secondary);
+            tasks.push(secondary_load);
         }
         #[cfg(debug_assertions)]
         if let Some(task) = app.seed_debug_archives_from_env() {
@@ -1054,7 +1068,8 @@ impl BExplorerIced {
             } else {
                 Subscription::none()
             };
-        let animation_frame = if self.sidebar_animation_active()
+        let animation_frame = if self.startup.waiting_for_first_frame()
+            || self.sidebar_animation_active()
             || self.preview_panel_animation_active()
             || self.popup_fade_animation_active()
             || self.file_drag_fade_animation_active()

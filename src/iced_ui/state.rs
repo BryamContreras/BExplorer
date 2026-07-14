@@ -4,6 +4,126 @@ enum PaneId {
     Secondary,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StartupInitialLoad {
+    Pane { pane: PaneId, request_id: u64 },
+    StorageRoot,
+}
+
+#[derive(Debug, Default)]
+struct StartupState {
+    restoration_complete: bool,
+    first_frame_presented: bool,
+    busy_threshold_reached: bool,
+    pending_initial_loads: Vec<StartupInitialLoad>,
+}
+
+impl StartupState {
+    fn mark_restoration_complete(&mut self) {
+        self.restoration_complete = true;
+    }
+
+    fn wait_for_initial_load(&mut self, pane: PaneId, request_id: u64, storage_root: bool) {
+        let load = if storage_root {
+            StartupInitialLoad::StorageRoot
+        } else {
+            StartupInitialLoad::Pane { pane, request_id }
+        };
+        if !self.pending_initial_loads.contains(&load) {
+            self.pending_initial_loads.push(load);
+        }
+    }
+
+    fn complete_pane_load(&mut self, pane: PaneId, request_id: u64) {
+        self.pending_initial_loads.retain(|load| {
+            *load
+                != StartupInitialLoad::Pane {
+                    pane,
+                    request_id,
+                }
+        });
+    }
+
+    fn complete_storage_root_load(&mut self) {
+        self.pending_initial_loads
+            .retain(|load| *load != StartupInitialLoad::StorageRoot);
+    }
+
+    fn mark_first_frame_presented(&mut self) {
+        self.first_frame_presented = true;
+    }
+
+    fn mark_busy_threshold_reached(&mut self) {
+        self.busy_threshold_reached = true;
+    }
+
+    fn waiting_for_first_frame(&self) -> bool {
+        !self.first_frame_presented
+    }
+
+    fn is_complete(&self) -> bool {
+        self.restoration_complete
+            && self.first_frame_presented
+            && self.pending_initial_loads.is_empty()
+    }
+
+    fn show_busy_cursor(&self) -> bool {
+        self.busy_threshold_reached && !self.is_complete()
+    }
+}
+
+#[cfg(test)]
+mod startup_state_tests {
+    use super::*;
+
+    #[test]
+    fn busy_cursor_waits_for_threshold_and_every_startup_condition() {
+        let mut startup = StartupState::default();
+        startup.wait_for_initial_load(PaneId::Primary, 7, false);
+        startup.mark_restoration_complete();
+        startup.mark_first_frame_presented();
+
+        assert!(!startup.show_busy_cursor());
+
+        startup.mark_busy_threshold_reached();
+        assert!(startup.show_busy_cursor());
+
+        startup.complete_pane_load(PaneId::Primary, 6);
+        assert!(startup.show_busy_cursor());
+
+        startup.complete_pane_load(PaneId::Primary, 7);
+        assert!(startup.is_complete());
+        assert!(!startup.show_busy_cursor());
+    }
+
+    #[test]
+    fn one_storage_enumeration_completes_the_shared_storage_root() {
+        let mut startup = StartupState::default();
+        startup.wait_for_initial_load(PaneId::Primary, 1, true);
+        startup.wait_for_initial_load(PaneId::Secondary, 2, true);
+
+        assert_eq!(startup.pending_initial_loads.len(), 1);
+
+        startup.complete_storage_root_load();
+        assert!(startup.pending_initial_loads.is_empty());
+    }
+
+    #[test]
+    fn restoration_and_a_presented_frame_are_both_required() {
+        let mut startup = StartupState::default();
+        startup.mark_busy_threshold_reached();
+
+        assert!(startup.show_busy_cursor());
+
+        startup.mark_restoration_complete();
+        assert!(startup.show_busy_cursor());
+
+        startup.mark_first_frame_presented();
+        assert!(startup.is_complete());
+        assert!(!startup.show_busy_cursor());
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ScrollbarAxis {
     Horizontal,
@@ -44,6 +164,7 @@ enum Message {
     ToggleSidebar,
     SidebarPointerEntered,
     SidebarPointerExited,
+    StartupBusyThresholdReached,
     AnimationFrame(Instant),
     ScrollbarHover(PaneId, ScrollbarAxis, bool),
     ScrollbarAnimationTick,

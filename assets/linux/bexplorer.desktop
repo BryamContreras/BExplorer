@@ -12,5 +12,5 @@ Categories=System;FileTools;FileManager;
 MimeType=inode/directory;
 Keywords=files;folders;explorer;manager;archive;
 Keywords[es]=archivos;carpetas;explorador;gestor;comprimidos;
-StartupNotify=true
+StartupNotify=false
 StartupWMClass=bexplorer

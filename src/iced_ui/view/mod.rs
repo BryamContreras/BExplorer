@@ -241,7 +241,14 @@ impl BExplorerIced {
         if self.error_dialog.is_some() {
             modal_layers.push(opaque(self.error_dialog_modal(popup_palette)));
         }
-        stack(modal_layers).into()
+        let app: Element<'_, Message> = stack(modal_layers).into();
+        if self.startup.show_busy_cursor() {
+            let cursor_layer = mouse_area(Space::new().width(Length::Fill).height(Length::Fill))
+                .interaction(mouse::Interaction::Progress);
+            stack(vec![app, cursor_layer.into()]).into()
+        } else {
+            app
+        }
     }
 }
 

@@ -46,6 +46,7 @@ impl BExplorerIced {
                 };
                 if let Some(entries) = completed_entries {
                     let _ = explorer::save_network_cache(&entries);
+                    self.startup.complete_pane_load(pane, request_id);
                 }
                 self.queue_visible_images(pane)
             }
@@ -82,6 +83,7 @@ impl BExplorerIced {
                 };
                 if let Some(entries) = completed_entries {
                     let _ = explorer::save_network_cache(&entries);
+                    self.startup.complete_pane_load(pane, request_id);
                 }
 
                 let tasks = addresses.into_iter().map(|address| {
@@ -117,10 +119,11 @@ impl BExplorerIced {
                             && self.tab_for_pane(pane).path.as_ref() == Some(location)
                     })
                     .cloned();
-                let state = self.pane_mut(pane);
-                if state.request_id != request_id {
+                if self.pane(pane).request_id != request_id {
                     return Task::none();
                 }
+                self.startup.complete_pane_load(pane, request_id);
+                let state = self.pane_mut(pane);
                 state.loading = false;
                 state.search_progress_phase = 0.0;
                 let storage_entries = match &result {
@@ -234,6 +237,7 @@ impl BExplorerIced {
                 let entries = match result {
                     Ok(entries) => entries,
                     Err(error) => {
+                        self.startup.complete_storage_root_load();
                         let mut waiting_for_storage = false;
                         for pane in [PaneId::Primary, PaneId::Secondary] {
                             if pane == PaneId::Secondary && self.split.is_none() {
@@ -261,6 +265,7 @@ impl BExplorerIced {
                         };
                     }
                 };
+                self.startup.complete_storage_root_load();
                 let paths = entries
                     .iter()
                     .map(|entry| entry.path.clone())
@@ -517,7 +522,12 @@ impl BExplorerIced {
                 self.sidebar_pointer_inside = false;
                 Task::none()
             }
+            Message::StartupBusyThresholdReached => {
+                self.startup.mark_busy_threshold_reached();
+                Task::none()
+            }
             Message::AnimationFrame(now) => {
+                self.startup.mark_first_frame_presented();
                 let elapsed = self
                     .last_animation_frame
                     .replace(now)
