@@ -1,6 +1,6 @@
 [package]
 name = "bexplorer"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 description = "A native Rust file explorer for Windows and Linux."
 license = "MIT"

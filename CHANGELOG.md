@@ -2,7 +2,15 @@
 
 All notable user-facing changes to BExplorer are documented here.
 
-## Unreleased
+## 1.0.1 - 2026-07-14
+
+- Fixed the transient native Windows frame that could appear on the first
+  external file drag into a non-maximized BExplorer window.
+- Reworked the network-printer fallback icon with a clearer dimensional body,
+  balanced paper trays, and better small-size rendering.
+- Hardened local Windows packaging so application resources embed outside a
+  Visual Studio shell, per-user Inno Setup installs are detected, and elevated
+  shortcuts use the application directory as their working directory.
 
 - Removed the redundant straight accent strip above the rounded file-drag
   card, leaving its border and shadow to define the floating surface cleanly.

@@ -1,5 +1,5 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0"
+  #define MyAppVersion "1.0.1"
 #endif
 
 #define MyAppName "BExplorer"
@@ -57,9 +57,9 @@ Name: "addtopath"; Description: "{cm:AddToPath}"; GroupDescription: "{cm:Additio
 Source: "{#StagedFiles}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{group}\BExplorer"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{userdocs}"
+Name: "{group}\BExplorer"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
 Name: "{group}\{cm:UninstallProgram,BExplorer}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\BExplorer"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{userdocs}"; Tasks: desktopicon
+Name: "{autodesktop}\BExplorer"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,BExplorer}"; Flags: nowait postinstall skipifsilent

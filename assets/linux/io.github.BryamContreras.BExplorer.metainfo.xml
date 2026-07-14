@@ -27,6 +27,16 @@
   <url type="bugtracker">https://github.com/BryamContreras/BExplorer/issues</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.1" date="2026-07-14">
+      <description>
+        <p>Maintenance release with Windows and Linux integration refinements.</p>
+        <ul>
+          <li>Fixed the transient Windows frame shown during the first external file drag.</li>
+          <li>Improved printer artwork and Windows release packaging.</li>
+          <li>Refined Linux storage, formatting, blur, drag-and-drop, and shutdown behavior.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-07-13">
       <description>
         <p>First stable BExplorer release for Windows and Linux.</p>
