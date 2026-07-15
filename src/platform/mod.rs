@@ -377,8 +377,8 @@ pub fn apply_window_corners(
 }
 
 #[cfg(target_os = "windows")]
-pub fn install_autoplay_cancel(handle: &raw_window_handle::WindowHandle<'_>) -> Result<()> {
-    windows::install_autoplay_cancel(handle)
+pub fn install_main_window_hooks(handle: &raw_window_handle::WindowHandle<'_>) -> Result<()> {
+    windows::install_main_window_hooks(handle)
 }
 
 #[cfg(target_os = "windows")]

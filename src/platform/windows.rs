@@ -30,4 +30,4 @@ pub use portable::{
 };
 pub use storage_watch::{install_storage_change_notifications, storage_change_receiver};
 #[allow(unused_imports)]
-pub use window::{apply_small_window_corners, install_autoplay_cancel, normalize_long_path};
+pub use window::{apply_small_window_corners, install_main_window_hooks, normalize_long_path};

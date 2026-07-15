@@ -836,7 +836,7 @@ impl BExplorerIced {
                 .context_entry(pane, target)
                 .map(|entry| entry.path)
                 .or_else(|| self.tab_for_pane(pane).path.clone());
-            return self.open_properties_paths(pane, path.into_iter().collect());
+            self.open_properties_paths(pane, path.into_iter().collect())
         }
 
         #[cfg(target_os = "linux")]
@@ -881,7 +881,7 @@ impl BExplorerIced {
         #[cfg(not(target_os = "linux"))]
         let path = &paths[0];
         #[cfg(not(target_os = "linux"))]
-        match shell::show_properties(&path) {
+        match shell::show_properties(path) {
             Ok(()) => self.pane_mut(pane).status = "Properties opened".into(),
             Err(error) => return self.report_error(pane, error.to_string()),
         }

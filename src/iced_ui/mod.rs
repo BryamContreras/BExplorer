@@ -1065,7 +1065,7 @@ impl BExplorerIced {
                 );
                 if cancel_autoplay {
                     #[cfg(target_os = "windows")]
-                    let _ = crate::platform::install_autoplay_cancel(&window_handle);
+                    let _ = crate::platform::install_main_window_hooks(&window_handle);
                     let _ = crate::platform::prepare_storage_change_notifications(&window_handle);
                 }
             }
