@@ -97,13 +97,9 @@ Depends: $LIBC_DEPENDENCY,
  libgcc-s1,
  libstdc++6,
  libx11-6,
- libx11-xcb1,
  libxext6,
- libxcursor1,
- libxi6,
  libxcb1,
  libxkbcommon0,
- libxkbcommon-x11-0,
  libwayland-client0,
  libegl1,
  libgl1,
@@ -112,7 +108,13 @@ Depends: $LIBC_DEPENDENCY,
  xdg-desktop-portal,
  xdg-desktop-portal-gtk | xdg-desktop-portal-backend,
  udisks2,
- pkexec,
+ pkexec | policykit-1,
+ shared-mime-info,
+ hicolor-icon-theme
+Recommends: libx11-xcb1,
+ libxcursor1,
+ libxi6,
+ libxkbcommon-x11-0,
  e2fsprogs,
  dosfstools,
  exfatprogs,
@@ -121,16 +123,12 @@ Depends: $LIBC_DEPENDENCY,
  xfsprogs,
  gvfs-fuse,
  gvfs-backends,
- wl-clipboard,
- xclip,
  smbclient,
  avahi-utils,
- shared-mime-info,
- hicolor-icon-theme,
  desktop-file-utils,
- gtk-update-icon-cache
-Suggests: xsel,
- libfile-mimeinfo-perl,
+ gtk-update-icon-cache,
+ wl-clipboard | xclip | xsel
+Suggests: libfile-mimeinfo-perl,
  kde-cli-tools,
  kio-extras,
  kio-fuse
@@ -171,5 +169,7 @@ else
   dpkg-deb --build "$DEBROOT" "$DEB"
 fi
 printf 'Created %s\n' "$DEB"
+EXPECTED_VERSION=$VERSION EXPECTED_ARCH=$DEB_ARCH \
+  "$ROOT_DIR/scripts/linux/validate-deb.sh" "$DEB"
 sha256sum "$DEB" > "$DEB.sha256.txt"
 printf 'Created %s\n' "$DEB.sha256.txt"

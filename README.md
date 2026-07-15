@@ -39,9 +39,10 @@ Linux provides local and removable storage, file operations, archives,
 previews, search, GVfs/FUSE portable devices, GVfs/Samba/Avahi network
 discovery with optional KIO enrichment for SMB, UDisks2, Polkit, XDG portals,
 Freedesktop icons and thumbnails, clipboard interoperability, and Wayland/X11
-support. The Debian package declares the services needed for these integrations
-as dependencies; source builds still keep readable fallbacks when an optional
-desktop-specific component is unavailable.
+support. The Debian package keeps libraries and core desktop services in
+`Depends`, installs feature integrations through `Recommends` when available,
+and leaves desktop-specific fallbacks in `Suggests`. Missing optional helpers
+therefore do not prevent BExplorer itself from being installed.
 
 ## Highlights
 
@@ -365,17 +366,20 @@ Linux source-build requirements:
 - Development headers and runtime libraries required by `iced`/`winit` for
   Wayland/X11 and OpenGL on the build distribution.
 
-The generated Debian package makes the following integration groups mandatory
-so a normal installation does not silently lose advertised features:
+The generated Debian package keeps the following startup and core integration
+groups in `Depends`:
 
-- Wayland/X11/OpenGL runtime libraries;
+- base Wayland/X11/OpenGL runtime libraries;
 - GLib/GIO, `xdg-utils`, the XDG Desktop Portal, and a portal backend;
-- UDisks2, `pkexec`, and filesystem tools for ext, FAT, exFAT, NTFS, Btrfs, and
-  XFS operations;
-- GVfs backends/FUSE, Samba, and Avahi for mounted portable devices and network
-  discovery;
-- Wayland and X11 clipboard helpers;
-- Shared MIME information, desktop database, and the hicolor icon theme.
+- UDisks2 and Polkit elevation;
+- Shared MIME information and the hicolor icon theme.
+
+`Recommends` contains the complete X11 backend, filesystem tools for ext, FAT,
+exFAT, NTFS, Btrfs, and XFS, GVfs backends/FUSE, Samba/Avahi discovery, and
+desktop/icon cache utilities, plus one compatible clipboard MIME helper. A
+normal APT installation still installs these when the distribution provides
+them, but a missing repository component no longer makes the base package
+uninstallable.
 
 Optional desktop-specific enhancements remain:
 
@@ -383,8 +387,7 @@ Optional desktop-specific enhancements remain:
 - `kde-cli-tools`, `kio-extras`, and `kio-fuse` for additional KDE discovery and
   already-mounted KIO paths. They remain suggested rather than pulling KDE into
   a GNOME installation.
-- `xsel` or `libfile-mimeinfo-perl` as additional clipboard/application-chooser
-  fallbacks.
+- `libfile-mimeinfo-perl` as an additional application-chooser fallback.
 - `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` for drag-out on
   X11 or as a Wayland fallback. `BEXPLORER_DRAG_HELPER` selects a custom helper,
   while `BEXPLORER_DRAG_HELPER_FALLBACK=1` enables automatic fallback to a
@@ -459,7 +462,9 @@ scripts/linux/package.sh
 ```
 
 The script creates a versioned tarball and SHA-256 checksum under `dist/` and,
-when `dpkg-deb` is installed, a `.deb` package and checksum. The package
+when `dpkg-deb` is installed, a `.deb` package and checksum. It also validates
+the package metadata, architecture, installed executable, and dependency
+classification through `scripts/linux/validate-deb.sh`. The package
 contains the desktop entry, metainfo, Polkit policy, hicolor icons from 16 to
 512 pixels, license, third-party notices, and the original 7-Zip license texts.
 It installs the executable as `/usr/bin/bexplorer`, registers BExplorer as an

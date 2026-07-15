@@ -219,24 +219,24 @@ Diferencias e integraciones opcionales en Linux:
 - la busqueda de iconos se hace en proceso y todavia puede no cubrir extensiones
   especificas de algunos temas de escritorio.
 
-El `.deb` declara como dependencias obligatorias:
+El `.deb` conserva en `Depends` solamente las dependencias de arranque y las
+integraciones base:
 
-- las bibliotecas de ejecucion de X11, XCB, Wayland, EGL y OpenGL utilizadas
-  por `iced`/`winit`;
+- las bibliotecas base de X11, Wayland, EGL y OpenGL utilizadas por
+  `iced`/`winit`;
 - GLib/GIO, `xdg-utils`, `xdg-desktop-portal` y un backend de portal;
-- `udisks2`, `pkexec` y las herramientas de filesystem (`e2fsprogs`,
-  `dosfstools`, `exfatprogs`, `ntfs-3g`, `btrfs-progs`, `xfsprogs`);
-- GVfs/FUSE y sus backends para montajes de escritorio y dispositivos MTP;
-- `wl-clipboard` y `xclip` para interoperabilidad de portapapeles en Wayland y
-  X11;
-- Samba y Avahi para descubrimiento de red;
-- Shared MIME Info, el tema `hicolor` y las utilidades de base de datos de
-  escritorio e iconos.
+- `udisks2` y elevacion mediante Polkit;
+- Shared MIME Info y el tema `hicolor`.
+
+`Recommends` incluye el complemento completo de X11, herramientas para dar
+formato a ext, FAT, exFAT, NTFS, Btrfs y XFS, GVfs/FUSE, Samba/Avahi y las
+utilidades de cache del escritorio, ademas de un helper compatible para MIME
+del portapapeles. APT las instala normalmente cuando estan disponibles, pero
+una fuente de paquetes opcional deshabilitada ya no impide instalar BExplorer.
 
 Integraciones que siguen siendo opcionales:
 
-- `xsel` y `libfile-mimeinfo-perl` como alternativas de portapapeles y selector
-  de aplicaciones;
+- `libfile-mimeinfo-perl` como alternativa del selector de aplicaciones;
 - `kde-cli-tools`, `kio-extras` y `kio-fuse` para enriquecer KDE sin instalar
   toda su pila en escritorios GNOME;
 - Blur My Shell para el difuminado en GNOME;
@@ -258,9 +258,11 @@ cargo run
 
 Los paquetes Linux se generan con `scripts/linux/package.sh`; el tarball, el
 paquete `.deb` y sus checksums incluyen los avisos y textos de licencia. El
-`.deb` instala el ejecutable en `/usr/bin/bexplorer`, registra la aplicacion en
-el menu del escritorio, instala sus iconos escalados en el tema `hicolor` y
-puede instalarse con `scripts/linux/install-deb.sh`.
+script valida automaticamente metadatos, arquitectura, ejecutable y
+clasificacion de dependencias con `scripts/linux/validate-deb.sh`. El `.deb`
+instala el ejecutable en `/usr/bin/bexplorer`, registra la aplicacion en el menu
+del escritorio, instala sus iconos escalados en el tema `hicolor` y puede
+instalarse con `scripts/linux/install-deb.sh`.
 
 En Windows, `scripts/windows/package.ps1` crea un ZIP portable y un instalador
 Inno Setup con checksum SHA-256. El instalador permite elegir espanol o ingles,

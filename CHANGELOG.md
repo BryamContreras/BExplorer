@@ -4,6 +4,9 @@ All notable user-facing changes to BExplorer are documented here.
 
 ## 1.0.2 - 2026-07-15
 
+- Fixed Debian/Ubuntu installation failures by keeping optional clipboard,
+  X11, filesystem, network, and desktop helpers out of strict dependencies;
+  package generation now validates that classification automatically.
 - Added a compact native Linux Properties window with General, Permissions,
   and Details tabs, including rename, recursive size, timestamps, filesystem
   information, owner/group selection, mode bits, advanced Unix permissions,
