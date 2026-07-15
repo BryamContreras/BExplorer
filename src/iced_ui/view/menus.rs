@@ -74,12 +74,17 @@ impl BExplorerIced {
     }
 
     pub(super) fn title_menu_overlay(&self, palette: Palette) -> Element<'_, Message> {
-        let show_menu_color = if self.show_menu_open {
+        let shortcuts_selected = self.keyboard_menu_item_selected(KeyboardMenu::Title, 0);
+        let show_keyboard_selected = self.keyboard_menu_item_selected(KeyboardMenu::Title, 1);
+        let settings_selected = self.keyboard_menu_item_selected(KeyboardMenu::Title, 2);
+        let about_selected = self.keyboard_menu_item_selected(KeyboardMenu::Title, 3);
+        let show_selected = self.show_menu_open || show_keyboard_selected;
+        let show_menu_color = if show_selected {
             palette.accent_text
         } else {
             palette.text
         };
-        let show_menu_icon_color = if self.show_menu_open {
+        let show_menu_icon_color = if show_selected {
             palette.accent_text
         } else {
             palette.muted_text
@@ -105,7 +110,7 @@ impl BExplorerIced {
             .height(32)
             .padding([0, 8])
             .on_press(Message::OpenShowMenu)
-            .style(move |_, status| button_style(palette, self.show_menu_open, status)),
+            .style(move |_, status| selected_button_style(palette, show_selected, status)),
         )
         .on_enter(Message::ShowMenuParentEnter)
         .on_exit(Message::ShowMenuParentExit);
@@ -114,10 +119,22 @@ impl BExplorerIced {
                 Button::new(
                     container(
                         row![
-                            inline_icon("keyboard", palette.muted_text, 16.0),
+                            inline_icon(
+                                "keyboard",
+                                if shortcuts_selected {
+                                    palette.accent_text
+                                } else {
+                                    palette.muted_text
+                                },
+                                16.0,
+                            ),
                             text(self.localized("Atajos", "Shortcuts"))
                                 .size(self.font_size())
-                                .color(palette.text)
+                                .color(if shortcuts_selected {
+                                    palette.accent_text
+                                } else {
+                                    palette.text
+                                })
                                 .width(Length::Fill),
                         ]
                         .spacing(10)
@@ -130,15 +147,29 @@ impl BExplorerIced {
                 .height(32)
                 .padding([0, 8])
                 .on_press(Message::OpenShortcuts)
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| {
+                    selected_button_style(palette, shortcuts_selected, status)
+                }),
                 show_menu_entry,
                 Button::new(
                     container(
                         row![
-                            inline_icon("settings", palette.muted_text, 16.0),
+                            inline_icon(
+                                "settings",
+                                if settings_selected {
+                                    palette.accent_text
+                                } else {
+                                    palette.muted_text
+                                },
+                                16.0,
+                            ),
                             text(self.localized("Configuracion", "Settings"))
                                 .size(self.font_size())
-                                .color(palette.text)
+                                .color(if settings_selected {
+                                    palette.accent_text
+                                } else {
+                                    palette.text
+                                })
                                 .width(Length::Fill),
                         ]
                         .spacing(8)
@@ -151,14 +182,28 @@ impl BExplorerIced {
                 .height(32)
                 .padding([0, 8])
                 .on_press(Message::ToggleSettings)
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| {
+                    selected_button_style(palette, settings_selected, status)
+                }),
                 Button::new(
                     container(
                         row![
-                            inline_icon("properties", palette.muted_text, 16.0),
+                            inline_icon(
+                                "properties",
+                                if about_selected {
+                                    palette.accent_text
+                                } else {
+                                    palette.muted_text
+                                },
+                                16.0,
+                            ),
                             text(self.localized("Acerca de", "About"))
                                 .size(self.font_size())
-                                .color(palette.text)
+                                .color(if about_selected {
+                                    palette.accent_text
+                                } else {
+                                    palette.text
+                                })
                                 .width(Length::Fill),
                         ]
                         .spacing(8)
@@ -171,7 +216,7 @@ impl BExplorerIced {
                 .height(32)
                 .padding([0, 8])
                 .on_press(Message::OpenAbout)
-                .style(move |_, status| button_style(palette, false, status)),
+                .style(move |_, status| { selected_button_style(palette, about_selected, status) }),
             ]
             .spacing(3),
         )
@@ -204,18 +249,21 @@ impl BExplorerIced {
             let submenu = container(
                 column![
                     self.show_menu_option(
+                        0,
                         self.localized("Barra de acciones", "Action bar"),
                         self.config.show_action_bar,
                         Message::ToggleActionBar,
                         palette,
                     ),
                     self.show_menu_option(
+                        1,
                         self.localized("Barra de marcadores", "Bookmarks bar"),
                         self.config.show_bookmark_bar,
                         Message::ToggleBookmarkBar,
                         palette,
                     ),
                     self.show_menu_option(
+                        2,
                         self.localized(
                             "Menu lateral en pantalla dividida",
                             "Sidebar in split view"
@@ -225,6 +273,7 @@ impl BExplorerIced {
                         palette,
                     ),
                     self.show_menu_option(
+                        3,
                         self.localized(
                             "Panel de vista previa en pantalla dividida",
                             "Preview panel in split view",
@@ -272,19 +321,30 @@ impl BExplorerIced {
 
     pub(super) fn show_menu_option(
         &self,
+        index: usize,
         label: &'static str,
         enabled: bool,
         message: Message,
         palette: Palette,
     ) -> Element<'_, Message> {
+        let keyboard_selected = self.keyboard_menu_item_selected(KeyboardMenu::Show, index);
+        let selected = if self.keyboard_menu_has_selection(KeyboardMenu::Show) {
+            keyboard_selected
+        } else {
+            enabled
+        };
         Button::new(
             container(
                 row![
                     text(if enabled { "✓" } else { "" })
                         .size(self.font_size())
-                        .color(palette.accent_text)
+                        .color(if selected {
+                            palette.accent_text
+                        } else {
+                            palette.muted_text
+                        })
                         .width(18),
-                    text(label).size(self.font_size()).color(if enabled {
+                    text(label).size(self.font_size()).color(if selected {
                         palette.accent_text
                     } else {
                         palette.text
@@ -300,7 +360,7 @@ impl BExplorerIced {
         .height(32)
         .padding([0, 8])
         .on_press(message)
-        .style(move |_, status| button_style(palette, enabled, status))
+        .style(move |_, status| selected_button_style(palette, selected, status))
         .into()
     }
 
@@ -355,14 +415,16 @@ impl BExplorerIced {
                     self.localized("Copiar", "Copy"),
                     ContextCommand::Copy,
                     palette,
-                    can_copy_or_cut
+                    can_copy_or_cut,
+                    self.context_command_keyboard_selected(ContextCommand::Copy),
                 ),
                 context_quick_button(
                     "cut",
                     self.localized("Cortar", "Cut"),
                     ContextCommand::Cut,
                     palette,
-                    can_copy_or_cut
+                    can_copy_or_cut,
+                    self.context_command_keyboard_selected(ContextCommand::Cut),
                 ),
                 context_quick_button(
                     "paste",
@@ -370,6 +432,7 @@ impl BExplorerIced {
                     ContextCommand::Paste,
                     palette,
                     menu_state.paste_available,
+                    self.context_command_keyboard_selected(ContextCommand::Paste),
                 ),
             ]
         } else {
@@ -380,20 +443,23 @@ impl BExplorerIced {
                     ContextCommand::Paste,
                     palette,
                     menu_state.paste_available,
+                    self.context_command_keyboard_selected(ContextCommand::Paste),
                 ),
                 context_quick_button(
                     "copy",
                     self.localized("Copiar", "Copy"),
                     ContextCommand::Copy,
                     palette,
-                    false
+                    false,
+                    false,
                 ),
                 context_quick_button(
                     "cut",
                     self.localized("Cortar", "Cut"),
                     ContextCommand::Cut,
                     palette,
-                    false
+                    false,
+                    false,
                 ),
             ]
         }
@@ -411,6 +477,7 @@ impl BExplorerIced {
                     None,
                     ContextCommand::FormatDrive,
                     palette,
+                    self.context_command_keyboard_selected(ContextCommand::FormatDrive),
                 ));
             }
             items = items.push(context_menu_row(
@@ -419,6 +486,7 @@ impl BExplorerIced {
                 None,
                 ContextCommand::EjectDrive,
                 palette,
+                self.context_command_keyboard_selected(ContextCommand::EjectDrive),
             ));
         } else {
             items = items.push(quick_actions).push(context_separator(palette));
@@ -434,6 +502,7 @@ impl BExplorerIced {
                 None,
                 ContextCommand::Open,
                 palette,
+                self.context_command_keyboard_selected(ContextCommand::Open),
             ));
             if !drive_entry {
                 items = items.push(
@@ -443,6 +512,7 @@ impl BExplorerIced {
                         Some(ContextMenuTrailing::Icon("chev-right")),
                         ContextCommand::OpenWithMenu,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::OpenWithMenu),
                     ))
                     .on_enter(Message::ContextOpenWithParentEnter)
                     .on_exit(Message::ContextOpenWithParentExit),
@@ -454,6 +524,7 @@ impl BExplorerIced {
                         None,
                         ContextCommand::OpenFileLocation,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::OpenFileLocation),
                     ));
                 }
                 items = items.push(context_separator(palette)).push(
@@ -463,6 +534,7 @@ impl BExplorerIced {
                         Some(ContextMenuTrailing::Icon("chev-right")),
                         ContextCommand::CompressMenu,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::CompressMenu),
                     ))
                     .on_enter(Message::ContextArchiveParentEnter)
                     .on_exit(Message::ContextArchiveParentExit),
@@ -475,6 +547,7 @@ impl BExplorerIced {
                             Some(ContextMenuTrailing::Icon("chev-right")),
                             ContextCommand::ExtractMenu,
                             palette,
+                            self.context_command_keyboard_selected(ContextCommand::ExtractMenu),
                         ))
                         .on_enter(Message::ContextExtractParentEnter)
                         .on_exit(Message::ContextArchiveParentExit),
@@ -487,6 +560,7 @@ impl BExplorerIced {
                         None,
                         ContextCommand::MountDiskImage,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::MountDiskImage),
                     ));
                 }
             }
@@ -497,6 +571,7 @@ impl BExplorerIced {
                     None,
                     ContextCommand::EjectDrive,
                     palette,
+                    self.context_command_keyboard_selected(ContextCommand::EjectDrive),
                 ));
             }
             if formatable_drive {
@@ -506,6 +581,7 @@ impl BExplorerIced {
                     None,
                     ContextCommand::FormatDrive,
                     palette,
+                    self.context_command_keyboard_selected(ContextCommand::FormatDrive),
                 ));
             }
             if defender_available && !drive_entry {
@@ -518,6 +594,7 @@ impl BExplorerIced {
                     None,
                     ContextCommand::ScanWithDefender,
                     palette,
+                    self.context_command_keyboard_selected(ContextCommand::ScanWithDefender),
                 ));
             }
             if !drive_entry {
@@ -529,6 +606,7 @@ impl BExplorerIced {
                         None,
                         ContextCommand::Rename,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::Rename),
                     ))
                     .push(context_menu_row(
                         "trash",
@@ -536,6 +614,7 @@ impl BExplorerIced {
                         None,
                         ContextCommand::Delete,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::Delete),
                     ))
                     .push(context_menu_row(
                         "delete-forever",
@@ -543,6 +622,7 @@ impl BExplorerIced {
                         None,
                         ContextCommand::DeletePermanent,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::DeletePermanent),
                     ))
                     .push(context_separator(palette));
             }
@@ -554,6 +634,7 @@ impl BExplorerIced {
                     None,
                     ContextCommand::Refresh,
                     palette,
+                    self.context_command_keyboard_selected(ContextCommand::Refresh),
                 ))
                 .push(
                     mouse_area(context_menu_row(
@@ -562,6 +643,7 @@ impl BExplorerIced {
                         Some(ContextMenuTrailing::Icon("chev-right")),
                         ContextCommand::NewMenu,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::NewMenu),
                     ))
                     .on_enter(Message::ContextNewParentEnter)
                     .on_exit(Message::ContextNewParentExit),
@@ -576,6 +658,7 @@ impl BExplorerIced {
                 None,
                 ContextCommand::OpenTerminal,
                 palette,
+                self.context_command_keyboard_selected(ContextCommand::OpenTerminal),
             ));
         }
         if !is_sidebar_drive {
@@ -585,6 +668,7 @@ impl BExplorerIced {
                 Some(ContextMenuTrailing::Text("Alt+Enter")),
                 ContextCommand::Properties,
                 palette,
+                self.context_command_keyboard_selected(ContextCommand::Properties),
             ));
         }
 
@@ -618,10 +702,7 @@ impl BExplorerIced {
 
         let mut overlay_layers = vec![backdrop.into(), floating_menu];
         if self.context_open_with_submenu && is_entry {
-            let applications = self
-                .context_entry(menu_state.pane, menu_state.target)
-                .and_then(|entry| shell::open_with_applications(&entry.path).ok())
-                .unwrap_or_default();
+            let applications = &menu_state.open_with_applications;
             let mut submenu_labels = applications
                 .iter()
                 .map(|application| application.name.clone())
@@ -632,22 +713,22 @@ impl BExplorerIced {
             );
             let mut rows = column![].spacing(2).width(Length::Fill).padding([4, 6]);
             for (index, application) in applications.iter().enumerate() {
-                let icon = application.icon_path.as_ref().and_then(|path| {
-                    let key = thumbnail_data::native_path_icon_cache_key(
-                        path,
-                        false,
-                        thumbnail_data::NATIVE_ICON_SIZE,
-                    );
-                    match self.native_icon_cache.get(&key) {
-                        Some(IcedImageState::Ready(handle)) => Some(handle.clone()),
-                        _ => None,
-                    }
+                let icon = open_with_application_icon_cache_key(
+                    application,
+                    thumbnail_data::NATIVE_ICON_SIZE,
+                )
+                .and_then(|key| match self.native_icon_cache.get(&key) {
+                    Some(IcedImageState::Ready(handle)) => Some(handle.clone()),
+                    _ => None,
                 });
                 rows = rows.push(context_menu_application_row(
                     application.name.clone(),
                     icon,
                     ContextCommand::OpenWithApplication(index),
                     palette,
+                    self.context_command_keyboard_selected(ContextCommand::OpenWithApplication(
+                        index,
+                    )),
                 ));
             }
             rows = rows.push(context_menu_dynamic_row(
@@ -657,10 +738,21 @@ impl BExplorerIced {
                 None,
                 ContextCommand::OpenWith,
                 palette,
+                self.context_command_keyboard_selected(ContextCommand::OpenWith),
             ));
             let submenu_width = context_submenu_width(&submenu_labels).max(220.0);
             let submenu_height = (applications.len() as f32 * 36.0 + 46.0).min(320.0);
-            let submenu_content = container(rows).width(submenu_width).style(move |_| {
+            let submenu_content = container(
+                scrollable(rows)
+                    .id(Self::context_open_with_scroll_id())
+                    .height(submenu_height)
+                    .style(move |theme, status| {
+                        explorer_scrollable_style(palette, theme, status, 1.0)
+                    }),
+            )
+            .width(submenu_width)
+            .height(submenu_height)
+            .style(move |_| {
                 container::Style::default()
                     .background(palette.menu_bg)
                     .border(border::rounded(7).color(palette.strong_border).width(1))
@@ -735,6 +827,9 @@ impl BExplorerIced {
                             None,
                             ContextCommand::Extract(ExtractMode::Here),
                             palette,
+                            self.context_command_keyboard_selected(ContextCommand::Extract(
+                                ExtractMode::Here,
+                            )),
                         ),
                         context_menu_dynamic_row(
                             "archive",
@@ -742,6 +837,9 @@ impl BExplorerIced {
                             None,
                             ContextCommand::Extract(ExtractMode::ToNamedFolder),
                             palette,
+                            self.context_command_keyboard_selected(ContextCommand::Extract(
+                                ExtractMode::ToNamedFolder,
+                            )),
                         ),
                     ]
                     .spacing(2)
@@ -776,6 +874,7 @@ impl BExplorerIced {
                             None,
                             ContextCommand::CompressDialog,
                             palette,
+                            self.context_command_keyboard_selected(ContextCommand::CompressDialog,),
                         ),
                         context_menu_dynamic_row(
                             "archive",
@@ -783,6 +882,9 @@ impl BExplorerIced {
                             None,
                             ContextCommand::CompressDefault(ArchiveFormat::SevenZip),
                             palette,
+                            self.context_command_keyboard_selected(
+                                ContextCommand::CompressDefault(ArchiveFormat::SevenZip,)
+                            ),
                         ),
                         context_menu_dynamic_row(
                             "archive",
@@ -790,6 +892,9 @@ impl BExplorerIced {
                             None,
                             ContextCommand::CompressDefault(ArchiveFormat::Zip),
                             palette,
+                            self.context_command_keyboard_selected(
+                                ContextCommand::CompressDefault(ArchiveFormat::Zip,)
+                            ),
                         ),
                     ]
                     .spacing(2)
@@ -872,6 +977,7 @@ impl BExplorerIced {
                         None,
                         ContextCommand::NewFolder,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::NewFolder),
                     ),
                     context_menu_row(
                         "file",
@@ -879,6 +985,7 @@ impl BExplorerIced {
                         None,
                         ContextCommand::NewTextDocument,
                         palette,
+                        self.context_command_keyboard_selected(ContextCommand::NewTextDocument),
                     ),
                 ]
                 .spacing(2)

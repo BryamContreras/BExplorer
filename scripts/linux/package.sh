@@ -25,6 +25,7 @@ rm -rf "$APPDIR" "$DEBROOT"
 mkdir -p \
   "$APPDIR/usr/bin" \
   "$APPDIR/usr/share/applications" \
+  "$APPDIR/usr/share/icons/hicolor" \
   "$APPDIR/usr/share/pixmaps" \
   "$APPDIR/usr/share/metainfo" \
   "$APPDIR/usr/share/polkit-1/actions" \
@@ -33,6 +34,12 @@ mkdir -p \
 install -m 0755 "$ROOT_DIR/target/$TARGET/release/bexplorer" "$APPDIR/usr/bin/bexplorer"
 install -m 0644 "$ROOT_DIR/assets/linux/bexplorer.desktop" "$APPDIR/usr/share/applications/bexplorer.desktop"
 install -m 0644 "$ROOT_DIR/assets/icons/appicon.png" "$APPDIR/usr/share/pixmaps/bexplorer.png"
+for ICON in "$ROOT_DIR"/assets/linux/hicolor/*/apps/bexplorer.png; do
+  [ -f "$ICON" ] || continue
+  ICON_SIZE=$(basename "$(dirname "$(dirname "$ICON")")")
+  mkdir -p "$APPDIR/usr/share/icons/hicolor/$ICON_SIZE/apps"
+  install -m 0644 "$ICON" "$APPDIR/usr/share/icons/hicolor/$ICON_SIZE/apps/bexplorer.png"
+done
 install -m 0644 "$ROOT_DIR/assets/linux/io.github.BryamContreras.BExplorer.metainfo.xml" "$APPDIR/usr/share/metainfo/io.github.BryamContreras.BExplorer.metainfo.xml"
 install -m 0644 "$ROOT_DIR/assets/linux/io.github.BryamContreras.BExplorer.policy" "$APPDIR/usr/share/polkit-1/actions/io.github.BryamContreras.BExplorer.policy"
 install -m 0644 "$ROOT_DIR/README.md" "$APPDIR/usr/share/doc/bexplorer/README.md"
@@ -60,6 +67,25 @@ fi
 
 mkdir -p "$DEBROOT/DEBIAN"
 cp -a "$APPDIR/usr" "$DEBROOT/usr"
+
+# Keep the declared libc baseline aligned with the host used to build the
+# distributable. Building in an older supported container therefore lowers
+# the package requirement automatically instead of silently producing a .deb
+# that APT can install but whose executable cannot start.
+GLIBC_VERSION=$(LC_ALL=C grep -aoE 'GLIBC_[0-9]+(\.[0-9]+)+' \
+  "$APPDIR/usr/bin/bexplorer" 2>/dev/null \
+  | sed 's/^GLIBC_//' \
+  | sort -V \
+  | tail -n 1 || true)
+case "$GLIBC_VERSION" in
+  '') printf 'Could not determine the minimum GLIBC version required by BExplorer\n' >&2; exit 1 ;;
+  *[!0-9.]*) printf 'Invalid GLIBC version detected: %s\n' "$GLIBC_VERSION" >&2; exit 1 ;;
+  *)
+    LIBC_DEPENDENCY="libc6 (>= $GLIBC_VERSION)"
+    printf 'Detected GNU libc baseline: %s\n' "$GLIBC_VERSION"
+    ;;
+esac
+
 cat > "$DEBROOT/DEBIAN/control" <<EOF
 Package: bexplorer
 Version: $VERSION
@@ -67,34 +93,47 @@ Section: utils
 Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: Bryam Contreras <noreply@github.com>
-Depends: libc6,
+Depends: $LIBC_DEPENDENCY,
  libgcc-s1,
  libstdc++6,
+ libx11-6,
+ libx11-xcb1,
+ libxext6,
+ libxcursor1,
+ libxi6,
  libxcb1,
  libxkbcommon0,
+ libxkbcommon-x11-0,
  libwayland-client0,
  libegl1,
  libgl1,
- xdg-utils
-Recommends: udisks2,
- pkexec | policykit-1,
- polkitd | policykit-1,
+ libglib2.0-bin,
+ xdg-utils,
+ xdg-desktop-portal,
+ xdg-desktop-portal-gtk | xdg-desktop-portal-backend,
+ udisks2,
+ pkexec,
  e2fsprogs,
  dosfstools,
  exfatprogs,
  ntfs-3g,
  btrfs-progs,
  xfsprogs,
- gvfs,
  gvfs-fuse,
  gvfs-backends,
- gvfs-daemons,
- gvfs-mtp,
- wl-clipboard | xclip | xsel,
+ wl-clipboard,
+ xclip,
  smbclient,
  avahi-utils,
  shared-mime-info,
- hicolor-icon-theme
+ hicolor-icon-theme,
+ desktop-file-utils,
+ gtk-update-icon-cache
+Suggests: xsel,
+ libfile-mimeinfo-perl,
+ kde-cli-tools,
+ kio-extras,
+ kio-fuse
 Description: Native Rust file explorer
  BExplorer is a native Rust desktop file explorer with tabs, split-pane
  workflows, archive handling, previews, and Linux desktop integration.

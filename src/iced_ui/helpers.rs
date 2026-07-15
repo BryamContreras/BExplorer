@@ -717,25 +717,40 @@ mod tests {
         let defender = defender_window_settings(defender_size);
         let threats_size = defender_threats_window_size(2);
         let threats = defender_threats_window_settings(2);
+        #[cfg(target_os = "linux")]
+        let properties_size = properties_window_size();
+        #[cfg(target_os = "linux")]
+        let properties = properties_window_settings();
 
         assert_eq!(transfer.size, size);
         assert_eq!(archive.size, size);
         assert_eq!(defender.size, defender_size);
         assert_eq!(threats.size, threats_size);
+        #[cfg(target_os = "linux")]
+        assert_eq!(properties.size, properties_size);
         assert!(!transfer.resizable);
         assert!(!archive.resizable);
         assert!(!defender.resizable);
         assert!(!threats.resizable);
+        #[cfg(target_os = "linux")]
+        assert!(!properties.resizable);
         assert!(!transfer.exit_on_close_request);
         assert!(!archive.exit_on_close_request);
         assert!(!defender.exit_on_close_request);
         assert!(!threats.exit_on_close_request);
+        #[cfg(target_os = "linux")]
+        assert!(!properties.exit_on_close_request);
         assert_eq!(transfer.min_size, Some(size));
         assert_eq!(transfer.max_size, Some(size));
         assert_eq!(archive.min_size, Some(size));
         assert_eq!(archive.max_size, Some(size));
         assert_eq!(threats.min_size, Some(threats_size));
         assert_eq!(threats.max_size, Some(threats_size));
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(properties.min_size, Some(properties_size));
+            assert_eq!(properties.max_size, Some(properties_size));
+        }
 
         #[cfg(target_os = "linux")]
         {
@@ -795,6 +810,8 @@ mod tests {
                 .is_some()
         );
         assert!(defender_threats_window_settings(1).icon.is_some());
+        #[cfg(target_os = "linux")]
+        assert!(properties_window_settings().icon.is_some());
     }
 
     #[test]

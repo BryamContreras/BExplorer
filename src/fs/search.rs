@@ -84,7 +84,7 @@ where
                 continue;
             };
             let kind = if file_type.is_symlink() {
-                EntryKind::Symlink
+                crate::fs::explorer::symlink_target_kind(&path)
             } else if file_type.is_dir() {
                 EntryKind::Folder
             } else if file_type.is_file() {

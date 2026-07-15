@@ -89,7 +89,16 @@ impl BExplorerIced {
         palette: Palette,
     ) -> Element<'_, Message> {
         let active = self.effective_view_mode(pane) == mode;
-        let color = if active {
+        let keyboard_selected = view_menu_modes()
+            .iter()
+            .position(|candidate| *candidate == mode)
+            .is_some_and(|index| self.keyboard_menu_item_selected(KeyboardMenu::View(pane), index));
+        let selected = if self.keyboard_menu_has_selection(KeyboardMenu::View(pane)) {
+            keyboard_selected
+        } else {
+            active
+        };
+        let color = if selected {
             palette.accent_text
         } else {
             palette.text
@@ -113,7 +122,7 @@ impl BExplorerIced {
         .height(32)
         .padding([0, 8])
         .on_press(Message::SetViewMode(pane, mode))
-        .style(move |_, status| selected_button_style(palette, active, status))
+        .style(move |_, status| selected_button_style(palette, selected, status))
         .into()
     }
 
@@ -122,12 +131,25 @@ impl BExplorerIced {
         pane: PaneId,
         palette: Palette,
     ) -> Element<'_, Message> {
-        let option = |icon: &'static str, label: &'static str, message: Message| {
+        let option = |index: usize, icon: &'static str, label: &'static str, message: Message| {
+            let selected = self.keyboard_menu_item_selected(KeyboardMenu::New(pane), index);
             Button::new(
                 container(
                     row![
-                        inline_icon(icon, palette.muted_text, 17.0),
-                        text(label).size(self.font_size()).color(palette.text),
+                        inline_icon(
+                            icon,
+                            if selected {
+                                palette.accent_text
+                            } else {
+                                palette.muted_text
+                            },
+                            17.0,
+                        ),
+                        text(label).size(self.font_size()).color(if selected {
+                            palette.accent_text
+                        } else {
+                            palette.text
+                        }),
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center),
@@ -139,16 +161,18 @@ impl BExplorerIced {
             .height(32)
             .padding([0, 9])
             .on_press(message)
-            .style(move |_, status| button_style(palette, false, status))
+            .style(move |_, status| selected_button_style(palette, selected, status))
         };
         let menu = container(
             column![
                 option(
+                    0,
                     "folder",
                     self.localized("Nueva carpeta", "New folder"),
                     Message::NewFolder(pane),
                 ),
                 option(
+                    1,
                     "file",
                     self.localized("Documento de texto", "Text document"),
                     Message::NewTextDocument(pane),
@@ -190,21 +214,28 @@ impl BExplorerIced {
         pane: PaneId,
         palette: Palette,
     ) -> Element<'_, Message> {
-        let option = |label: &'static str, icon: &'static str, mode: SearchMode| {
+        let option = |index: usize, label: &'static str, icon: &'static str, mode: SearchMode| {
             let active = self.pane(pane).search_mode == mode;
+            let keyboard_selected =
+                self.keyboard_menu_item_selected(KeyboardMenu::Search(pane), index);
+            let selected = if self.keyboard_menu_has_selection(KeyboardMenu::Search(pane)) {
+                keyboard_selected
+            } else {
+                active
+            };
             Button::new(
                 container(
                     row![
                         inline_icon(
                             icon,
-                            if active {
+                            if selected {
                                 palette.accent_text
                             } else {
                                 palette.muted_text
                             },
                             16.0,
                         ),
-                        text(label).size(self.font_size()).color(if active {
+                        text(label).size(self.font_size()).color(if selected {
                             palette.accent_text
                         } else {
                             palette.text
@@ -220,16 +251,18 @@ impl BExplorerIced {
             .height(32)
             .padding([0, 8])
             .on_press(Message::SetSearchMode(pane, mode))
-            .style(move |_, status| selected_button_style(palette, active, status))
+            .style(move |_, status| selected_button_style(palette, selected, status))
         };
         let menu = container(
             column![
                 option(
+                    0,
                     self.localized("Búsqueda rápida", "Quick search"),
                     "folder",
                     SearchMode::Quick
                 ),
                 option(
+                    1,
                     self.localized("Búsqueda completa", "Full search"),
                     "folder-stack",
                     SearchMode::Complete
@@ -280,24 +313,28 @@ impl BExplorerIced {
         let items = column![
             self.group_mode_item(
                 pane,
+                0,
                 GroupMode::None,
                 self.localized("Ninguno", "None"),
                 palette
             ),
             self.group_mode_item(
                 pane,
+                1,
                 GroupMode::Type,
                 self.localized("Tipo", "Type"),
                 palette
             ),
             self.group_mode_item(
                 pane,
+                2,
                 GroupMode::Name,
                 self.localized("Nombre", "Name"),
                 palette
             ),
             self.group_mode_item(
                 pane,
+                3,
                 GroupMode::TotalSize,
                 self.localized("Tamaño", "Size"),
                 palette
@@ -305,12 +342,14 @@ impl BExplorerIced {
             context_separator(palette),
             self.group_direction_item(
                 pane,
+                4,
                 true,
                 self.localized("Ascendente", "Ascending"),
                 palette
             ),
             self.group_direction_item(
                 pane,
+                5,
                 false,
                 self.localized("Descendente", "Descending"),
                 palette
@@ -355,14 +394,22 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn group_mode_item(
         &self,
         pane: PaneId,
+        index: usize,
         mode: GroupMode,
         label: &'static str,
         palette: Palette,
     ) -> Element<'_, Message> {
         let active = self.effective_group_mode(pane) == mode;
+        let keyboard_selected = self.keyboard_menu_item_selected(KeyboardMenu::Group(pane), index);
+        let selected = if self.keyboard_menu_has_selection(KeyboardMenu::Group(pane)) {
+            keyboard_selected
+        } else {
+            active
+        };
         menu_choice_button(
             label,
             active,
+            selected,
             Message::SetGroupMode(pane, mode),
             palette,
             self.font_size(),
@@ -372,14 +419,22 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn group_direction_item(
         &self,
         pane: PaneId,
+        index: usize,
         ascending: bool,
         label: &'static str,
         palette: Palette,
     ) -> Element<'_, Message> {
         let active = self.effective_group_ascending(pane) == ascending;
+        let keyboard_selected = self.keyboard_menu_item_selected(KeyboardMenu::Group(pane), index);
+        let selected = if self.keyboard_menu_has_selection(KeyboardMenu::Group(pane)) {
+            keyboard_selected
+        } else {
+            active
+        };
         menu_choice_button(
             label,
             active,
+            selected,
             Message::SetGroupAscending(pane, ascending),
             palette,
             self.font_size(),

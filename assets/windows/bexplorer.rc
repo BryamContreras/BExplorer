@@ -6,8 +6,8 @@
 1 ICON "bexplorer.ico"
 
 1 VERSIONINFO
-FILEVERSION 1,0,1,0
-PRODUCTVERSION 1,0,1,0
+FILEVERSION 1,0,2,0
+PRODUCTVERSION 1,0,2,0
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS VS_FF_DEBUG
@@ -24,12 +24,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "Bryam Contreras\0"
             VALUE "FileDescription", "BExplorer file manager\0"
-            VALUE "FileVersion", "1.0.1\0"
+            VALUE "FileVersion", "1.0.2\0"
             VALUE "InternalName", "bexplorer\0"
             VALUE "LegalCopyright", "Copyright (c) 2026 Bryam Contreras\0"
             VALUE "OriginalFilename", "bexplorer.exe\0"
             VALUE "ProductName", "BExplorer\0"
-            VALUE "ProductVersion", "1.0.1\0"
+            VALUE "ProductVersion", "1.0.2\0"
         END
     END
     BLOCK "VarFileInfo"

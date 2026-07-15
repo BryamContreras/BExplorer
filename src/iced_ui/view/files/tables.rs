@@ -54,6 +54,8 @@ impl BExplorerIced {
         match entry.kind {
             EntryKind::Drive => "Unidad".into(),
             EntryKind::Folder => "Carpeta".into(),
+            EntryKind::SymlinkFolder => "Enlace simbólico a carpeta".into(),
+            EntryKind::SymlinkFile => "Enlace simbólico a archivo".into(),
             EntryKind::Symlink => "Enlace simbólico".into(),
             EntryKind::File | EntryKind::Other => {
                 let category = match entry.category {
@@ -105,8 +107,10 @@ impl BExplorerIced {
 
     pub(in crate::iced_ui) fn localized_tile_metadata_label(&self, entry: &FileEntry) -> String {
         let type_label = self.localized_entry_type_label(entry);
-        if matches!(&entry.kind, EntryKind::File | EntryKind::Other)
-            && let Some(size) = entry.size
+        if matches!(
+            &entry.kind,
+            EntryKind::File | EntryKind::SymlinkFile | EntryKind::Other
+        ) && let Some(size) = entry.size
         {
             return format!("{type_label} · {}", format_size(Some(size)));
         }

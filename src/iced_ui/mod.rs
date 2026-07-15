@@ -45,6 +45,8 @@ mod file_actions;
 mod helpers;
 mod interaction;
 mod navigation;
+#[cfg(target_os = "linux")]
+mod properties;
 mod search_state;
 mod update;
 mod view;
@@ -148,6 +150,10 @@ const COLOR_PICKER_PLANE_WIDTH: f32 = 260.0;
 const COLOR_PICKER_PLANE_HEIGHT: f32 = 210.0;
 const COLOR_PICKER_HUE_WIDTH: f32 = COLOR_PICKER_WIDTH - 24.0;
 const COLOR_PICKER_HUE_HEIGHT: f32 = 20.0;
+#[cfg(target_os = "linux")]
+const PROPERTIES_WINDOW_WIDTH: f32 = 480.0;
+#[cfg(target_os = "linux")]
+const PROPERTIES_WINDOW_HEIGHT: f32 = 620.0;
 
 // Kept in the parent module so all UI workers share the same private state types.
 include!("state.rs");
@@ -169,6 +175,7 @@ struct BExplorerIced {
     show_menu_submenu_hovered: bool,
     view_menu_open: Option<PaneId>,
     group_menu_open: Option<PaneId>,
+    keyboard_menu_selection: Option<KeyboardMenuSelection>,
     preview_panel_pane: Option<PaneId>,
     preview_panel_target_pane: Option<PaneId>,
     address_edit: Option<AddressEditState>,
@@ -278,6 +285,12 @@ struct BExplorerIced {
     transfer_window_item_count: usize,
     archive_window_id: Option<window::Id>,
     archive_window_item_count: usize,
+    #[cfg(target_os = "linux")]
+    properties_window_id: Option<window::Id>,
+    #[cfg(target_os = "linux")]
+    properties_window: Option<properties::PropertiesWindowState>,
+    #[cfg(target_os = "linux")]
+    properties_request_id: u64,
 }
 
 pub fn run(initial_path: Option<PathBuf>) -> iced::Result {
@@ -294,11 +307,7 @@ pub fn run(initial_path: Option<PathBuf>) -> iced::Result {
     .run()
 }
 
-fn keyboard_event_message(
-    event: Event,
-    status: event::Status,
-    _window: window::Id,
-) -> Option<Message> {
+fn input_event_message(event: Event, status: event::Status, window: window::Id) -> Option<Message> {
     match event {
         Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
             Some(Message::KeyboardModifiersChanged(modifiers))
@@ -312,7 +321,13 @@ fn keyboard_event_message(
         // Widgets such as inline rename editors own their Enter key. Do not
         // emit a second global shortcut for a key they already captured.
         }) if !repeat && status == event::Status::Ignored => {
-            Some(Message::KeyPressed(key, physical_key, modifiers))
+            Some(Message::KeyPressed(window, key, physical_key, modifiers))
+        }
+        Event::Mouse(mouse::Event::ButtonPressed(_)) => {
+            Some(Message::CheckAddressFocus(window))
+        }
+        Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
+            Some(Message::CheckAddressFocus(window))
         }
         Event::Window(window::Event::FileDropped(path)) => Some(Message::ExternalFileDropped(path)),
         _ => None,
@@ -407,6 +422,18 @@ fn popup_backdrop_region_for_screenshot(
 }
 
 impl BExplorerIced {
+    fn is_properties_window(&self, id: window::Id) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.properties_window_id == Some(id)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = id;
+            false
+        }
+    }
+
     fn file_pane_bounds_for_screenshot(&self, pane: PaneId, window_width: f32) -> Rectangle {
         let shared_sidebar_width = if self.sidebar_is_rendered() && !self.uses_split_sidebars() {
             self.current_sidebar_width()
@@ -578,6 +605,7 @@ impl BExplorerIced {
             show_menu_submenu_hovered: false,
             view_menu_open: None,
             group_menu_open: None,
+            keyboard_menu_selection: None,
             preview_panel_pane,
             preview_panel_target_pane: None,
             address_edit: None,
@@ -676,6 +704,12 @@ impl BExplorerIced {
             transfer_window_item_count: 0,
             archive_window_id: None,
             archive_window_item_count: 0,
+            #[cfg(target_os = "linux")]
+            properties_window_id: None,
+            #[cfg(target_os = "linux")]
+            properties_window: None,
+            #[cfg(target_os = "linux")]
+            properties_request_id: 0,
         };
 
         // Paint the last known storage state immediately. The root load then
@@ -848,6 +882,10 @@ impl BExplorerIced {
         {
             tasks.push(self.apply_window_corners_task_for(id));
         }
+        #[cfg(target_os = "linux")]
+        if let Some(id) = self.properties_window_id {
+            tasks.push(self.apply_window_corners_task_for(id));
+        }
         Task::batch(tasks)
     }
 
@@ -899,6 +937,15 @@ impl BExplorerIced {
                 .map(|summary| summary.threats.len())
                 .unwrap_or_default();
             defender_threats_window_size(threat_count)
+        } else if self.is_properties_window(id) {
+            #[cfg(target_os = "linux")]
+            {
+                properties_window_size()
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                self.window_size
+            }
         } else {
             self.window_size
         }
@@ -1045,7 +1092,7 @@ impl BExplorerIced {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let keyboard_events = event::listen_with(keyboard_event_message);
+        let input_events = event::listen_with(input_event_message);
 
         let pointer_events = if self.pointer_tracking_active() {
             event::listen_with(|event, _status, _window| match event {
@@ -1124,7 +1171,7 @@ impl BExplorerIced {
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
             window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
-            keyboard_events,
+            input_events,
             pointer_events,
             transfer_tick,
             animation_frame,
@@ -1136,5 +1183,25 @@ impl BExplorerIced {
             system_theme_changes,
             storage_changes,
         ])
+    }
+}
+
+#[cfg(test)]
+mod address_focus_tests {
+    use super::*;
+
+    #[test]
+    fn every_mouse_press_requests_an_address_focus_check() {
+        let window = window::Id::unique();
+        let message = input_event_message(
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            event::Status::Captured,
+            window,
+        );
+
+        assert!(matches!(
+            message,
+            Some(Message::CheckAddressFocus(id)) if id == window
+        ));
     }
 }

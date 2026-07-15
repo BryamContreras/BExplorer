@@ -578,7 +578,11 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn entry_display_name(&self, entry: &FileEntry) -> String {
-        if self.config.show_extensions || !matches!(entry.kind, EntryKind::File | EntryKind::Other)
+        if self.config.show_extensions
+            || !matches!(
+                entry.kind,
+                EntryKind::File | EntryKind::SymlinkFile | EntryKind::Other
+            )
         {
             return entry.name.clone();
         }

@@ -247,8 +247,10 @@ pub(in crate::iced_ui) fn format_size(size: Option<u64>) -> String {
 #[cfg(test)]
 pub(in crate::iced_ui) fn tile_metadata_label(entry: &FileEntry) -> String {
     let type_label = entry.type_label();
-    if matches!(&entry.kind, EntryKind::File | EntryKind::Other)
-        && let Some(size) = entry.size
+    if matches!(
+        &entry.kind,
+        EntryKind::File | EntryKind::SymlinkFile | EntryKind::Other
+    ) && let Some(size) = entry.size
     {
         return format!("{type_label} · {}", format_size(Some(size)));
     }

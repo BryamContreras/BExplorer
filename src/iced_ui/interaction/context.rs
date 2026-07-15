@@ -6,29 +6,28 @@ impl BExplorerIced {
         pane: PaneId,
         target: ContextTarget,
     ) -> Task<Message> {
-        let Some(entry) = self.context_entry(pane, target) else {
-            return Task::none();
-        };
-        let applications = shell::open_with_applications(&entry.path).unwrap_or_default();
+        let applications = self
+            .context_menu
+            .as_ref()
+            .filter(|menu| menu.pane == pane && menu.target == target)
+            .map(|menu| menu.open_with_applications.clone())
+            .unwrap_or_default();
         let mut tasks = Vec::new();
         for application in applications {
-            let Some(icon_path) = application.icon_path else {
+            let Some(key) = open_with_application_icon_cache_key(
+                &application,
+                thumbnail_data::NATIVE_ICON_SIZE,
+            ) else {
                 continue;
             };
-            let key = thumbnail_data::native_path_icon_cache_key(
-                &icon_path,
-                false,
-                thumbnail_data::NATIVE_ICON_SIZE,
-            );
             if self.native_icon_cache.contains_key(&key) {
                 continue;
             }
             self.native_icon_cache
                 .insert(key.clone(), IcedImageState::Loading);
-            tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
+            tasks.push(load_iced_image_task(IcedImageJob::ApplicationIcon {
                 cache_key: key,
-                path: icon_path,
-                is_directory: false,
+                application,
                 size: thumbnail_data::NATIVE_ICON_SIZE,
             }));
         }
@@ -41,6 +40,7 @@ impl BExplorerIced {
         target: ContextTarget,
     ) -> Task<Message> {
         self.begin_popup_animation(false);
+        self.keyboard_menu_selection = None;
         self.focus_pane(pane);
         self.title_menu_open = false;
         self.view_menu_open = None;
@@ -77,6 +77,7 @@ impl BExplorerIced {
             submenu_backdrop: None,
             submenu_backdrop_kind: None,
             paste_available: false,
+            open_with_applications: Vec::new(),
         };
         let (x, y) = self.context_menu_window_position(&menu);
         let menu = ContextMenuState {
@@ -90,17 +91,31 @@ impl BExplorerIced {
             .file_clipboard
             .as_ref()
             .is_some_and(|clipboard| !clipboard.paths.is_empty());
+        let open_with_path = self
+            .context_entry(pane, target)
+            .filter(|entry| entry.kind != EntryKind::Drive)
+            .map(|entry| entry.path);
         Task::perform(
             async move {
                 run_blocking_file_operation(move || {
                     let native_paste_available =
                         shell::read_files().is_ok_and(|clipboard| !clipboard.paths.is_empty());
-                    Ok::<bool, BExplorerError>(local_paste_available || native_paste_available)
+                    let applications = open_with_path
+                        .as_deref()
+                        .map(shell::open_with_applications)
+                        .transpose()?
+                        .unwrap_or_default();
+                    Ok::<_, BExplorerError>((
+                        local_paste_available || native_paste_available,
+                        applications,
+                    ))
                 })
                 .await
-                .unwrap_or(local_paste_available)
+                .unwrap_or_else(|_| (local_paste_available, Vec::new()))
             },
-            move |available| Message::ContextPasteAvailabilityResolved(menu.clone(), available),
+            move |(available, applications)| {
+                Message::ContextMenuDataResolved(menu.clone(), available, applications)
+            },
         )
     }
 
@@ -176,12 +191,10 @@ impl BExplorerIced {
                     .to_owned(),
             ],
             ContextSubmenuKind::OpenWith => {
-                let mut labels = self
-                    .context_entry(menu.pane, menu.target)
-                    .and_then(|entry| shell::open_with_applications(&entry.path).ok())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|application| application.name)
+                let mut labels = menu
+                    .open_with_applications
+                    .iter()
+                    .map(|application| application.name.clone())
                     .collect::<Vec<_>>();
                 labels.push(
                     self.localized("Elegir otra aplicación…", "Choose another app…")
@@ -304,6 +317,7 @@ impl BExplorerIced {
         };
         match pending {
             PendingPopupClose::FloatingMenus => {
+                self.keyboard_menu_selection = None;
                 self.title_menu_open = false;
                 self.show_menu_open = false;
                 self.show_menu_parent_hovered = false;
@@ -362,6 +376,7 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn dismiss_context_menu(&mut self) {
+        self.keyboard_menu_selection = None;
         self.context_menu = None;
         self.context_archive_submenu = false;
         self.context_open_with_submenu = false;
@@ -624,22 +639,38 @@ impl BExplorerIced {
             return Task::none();
         }
         if command == ContextCommand::CompressMenu {
+            self.keyboard_menu_selection = None;
             self.context_archive_submenu = true;
+            self.context_open_with_submenu = false;
             self.context_extract_submenu = false;
+            self.context_new_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::Archive);
         }
         if command == ContextCommand::ExtractMenu {
+            self.keyboard_menu_selection = None;
             self.context_archive_submenu = true;
+            self.context_open_with_submenu = false;
             self.context_extract_submenu = true;
+            self.context_new_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::Extract);
         }
         if command == ContextCommand::OpenWithMenu {
+            self.keyboard_menu_selection = None;
             self.context_open_with_submenu = true;
             self.context_archive_submenu = false;
-            return self.request_context_submenu_backdrop(ContextSubmenuKind::OpenWith);
+            self.context_extract_submenu = false;
+            self.context_new_submenu = false;
+            return Task::batch([
+                self.request_context_submenu_backdrop(ContextSubmenuKind::OpenWith),
+                self.queue_open_with_application_icons(menu.pane, menu.target),
+            ]);
         }
         if command == ContextCommand::NewMenu {
+            self.keyboard_menu_selection = None;
             self.context_new_submenu = true;
+            self.context_open_with_submenu = false;
+            self.context_archive_submenu = false;
+            self.context_extract_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::New);
         }
         self.dismiss_context_menu();
@@ -664,7 +695,16 @@ impl BExplorerIced {
                     return Task::none();
                 };
                 let path = entry.path.clone();
-                match shell::open_with_application(&path, index) {
+                let Some(application) = menu.open_with_applications.get(index) else {
+                    return self.report_error(
+                        menu.pane,
+                        self.localized(
+                            "La aplicación seleccionada ya no está disponible",
+                            "The selected application is no longer available",
+                        ),
+                    );
+                };
+                match shell::open_with_application(&path, application) {
                     Ok(()) => self.pane_mut(menu.pane).status = "Aplicación abierta".into(),
                     Err(error) => return self.report_error(menu.pane, error.to_string()),
                 }

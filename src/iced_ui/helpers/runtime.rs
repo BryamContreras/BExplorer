@@ -164,6 +164,16 @@ pub(in crate::iced_ui) fn defender_threats_window_settings(
     fixed_progress_window_settings(defender_threats_window_size(threat_count), None)
 }
 
+#[cfg(target_os = "linux")]
+pub(in crate::iced_ui) fn properties_window_size() -> Size {
+    Size::new(PROPERTIES_WINDOW_WIDTH, PROPERTIES_WINDOW_HEIGHT)
+}
+
+#[cfg(target_os = "linux")]
+pub(in crate::iced_ui) fn properties_window_settings() -> window::Settings {
+    fixed_progress_window_settings(properties_window_size(), None)
+}
+
 pub(in crate::iced_ui) fn sync_fixed_progress_window_size_task(
     id: window::Id,
     size: Size,

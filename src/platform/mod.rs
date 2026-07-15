@@ -740,6 +740,11 @@ pub fn native_file_icon(_path: &Path, _is_directory: bool, _size: u32) -> Option
     None
 }
 
+#[cfg(target_os = "linux")]
+pub fn native_named_icon(name: &str, size: u32) -> Option<NativeIconImage> {
+    linux::native_named_icon(name, size)
+}
+
 #[cfg(target_os = "windows")]
 pub fn native_file_icon_highres(path: &Path, is_directory: bool) -> Option<NativeIconImage> {
     windows::native_file_icon_highres(path, is_directory).map(|icon| NativeIconImage {

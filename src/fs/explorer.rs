@@ -18,6 +18,8 @@ pub enum EntryKind {
     Drive,
     Folder,
     File,
+    SymlinkFolder,
+    SymlinkFile,
     Symlink,
     Other,
 }
@@ -28,13 +30,19 @@ impl EntryKind {
             Self::Drive => "Drive",
             Self::Folder => "Folder",
             Self::File => "File",
+            Self::SymlinkFolder => "Folder symlink",
+            Self::SymlinkFile => "File symlink",
             Self::Symlink => "Symlink",
             Self::Other => "Other",
         }
     }
 
     pub fn is_container(&self) -> bool {
-        matches!(self, Self::Drive | Self::Folder)
+        matches!(self, Self::Drive | Self::Folder | Self::SymlinkFolder)
+    }
+
+    pub fn is_file(&self) -> bool {
+        matches!(self, Self::File | Self::SymlinkFile)
     }
 }
 
@@ -1104,7 +1112,7 @@ fn list_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>> {
 
         let file_type = metadata.file_type();
         let kind = if file_type.is_symlink() {
-            EntryKind::Symlink
+            symlink_target_kind(&path)
         } else if metadata.is_dir() {
             EntryKind::Folder
         } else if metadata.is_file() {
@@ -1137,6 +1145,14 @@ fn list_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>> {
 
     sort_entries_by_name(&mut entries);
     Ok(entries)
+}
+
+pub fn symlink_target_kind(path: &Path) -> EntryKind {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => EntryKind::SymlinkFolder,
+        Ok(metadata) if metadata.is_file() => EntryKind::SymlinkFile,
+        _ => EntryKind::Symlink,
+    }
 }
 
 fn list_unc_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>> {
@@ -1284,6 +1300,52 @@ fn is_hidden_entry(_metadata: &fs::Metadata, name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn symbolic_link_kinds_preserve_the_target_behavior() {
+        assert!(EntryKind::SymlinkFolder.is_container());
+        assert!(!EntryKind::SymlinkFile.is_container());
+        assert!(!EntryKind::Symlink.is_container());
+        assert!(EntryKind::SymlinkFile.is_file());
+        assert!(!EntryKind::SymlinkFolder.is_file());
+        assert!(!EntryKind::Symlink.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classifies_symbolic_links_by_target_and_keeps_broken_links() {
+        use std::os::unix::fs::symlink;
+
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock must be after the Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-symlink-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(root.join("target-folder")).expect("create target folder");
+        fs::write(root.join("target.txt"), b"target").expect("create target file");
+        symlink("target-folder", root.join("folder-link")).expect("create folder link");
+        symlink("target.txt", root.join("file-link")).expect("create file link");
+        symlink("missing-target", root.join("broken-link")).expect("create broken link");
+
+        let entries = list_directory(&root, true).expect("list symbolic links");
+        let kind = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .unwrap_or_else(|| panic!("missing test entry: {name}"))
+                .kind
+                .clone()
+        };
+
+        assert_eq!(kind("folder-link"), EntryKind::SymlinkFolder);
+        assert_eq!(kind("file-link"), EntryKind::SymlinkFile);
+        assert_eq!(kind("broken-link"), EntryKind::Symlink);
+
+        fs::remove_dir_all(root).expect("remove symbolic link test directory");
+    }
 
     fn storage_entry(name: &str, drive_kind: DriveKind) -> FileEntry {
         FileEntry {

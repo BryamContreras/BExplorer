@@ -111,19 +111,24 @@ pub fn open_with(path: &Path) -> Result<()> {
 #[derive(Clone, Debug)]
 pub struct OpenWithApplication {
     pub name: String,
-    #[cfg(target_os = "windows")]
     pub(crate) id: String,
+    #[cfg(target_os = "windows")]
     pub(crate) icon_path: Option<PathBuf>,
+    #[cfg(target_os = "linux")]
+    pub(crate) icon_name: Option<String>,
+    #[cfg(target_os = "linux")]
+    pub(crate) desktop_file: PathBuf,
 }
 
 pub fn open_with_applications(path: &Path) -> Result<Vec<OpenWithApplication>> {
     open_with_applications_platform(path)
 }
 
-pub fn open_with_application(path: &Path, index: usize) -> Result<()> {
-    open_with_application_platform(path, index)
+pub fn open_with_application(path: &Path, application: &OpenWithApplication) -> Result<()> {
+    open_with_application_platform(path, application)
 }
 
+#[cfg(not(target_os = "linux"))]
 pub fn show_properties(path: &Path) -> Result<()> {
     show_properties_platform(path)
 }
@@ -190,6 +195,18 @@ pub fn format_drive(
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
     elevation::run_elevated_current_exe(args)
+}
+
+/// Runs the current executable through Polkit while exchanging a direct
+/// request/response through the child standard streams. Unlike the legacy
+/// helpers, this does not give the privileged process user-controlled
+/// transport paths to open or truncate.
+#[cfg(target_os = "linux")]
+pub fn run_elevated_current_exe_with_input(
+    args: &[OsString],
+    input: &[u8],
+) -> Result<std::process::Output> {
+    elevation::run_elevated_current_exe_with_input(args, input)
 }
 
 #[cfg(target_os = "windows")]
@@ -932,7 +949,7 @@ fn open_with_applications_platform(path: &Path) -> Result<Vec<OpenWithApplicatio
 }
 
 #[cfg(target_os = "windows")]
-fn open_with_application_platform(path: &Path, index: usize) -> Result<()> {
+fn open_with_application_platform(path: &Path, application: &OpenWithApplication) -> Result<()> {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree};
     use windows::Win32::UI::Shell::{ASSOC_FILTER_RECOMMENDED, IAssocHandler, SHAssocEnumHandlers};
     use windows::core::PCWSTR;
@@ -950,8 +967,6 @@ fn open_with_application_platform(path: &Path, index: usize) -> Result<()> {
             unsafe { SHAssocEnumHandlers(PCWSTR(extension.as_ptr()), ASSOC_FILTER_RECOMMENDED) }
                 .map_err(|error| BExplorerError::Shell(error.to_string()))?;
         let mut selected: Option<IAssocHandler> = None;
-        let mut unique_index = 0;
-        let mut seen_ids = Vec::<String>::new();
         loop {
             let mut item: [Option<IAssocHandler>; 1] = [None];
             let mut fetched = 0;
@@ -966,15 +981,10 @@ fn open_with_application_platform(path: &Path, index: usize) -> Result<()> {
             let id = unsafe { id_ptr.to_string() }
                 .map_err(|error| BExplorerError::Shell(error.to_string()))?;
             unsafe { CoTaskMemFree(Some(id_ptr.0.cast())) };
-            if seen_ids.iter().any(|seen| seen.eq_ignore_ascii_case(&id)) {
-                continue;
-            }
-            seen_ids.push(id);
-            if unique_index == index {
+            if id.eq_ignore_ascii_case(&application.id) {
                 selected = Some(candidate);
                 break;
             }
-            unique_index += 1;
         }
         let Some(handler) = selected else {
             return Err(BExplorerError::Shell(
@@ -1145,24 +1155,100 @@ fn open_terminal_platform(directory: &Path) -> Result<()> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn open_with_platform(path: &Path) -> Result<()> {
-    if command_exists("mimeopen") && Command::new("mimeopen").arg("-d").arg(path).spawn().is_ok() {
-        return Ok(());
-    }
-    for program in ["gio", "xdg-open"] {
-        if !command_exists(program) {
-            continue;
-        }
-        let mut command = Command::new(program);
-        if program == "gio" {
-            command.arg("open");
-        }
-        if command.arg(path).spawn().is_ok() {
+    #[cfg(target_os = "linux")]
+    {
+        let portal_error = match open_with_portal(path) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+
+        // `mimeopen --ask` is an actual application chooser. Do not fall back
+        // to `gio open`, `xdg-open`, or `open::that` here: all of those launch
+        // the current default and would make "Choose another application"
+        // appear to have succeeded without ever showing a chooser.
+        if command_exists("mimeopen")
+            && Command::new("mimeopen")
+                .arg("--ask")
+                .arg(path)
+                .spawn()
+                .is_ok()
+        {
             return Ok(());
         }
+
+        Err(BExplorerError::Shell(format!(
+            "Could not show an application chooser for {}: {portal_error}",
+            path.display()
+        )))
     }
-    open::that(path).map(|_| ()).map_err(|error| {
-        BExplorerError::Shell(format!("Could not open {}: {error}", path.display()))
-    })
+
+    #[cfg(not(target_os = "linux"))]
+    Err(BExplorerError::Shell(format!(
+        "Could not show an application chooser for {}",
+        path.display()
+    )))
+}
+
+#[cfg(target_os = "linux")]
+const APPLICATION_CHOOSER_PORTAL_INTERFACE: &str = "org.freedesktop.portal.OpenURI";
+#[cfg(target_os = "linux")]
+const APPLICATION_CHOOSER_PORTAL_METHOD: &str = "OpenFile";
+
+#[cfg(target_os = "linux")]
+type ApplicationChooserPortalBody<'a> = (
+    &'static str,
+    zbus::zvariant::Fd<'a>,
+    std::collections::HashMap<&'static str, zbus::zvariant::Value<'static>>,
+);
+
+#[cfg(target_os = "linux")]
+fn application_chooser_portal_body(target: &std::fs::File) -> ApplicationChooserPortalBody<'_> {
+    let mut options = std::collections::HashMap::new();
+    options.insert("ask", zbus::zvariant::Value::from(true));
+    ("", zbus::zvariant::Fd::from(target), options)
+}
+
+#[cfg(target_os = "linux")]
+fn open_with_portal(path: &Path) -> Result<()> {
+    use std::fs::File;
+    use std::sync::OnceLock;
+
+    static PORTAL_CONNECTION: OnceLock<zbus::blocking::Connection> = OnceLock::new();
+
+    // OpenURI deliberately rejects local `file://` URIs. OpenFile accepts a
+    // file descriptor and is valid for both regular files and directories.
+    // Keeping `target` alive until the synchronous method call returns also
+    // keeps the borrowed descriptor valid while zbus transfers it over D-Bus.
+    let target = File::open(path).map_err(|error| {
+        BExplorerError::Shell(format!(
+            "Could not open {} for the application chooser: {error}",
+            path.display()
+        ))
+    })?;
+    let connection = if let Some(connection) = PORTAL_CONNECTION.get() {
+        connection
+    } else {
+        let connection = zbus::blocking::Connection::session().map_err(|error| {
+            BExplorerError::Shell(format!("Could not connect to the desktop portal: {error}"))
+        })?;
+        let _ = PORTAL_CONNECTION.set(connection);
+        PORTAL_CONNECTION.get().ok_or_else(|| {
+            BExplorerError::Shell("Could not retain the desktop portal connection".into())
+        })?
+    };
+    let body = application_chooser_portal_body(&target);
+    connection
+        .call_method(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            Some(APPLICATION_CHOOSER_PORTAL_INTERFACE),
+            APPLICATION_CHOOSER_PORTAL_METHOD,
+            &body,
+        )
+        .map_err(|error| {
+            BExplorerError::Shell(format!("Could not open the application chooser: {error}"))
+        })?;
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
@@ -1172,39 +1258,49 @@ fn open_with_platform(_path: &Path) -> Result<()> {
     ))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn open_with_applications_platform(path: &Path) -> Result<Vec<OpenWithApplication>> {
+    Ok(crate::fs::properties::applications_for_path(path)
+        .into_iter()
+        .map(|application| OpenWithApplication {
+            name: application.name,
+            id: application.desktop_id,
+            icon_name: application.icon,
+            desktop_file: application.desktop_file,
+        })
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn open_with_application_platform(path: &Path, application: &OpenWithApplication) -> Result<()> {
+    if command_exists("gio") && application.desktop_file.is_file() {
+        Command::new("gio")
+            .arg("launch")
+            .arg(&application.desktop_file)
+            .arg(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+        return Ok(());
+    }
+    Err(BExplorerError::Shell(format!(
+        "Could not launch {}",
+        application.name
+    )))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn open_with_applications_platform(_path: &Path) -> Result<Vec<OpenWithApplication>> {
     Ok(Vec::new())
 }
 
-#[cfg(not(target_os = "windows"))]
-fn open_with_application_platform(_path: &Path, _index: usize) -> Result<()> {
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+fn open_with_application_platform(_path: &Path, _application: &OpenWithApplication) -> Result<()> {
     Err(BExplorerError::Shell(
-        "La selección de aplicaciones está disponible actualmente en Windows".into(),
+        "Application selection is unavailable".into(),
     ))
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn show_properties_platform(path: &Path) -> Result<()> {
-    // KiO owns Plasma's native Properties dialog. Prefer the KDE 6 client,
-    // but retain the KDE 5 name for distributions that still ship it.
-    let Some(client) = ["kioclient6", "kioclient5"]
-        .into_iter()
-        .find(|candidate| command_exists(candidate))
-    else {
-        return Err(BExplorerError::Shell(
-            "No native properties client is available on this Linux desktop".into(),
-        ));
-    };
-    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    Command::new(client)
-        .arg("openProperties")
-        .arg(target)
-        .spawn()
-        .map_err(|error| {
-            BExplorerError::Shell(format!("Could not open native properties: {error}"))
-        })?;
-    Ok(())
 }
 
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
@@ -1284,5 +1380,29 @@ mod tests {
 
         assert!(files.cut);
         assert_eq!(files.paths, vec![PathBuf::from("/tmp")]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn application_chooser_portal_body_contains_fd_and_ask_option() {
+        let directory = std::fs::File::open("/").expect("open root directory");
+        let body = application_chooser_portal_body(&directory);
+
+        assert!(matches!(
+            body.2.get("ask"),
+            Some(zbus::zvariant::Value::Bool(true))
+        ));
+
+        let message = zbus::Message::method_call(
+            "/org/freedesktop/portal/desktop",
+            APPLICATION_CHOOSER_PORTAL_METHOD,
+        )
+        .expect("portal method call")
+        .interface(APPLICATION_CHOOSER_PORTAL_INTERFACE)
+        .expect("portal interface")
+        .build(&body)
+        .expect("serialize portal body");
+
+        assert_eq!(message.data().fds().len(), 1);
     }
 }

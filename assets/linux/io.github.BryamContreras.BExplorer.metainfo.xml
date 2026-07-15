@@ -27,6 +27,17 @@
   <url type="bugtracker">https://github.com/BryamContreras/BExplorer/issues</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.2" date="2026-07-15">
+      <description>
+        <p>Linux desktop integration and native properties update.</p>
+        <ul>
+          <li>Added compact native Properties and functional Open with workflows on Linux.</li>
+          <li>Improved symbolic links, keyboard navigation, and address-bar focus handling.</li>
+          <li>Added XDG application chooser portal and complementary KIO/KIOFuse discovery.</li>
+          <li>Improved Debian dependencies, themed icons, and default file-manager invocation.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-07-14">
       <description>
         <p>Maintenance release with Windows and Linux integration refinements.</p>

@@ -2,6 +2,32 @@
 
 All notable user-facing changes to BExplorer are documented here.
 
+## 1.0.2 - 2026-07-15
+
+- Added a compact native Linux Properties window with General, Permissions,
+  and Details tabs, including rename, recursive size, timestamps, filesystem
+  information, owner/group selection, mode bits, advanced Unix permissions,
+  application associations, and themed application icons.
+- Added complete symbolic-link classification and navigation so links to
+  folders open as folders, links to files open as files, and broken links keep
+  their own safe metadata and error handling.
+- Added application discovery and a functional Open with submenu on Linux.
+  “Choose another application” now uses the XDG Desktop Portal `OpenFile`
+  method with a real file descriptor and runs outside the UI thread.
+- Added repeated-letter keyboard navigation to context menus and Linux
+  owner/group/application selectors, matching the existing file-list
+  typeahead behavior.
+- Fixed the address bar so it returns to breadcrumb mode when focus moves
+  elsewhere instead of remaining in text-edit mode.
+- Extended Linux network discovery with saved KDE places, bounded KIO SMB
+  discovery, and KIOFuse mount resolution while retaining GVfs, Samba, and
+  Avahi as the primary cross-desktop providers.
+- Improved Debian packaging with explicit runtime dependencies, an appropriate
+  desktop-portal backend, themed hicolor icons, automatic glibc baseline
+  detection, and accurate package-cache updates.
+- Updated the Linux desktop entry to accept `%f`, open the requested folder,
+  resolve files to their containing folder, and use the themed BExplorer icon.
+
 ## 1.0.1 - 2026-07-14
 
 - Fixed the transient native Windows frame that could appear on the first

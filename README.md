@@ -2,7 +2,7 @@
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Version](https://img.shields.io/badge/version-1.0.1-brightgreen)
+![Version](https://img.shields.io/badge/version-1.0.2-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -20,7 +20,7 @@ platform modules.
 
 ## Status
 
-BExplorer 1.0 is the first stable Windows and Linux version. Its desktop
+BExplorer 1.0.2 is the current stable Windows and Linux version. Its desktop
 interface, file-operation engine, archive workflows, platform integrations,
 configuration format, and session format form the supported 1.x baseline.
 Development now prioritizes compatibility fixes, reliability, and focused
@@ -31,28 +31,37 @@ modes, filtering, grouping and column sorting, rename, background file deletion,
 and queued copy/move operations. Session changes are persisted as they happen
 and large directories are rendered incrementally instead of being silently
 truncated. Complete search, previews, archive jobs, Microsoft Defender actions,
-MTP transfers, disk-image mounting, network discovery, and native drag-and-drop
-are connected to the `iced` interface.
+MTP transfers, disk-image mounting, network discovery, native drag-and-drop,
+symbolic links, native properties, and application selection are connected to
+the `iced` interface.
 
 Linux provides local and removable storage, file operations, archives,
-previews, search, GVfs/FUSE portable devices, network discovery, UDisks2,
-Polkit, Freedesktop/XDG icons and thumbnails, clipboard interoperability, and
-Wayland/X11 support. Integrations that depend on desktop services degrade to a
-readable fallback when those optional services are unavailable.
+previews, search, GVfs/FUSE portable devices, GVfs/Samba/Avahi network
+discovery with optional KIO enrichment for SMB, UDisks2, Polkit, XDG portals,
+Freedesktop icons and thumbnails, clipboard interoperability, and Wayland/X11
+support. The Debian package declares the services needed for these integrations
+as dependencies; source builds still keep readable fallbacks when an optional
+desktop-specific component is unavailable.
 
 ## Highlights
 
 - Native Rust desktop application using `iced`.
 - Tabbed navigation with independent history and session restore.
 - Split-pane mode with independent per-pane view state.
+- Freedesktop directory launch integration: `bexplorer %f` opens a requested
+  directory, or the containing directory when an application passes a file.
 - Incremental rendering for directories with thousands of entries.
 - Background rename, create-folder, trash, and permanent-delete operations so
   slow disks and network paths do not block the UI thread.
+- Background storage monitoring refreshes disks, USB media, optical drives, and
+  mounted portable devices on Windows and Linux without blocking the UI.
 - Resizable and reorderable sidebar.
 - Optional action bar and bookmark bar.
 - Details, list, icons, large icons, extra-large icons, and tile views.
 - Local drives, removable drives, mounted ISO images, UNC paths, network
   locations, Linux mount points, and Windows MTP portable devices.
+- Symbolic-link awareness on Linux: links to directories navigate as folders,
+  links to files open as files, and broken links remain visible and identifiable.
 - Non-system drive formatting with native Windows elevation or UDisks2/Polkit
   on Linux. Linux permits external drives and secondary local disks while
   blocking the physical system disk, firmware, loop, layered, and RAID
@@ -61,8 +70,13 @@ readable fallback when those optional services are unavailable.
 - Windows Explorer-compatible file clipboard for regular file paths, plus
   native MIME clipboard helpers and a text/URI-list fallback for Linux.
 - Internal and external drag-and-drop support.
+- Drag polling sleeps until a drag is prepared or active instead of waking the
+  application continuously while idle.
 - Transfer queue with progress, pause, cancel, cleanup of partial files, and
   conflict handling.
+- Per-pane search and transfer progress in split view; closing one pane keeps
+  its operations running and transfers progress ownership to the remaining pane.
+- One-level undo for completed copies, moves, and moves to trash.
 - Transactional local replacements: the complete new file or directory is
   copied and synchronized beside the destination before the existing item is
   replaced. A failed preparation leaves the previous destination untouched.
@@ -71,11 +85,19 @@ readable fallback when those optional services are unavailable.
 - Elevated Microsoft Defender remediation and exclusion actions on Windows.
 - Quick search and complete search, including search inside supported archives.
 - Resizable preview panel for images, text files, SVG, and PDF.
+- Double-click ISO mounting followed by navigation to the mounted image in a
+  new tab, plus contextual eject for supported mounted media.
 - Native file icons, local thumbnails, and MTP thumbnails when exposed by the
   device.
+- Native Windows property sheets and a compact BExplorer properties window on
+  Linux with General, Permissions, and Details pages.
+- Application-aware **Open with** menus with application names and icons;
+  Linux uses the XDG desktop portal for the full application chooser.
 - Windows Defender scan integration.
 - Configurable theme, accent color, icon borders, window effects, shortcuts,
   and sidebar layout.
+- An About dialog with the application icon, version, description, and project
+  link.
 
 ## File Operations
 
@@ -84,10 +106,15 @@ explorer:
 
 - copy, cut, paste, move, rename, delete, and permanent delete;
 - create folders and text documents;
-- drag files inside BExplorer and between BExplorer and Windows;
+- drag files inside BExplorer, accept desktop file drops on Windows/Linux, and
+  drag out through the documented platform integrations;
 - copy from and to Windows Explorer through the system clipboard;
+- exchange Linux file clipboard MIME data through Wayland/X11 helpers;
+- show pending cut entries with reduced opacity until the clipboard operation
+  changes or completes;
 - copy, paste, and delete files on supported MTP devices;
 - copy and move across local drives, removable drives, and UNC shares;
+- undo the most recent completed copy, move, or move-to-trash operation;
 - retry supported operations through UAC on Windows or Polkit on Linux when
   access is denied.
 
@@ -98,6 +125,35 @@ Conflict resolution is available for copy and move operations:
 - `Skip`: leave the destination item untouched.
 - `Keep both`: copy the new item using a numbered name such as
   `report (2).txt`.
+
+## Symbolic Links, Properties, and Applications
+
+Linux symbolic links are classified without losing the identity of the link
+itself. A valid directory link can be browsed, a valid file link is opened by
+its target type, and a broken link produces an explicit error rather than being
+treated as an empty file. Properties show both the stored target and resolved
+target. BExplorer does not silently apply link permission changes to the target.
+
+Windows continues to use the native Shell property sheet. Linux uses a native
+BExplorer properties window that supports:
+
+- one or multiple local files and directories;
+- rename, logical size, allocated size, timestamps, MIME type, mount point,
+  filesystem, backing device, free space, UID/GID, inode, and hard-link count;
+- a background directory-size calculation that keeps the UI responsive;
+- owner and group selection through the system identity database;
+- read, write, and execute permissions for owner, group, and others;
+- setuid, setgid, and sticky bits, with optional recursive application;
+- elevated permission/ownership changes through Polkit when required;
+- viewing installed applications with their desktop-entry names and icons, and
+  changing the default application for a MIME type through `xdg-mime`.
+
+The Linux **Choose another application** action calls the XDG Desktop Portal
+`OpenFile` method with a file descriptor and `ask=true`. It falls back to the
+real `mimeopen --ask` chooser when available; it never silently launches the
+current default application while presenting that action as a chooser. The
+context-menu submenu can also launch a specific compatible desktop application
+directly.
 
 ## Archive Support
 
@@ -146,8 +202,11 @@ blocking the UI.
 | File transfers | Supported | Supported | Experimental |
 | Archive browsing/extraction | Supported | Supported | Experimental |
 | Native icons/thumbnails | Supported | Supported | Experimental |
+| Symbolic links | Shell behavior | File/folder/broken-link aware | Experimental |
+| Properties | Windows Shell sheet | Native BExplorer dialog | Not supported |
+| Open with / app chooser | Windows Shell | XDG portal + desktop entries | Not supported |
 | MTP portable devices | WPD/MTP | Mounted GVfs/FUSE devices | Not supported |
-| Network discovery | Native providers | GVfs/Samba/Avahi | Mounted SMB only |
+| Network discovery | Native providers | GVfs/Samba/Avahi + optional KIO SMB enrichment | Mounted SMB only |
 | ISO mount/eject | Supported | UDisks2 | Experimental |
 | Non-system drive format | Format-Volume | UDisks2 D-Bus | Experimental |
 | Window blur | Native Windows effects | KWin / Blur My Shell | Experimental |
@@ -161,6 +220,32 @@ one desktop environment. Linux windowing is handled by `iced`/`winit`, so the
 application can run under Wayland or X11 when the required runtime libraries are
 available.
 
+### Linux distribution compatibility
+
+The source tree targets GNU/Linux rather than a single desktop environment.
+GNOME and KDE Plasma are the primary integration targets; XDG, GVfs, UDisks2,
+and Polkit keep most functionality desktop-neutral. Distribution compatibility
+must distinguish the source code from a prebuilt binary:
+
+| Distribution/environment | Project status | Current locally built `.deb` |
+| --- | --- | --- |
+| Debian 13, GNOME | Manually tested | Compatible |
+| Debian 13, KDE Plasma | Manually tested | Compatible; KIO enrichment available when installed |
+| Ubuntu 26.04, GNOME | Manually tested | Compatible |
+| Ubuntu 24.04 LTS and derivatives with the same or newer ABI | Supported package baseline; clean-machine testing remains recommended | Compatible when the declared packages are available |
+| Debian 12 | Functionally tested from a compatible local build | **Not compatible** with the current artifact (`libc6` is too old) |
+| Ubuntu 22.04 LTS and derivatives | Older baseline; rebuild and test from source there | **Not compatible** with the current artifact (`libc6` is too old) |
+| Other Debian/Ubuntu derivatives | Expected to run when they provide the declared runtime services and a compatible ABI; not all desktop combinations are tested | Depends on architecture, `libc6`, and package availability |
+| Fedora, Arch, openSUSE, and other families | Source builds only; not currently a packaged/tested release target | The Debian package is not supported |
+
+The `.deb` produced in the current build environment is GNU/Linux `amd64` and
+declares `libc6 (>= 2.39)`. That covers the ABI baseline of Ubuntu 24.04 or
+newer and Debian 13, but not Debian 12 or Ubuntu 22.04. This is a property of
+the distributed binary, not an intentional source-code restriction: the
+packaging script detects the highest GLIBC symbol required by the executable.
+To support an older distribution, compile and test on that oldest baseline and
+publish the resulting package; do not only weaken the dependency metadata.
+
 ## Interface Architecture
 
 The `iced` interface is split by responsibility under `src/iced_ui`:
@@ -170,6 +255,8 @@ The `iced` interface is split by responsibility under `src/iced_ui`:
 - `interaction.rs`, `navigation.rs`, and `search_state.rs` own input, movement,
   selection, drag-and-drop, and search state;
 - `view.rs` and `view/` build window chrome, file surfaces, and dialogs;
+- `properties.rs` and `view/dialogs/properties.rs` connect the native Linux
+  properties backend to its General, Permissions, and Details pages;
 - `file_actions.rs` owns clipboard, transfers, rename, delete, compression, and
   shell actions;
 - `advanced.rs` connects Defender, MTP, disk images, and removable drives;
@@ -187,7 +274,10 @@ Disk image mount/eject uses UDisks2 through `udisksctl` when available.
 Non-system drive formatting uses the stable UDisks2 D-Bus API so authorization
 is handled by the distribution's Polkit policy. Elevated file-operation retry
 uses Polkit through `pkexec`, and network discovery uses available
-Freedesktop/GVfs, Avahi, and Samba command-line helpers.
+Freedesktop/GVfs, Avahi, and Samba helpers. On KDE, cached Dolphin places,
+active KIOFuse mounts, and short non-interactive `kioclient` probes complement
+those providers without replacing them or leaving an unbounded network scan on
+the UI thread. The XDG application chooser also runs away from the UI thread.
 
 KDE Plasma/Wayland uses KWin's optional native blur protocol. GNOME/Mutter does
 not expose its Shell blur actor as a Wayland client protocol, so BExplorer uses
@@ -208,13 +298,23 @@ opaque readable background.
   still needs broader runtime testing and native drag-and-drop integration.
 - Browsing an unmounted authenticated SMB share on Linux or macOS may still
   require connecting it through the desktop environment first.
+- KIO support enriches SMB discovery and resolves existing KIOFuse mounts; it
+  is optional and is not a replacement for credentials or mounting a remote
+  share.
+- The built-in Linux properties dialog applies to real local or mounted paths,
+  not virtual roots such as the top-level Network or portable-device view.
+- Setting BExplorer as the default directory handler does not replace the
+  toolkit-owned file picker embedded in GTK or Qt applications. Those dialogs
+  continue to be provided by the toolkit or the desktop portal.
 - Linux file clipboard interoperability uses native MIME helpers when
   `wl-copy`/`wl-paste`, `xclip`, or `xsel` are installed, with a text fallback.
 - Linux icon theme lookup is implemented in-process and may not yet cover every
   desktop-specific theme extension.
-- Linux drag-out uses Wayland-compatible helper applications such as `ripdrag`,
-  `dragon-drag-and-drop`, `dragon`, or `dragon-drop` when available.
-  A custom helper can be selected with `BEXPLORER_DRAG_HELPER`.
+- Native Linux drag-out is implemented for Wayland. On X11, select a helper
+  explicitly with `BEXPLORER_DRAG_HELPER`; setting
+  `BEXPLORER_DRAG_HELPER_FALLBACK=1` also permits a known helper such as
+  `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` when the native
+  Wayland path is unavailable.
 - Linux MTP support currently covers devices already mounted by GVfs/FUSE.
 - Copying directly between two folders on the same MTP device is not supported.
 - Extracting selected archive entries directly into an MTP device is blocked;
@@ -234,7 +334,7 @@ opaque readable background.
 
 Windows requirements:
 
-- Rust stable installed with `rustup`.
+- Rust 1.92 or newer installed with `rustup`.
 - Visual Studio Build Tools with C++ support.
 
 Recommended commands:
@@ -257,28 +357,38 @@ The release executable is generated at:
 target/release/bexplorer.exe
 ```
 
-Linux requirements:
+Linux source-build requirements:
 
-- Rust stable installed with `rustup`.
+- Rust 1.92 or newer installed with `rustup`.
 - A C/C++ toolchain usable by the `cc` crate, such as GCC, Clang, or Zig
   wrappers for `cc`, `c++`, `ar`, and `ranlib`.
-- Usual desktop runtime libraries required by `iced`/`winit` on your
-  distribution.
+- Development headers and runtime libraries required by `iced`/`winit` for
+  Wayland/X11 and OpenGL on the build distribution.
 
-Optional Linux integrations:
+The generated Debian package makes the following integration groups mandatory
+so a normal installation does not silently lose advertised features:
 
-- Blur My Shell for application blur on GNOME Wayland.
-- `wl-clipboard`, `xclip`, or `xsel` for file clipboard MIME interoperability.
-- `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` for native
-  drag-out to other applications on Wayland.
-- `udisks2` for ISO/USB mount, eject, and non-system drive formatting actions.
-- Filesystem tools such as `e2fsprogs`, `dosfstools`, `exfatprogs`, `ntfs-3g`,
-  `btrfs-progs`, and `xfsprogs` for the corresponding Linux format choices.
-- `polkit` with `pkexec` for elevated retry.
-- `xdg-utils` and GLib/GVfs (`gio`) for default app opening and mounted devices.
-- Samba tools such as `smbclient`/`smbtree`, and optionally Avahi, for network
-  discovery.
-- GVfs MTP/FUSE support for mounted phone/camera devices.
+- Wayland/X11/OpenGL runtime libraries;
+- GLib/GIO, `xdg-utils`, the XDG Desktop Portal, and a portal backend;
+- UDisks2, `pkexec`, and filesystem tools for ext, FAT, exFAT, NTFS, Btrfs, and
+  XFS operations;
+- GVfs backends/FUSE, Samba, and Avahi for mounted portable devices and network
+  discovery;
+- Wayland and X11 clipboard helpers;
+- Shared MIME information, desktop database, and the hicolor icon theme.
+
+Optional desktop-specific enhancements remain:
+
+- Blur My Shell for application blur on GNOME Wayland; the fallback is opaque.
+- `kde-cli-tools`, `kio-extras`, and `kio-fuse` for additional KDE discovery and
+  already-mounted KIO paths. They remain suggested rather than pulling KDE into
+  a GNOME installation.
+- `xsel` or `libfile-mimeinfo-perl` as additional clipboard/application-chooser
+  fallbacks.
+- `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` for drag-out on
+  X11 or as a Wayland fallback. `BEXPLORER_DRAG_HELPER` selects a custom helper,
+  while `BEXPLORER_DRAG_HELPER_FALLBACK=1` enables automatic fallback to a
+  known installed helper.
 
 Recommended commands:
 
@@ -348,12 +458,23 @@ Linux packages can be built with:
 scripts/linux/package.sh
 ```
 
-The script creates a tarball and SHA-256 checksum under `dist/` and, when
-`dpkg-deb` is installed, a basic `.deb` package and checksum with the desktop
-entry, app icon, metainfo, license, third-party notices, and original 7-Zip
-license texts. The package installs the executable as `/usr/bin/bexplorer` and
-registers the Desktop entry and application icon. Install the generated package
-with:
+The script creates a versioned tarball and SHA-256 checksum under `dist/` and,
+when `dpkg-deb` is installed, a `.deb` package and checksum. The package
+contains the desktop entry, metainfo, Polkit policy, hicolor icons from 16 to
+512 pixels, license, third-party notices, and the original 7-Zip license texts.
+It installs the executable as `/usr/bin/bexplorer`, registers BExplorer as an
+available `inode/directory` handler, and uses `Exec=bexplorer %f` so a desktop
+invocation navigates to the requested folder. This makes BExplorer selectable
+as the default file manager without silently changing the user's current
+association. If a caller passes a file, BExplorer opens its containing folder.
+
+The control file declares the runtime integrations described under Build
+Requirements. It also derives the minimum `libc6` version from the built
+executable instead of hard-coding a misleading baseline. The package generated
+in the current environment requires `libc6 >= 2.39`; Debian 12 and Ubuntu 22.04
+need a package rebuilt and tested on an older compatible build base.
+
+Install the generated package and its dependencies with:
 
 ```bash
 scripts/linux/install-deb.sh
@@ -399,6 +520,7 @@ src/
     explorer/                # Platform storage enumeration
     operations.rs
     portable.rs
+    properties.rs            # Native Linux metadata and permission backend
     search.rs
     transfer_queue.rs
   iced_ui/
@@ -406,6 +528,7 @@ src/
     state.rs
     update.rs                # Exhaustive Message dispatcher
     interaction/             # Context, selection, drag and layout input
+    properties.rs            # Properties state and asynchronous operations
     view/                    # Chrome, menus, dialogs and file presentations
     helpers/
   platform/
@@ -413,7 +536,7 @@ src/
     windows.rs
     windows/
     linux.rs
-    linux/                   # Icons, storage watching, blur and Wayland drag
+    linux/                   # Icons, storage watching, blur, KIO and Wayland drag
     macos.rs
     shell/
   utils/
@@ -449,9 +572,14 @@ The current test suite covers:
   when replacement preparation fails;
 - atomic configuration/session file replacement;
 - clipboard and paste shortcut behavior;
+- symbolic-link classification for file, directory, and broken targets;
+- Linux properties metadata, desktop-entry discovery, ownership/permission
+  validation, recursive changes, and elevated-helper request safety;
+- application chooser portal request construction and command-line launch-path
+  normalization;
 - Linux mountinfo parsing, MIME/file URI clipboard helpers, UDisks parsing,
-  network helper parsing, and XDG thumbnail/icon metadata.
-- Linux elevated-operation response handling with `fs.protected_regular`.
+  GVfs/Samba/Avahi/KIO network helper parsing, and XDG thumbnail/icon metadata;
+- Linux elevated-operation response handling with `fs.protected_regular`;
 - GNOME/KDE blur selection and readable fallbacks.
 
 Run:
@@ -469,12 +597,12 @@ Planned 1.x improvements:
 - signed Windows installer and update flow;
 - broader distribution and clean-machine compatibility coverage;
 - stronger network, MTP, and portal edge-case handling;
-- additional preview formats and native property integrations;
+- additional preview formats and further properties refinements;
 - continued separation and testing of platform layers.
 
 Longer-term exploration:
 
-- Linux runtime testing, drag-out, deeper portal integration, and richer MTP;
+- broader Linux desktop testing, self-contained drag-out, and richer MTP;
 - macOS file-management backend;
 - platform-native preview/icon integrations outside Windows;
 - optional plugin or extension points.

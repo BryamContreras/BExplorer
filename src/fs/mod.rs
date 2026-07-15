@@ -6,6 +6,8 @@ pub mod explorer;
 pub mod hash;
 pub mod operations;
 pub mod portable;
+#[cfg(target_os = "linux")]
+pub mod properties;
 pub mod search;
 pub mod transfer_queue;
 pub mod watcher;

@@ -13,7 +13,7 @@ const MAX_PDF_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 const PDF_PREVIEW_SCALE: f32 = 1.15;
 
 pub fn is_thumbnail_candidate(entry: &FileEntry) -> bool {
-    if entry.kind != EntryKind::File {
+    if !entry.kind.is_file() {
         return false;
     }
 
@@ -23,12 +23,12 @@ pub fn is_thumbnail_candidate(entry: &FileEntry) -> bool {
 }
 
 pub fn is_visual_preview_candidate(entry: &FileEntry) -> bool {
-    entry.kind == EntryKind::File
+    entry.kind.is_file()
         && (matches!(entry.category, FileCategory::Image) || is_pdf_preview_candidate(entry))
 }
 
 pub fn is_pdf_preview_candidate(entry: &FileEntry) -> bool {
-    entry.kind == EntryKind::File
+    entry.kind.is_file()
         && entry
             .path
             .extension()
@@ -37,7 +37,7 @@ pub fn is_pdf_preview_candidate(entry: &FileEntry) -> bool {
 }
 
 pub fn is_text_preview_candidate(entry: &FileEntry) -> bool {
-    if entry.kind != EntryKind::File {
+    if !entry.kind.is_file() {
         return false;
     }
     if entry.category == FileCategory::Code {
@@ -111,14 +111,14 @@ pub fn virtual_native_icon_request(entry: &FileEntry) -> Option<(PathBuf, PathBu
     }
 
     match entry.kind {
-        EntryKind::Folder => Some((
+        EntryKind::Folder | EntryKind::SymlinkFolder => Some((
             PathBuf::from(format!(
                 "__bexplorer_portable_folder_icon_size_{NATIVE_ICON_SIZE}"
             )),
             PathBuf::from("bexplorer-folder"),
             true,
         )),
-        EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
+        EntryKind::File | EntryKind::SymlinkFile | EntryKind::Symlink | EntryKind::Other => {
             let extension = entry
                 .path
                 .extension()
@@ -152,9 +152,12 @@ pub fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
             entry.drive_kind,
             entry.path.display().to_string().replace(['\\', ':'], "_")
         )),
-        EntryKind::Folder | EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
-            entry.path.clone()
-        }
+        EntryKind::Folder
+        | EntryKind::File
+        | EntryKind::SymlinkFolder
+        | EntryKind::SymlinkFile
+        | EntryKind::Symlink
+        | EntryKind::Other => entry.path.clone(),
     }
 }
 
@@ -166,8 +169,10 @@ pub fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
             entry.drive_kind,
             native_directory_icon_class(&entry.path)
         )),
-        EntryKind::Folder => native_path_icon_cache_key(&entry.path, true, NATIVE_ICON_SIZE),
-        EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
+        EntryKind::Folder | EntryKind::SymlinkFolder => {
+            native_path_icon_cache_key(&entry.path, true, NATIVE_ICON_SIZE)
+        }
+        EntryKind::File | EntryKind::SymlinkFile | EntryKind::Symlink | EntryKind::Other => {
             native_file_icon_cache_key(&entry.path, Some(&entry.name), NATIVE_ICON_SIZE)
         }
     }

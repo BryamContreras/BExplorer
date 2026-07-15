@@ -119,6 +119,12 @@ impl BExplorerIced {
                 &self.config,
                 self.is_dark_theme(),
             ))
+        } else if cfg!(target_os = "linux") && self.is_properties_window(id) {
+            #[cfg(target_os = "linux")]
+            return self
+                .properties_window_view(Palette::from_config(&self.config, self.is_dark_theme()));
+            #[cfg(not(target_os = "linux"))]
+            unreachable!();
         } else {
             self.view()
         }
@@ -138,6 +144,11 @@ impl BExplorerIced {
                 "Microsoft Defender threats",
             )
             .to_owned()
+        } else if cfg!(target_os = "linux") && self.is_properties_window(id) {
+            #[cfg(target_os = "linux")]
+            return self.properties_window_title();
+            #[cfg(not(target_os = "linux"))]
+            unreachable!();
         } else {
             "BExplorer".into()
         }

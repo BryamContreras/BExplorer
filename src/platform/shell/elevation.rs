@@ -128,6 +128,54 @@ pub(super) fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
     Ok(status.code().unwrap_or(1))
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn run_elevated_current_exe_with_input(
+    args: &[OsString],
+    input: &[u8],
+) -> Result<std::process::Output> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    if !command_exists("pkexec") {
+        return Err(BExplorerError::Shell(
+            "pkexec is required for elevated operations on Linux".into(),
+        ));
+    }
+
+    let exe = std::env::current_exe().map_err(|error| BExplorerError::Shell(error.to_string()))?;
+    let mut command = Command::new("pkexec");
+    if pkexec_supports_keep_cwd() {
+        command.arg("--keep-cwd");
+    }
+    let mut child = command
+        .arg(exe)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+
+    let write_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| BExplorerError::Shell("Could not open elevated helper input".into()))
+        .and_then(|mut stdin| {
+            stdin
+                .write_all(input)
+                .map_err(|error| BExplorerError::Shell(error.to_string()))
+        });
+    if let Err(error) = write_result {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error);
+    }
+
+    child
+        .wait_with_output()
+        .map_err(|error| BExplorerError::Shell(error.to_string()))
+}
+
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub(super) fn run_elevated_current_exe(_args: &[OsString]) -> Result<i32> {
     Err(BExplorerError::Shell(

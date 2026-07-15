@@ -372,6 +372,7 @@ impl BExplorerIced {
                 if self.title_menu_open {
                     return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
+                self.keyboard_menu_selection = None;
                 self.show_menu_open = false;
                 self.show_menu_parent_hovered = false;
                 self.show_menu_submenu_hovered = false;
@@ -444,9 +445,11 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::CloseFloatingMenus => {
+                self.keyboard_menu_selection = None;
                 self.request_popup_close(PendingPopupClose::FloatingMenus)
             }
             Message::OpenShowMenu => {
+                self.keyboard_menu_selection = None;
                 self.show_menu_open = true;
                 Task::none()
             }
@@ -703,8 +706,48 @@ impl BExplorerIced {
                     .map(|path| path_label(Some(path)))
                     .unwrap_or_else(|| self.localized("Este equipo", "This PC").to_owned());
                 let select_end = value.chars().count();
-                self.address_edit = Some(AddressEditState { pane, value });
+                self.address_edit = Some(AddressEditState {
+                    pane,
+                    value,
+                    focus_ready: false,
+                    focus_check_id: 0,
+                });
                 focus_address_input_task(pane, select_end)
+                    .chain(Task::done(Message::AddressEditReady(pane)))
+            }
+            Message::AddressEditReady(pane) => {
+                if let Some(address_edit) = &mut self.address_edit
+                    && address_edit.pane == pane
+                {
+                    address_edit.focus_ready = true;
+                }
+                Task::none()
+            }
+            Message::CheckAddressFocus(window_id) => {
+                if self.main_window_id != Some(window_id) {
+                    return Task::none();
+                }
+                let Some(address_edit) = &mut self.address_edit else {
+                    return Task::none();
+                };
+                if !address_edit.focus_ready {
+                    return Task::none();
+                }
+                address_edit.focus_check_id = address_edit.focus_check_id.wrapping_add(1).max(1);
+                let pane = address_edit.pane;
+                let check_id = address_edit.focus_check_id;
+                iced::widget::operation::is_focused(address_input_id(pane))
+                    .map(move |focused| Message::AddressFocusChecked(pane, check_id, focused))
+            }
+            Message::AddressFocusChecked(pane, check_id, focused) => {
+                if !focused
+                    && self.address_edit.as_ref().is_some_and(|address_edit| {
+                        address_edit.pane == pane && address_edit.focus_check_id == check_id
+                    })
+                {
+                    self.address_edit = None;
+                }
+                Task::none()
             }
             Message::AddressChanged(value) => {
                 if let Some(address_edit) = &mut self.address_edit {
@@ -870,6 +913,7 @@ impl BExplorerIced {
                 if self.new_menu_open == Some(pane) {
                     return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
+                self.keyboard_menu_selection = None;
                 self.title_menu_open = false;
                 self.show_menu_open = false;
                 self.view_menu_open = None;
@@ -1259,6 +1303,7 @@ impl BExplorerIced {
                 if self.search_mode_menu_open == Some(pane) {
                     return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
+                self.keyboard_menu_selection = None;
                 self.title_menu_open = false;
                 self.view_menu_open = None;
                 self.group_menu_open = None;
@@ -1366,6 +1411,7 @@ impl BExplorerIced {
                 if self.view_menu_open == Some(pane) {
                     return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
+                self.keyboard_menu_selection = None;
                 self.title_menu_open = false;
                 self.group_menu_open = None;
                 self.search_mode_menu_open = None;
@@ -1391,6 +1437,7 @@ impl BExplorerIced {
                 if self.group_menu_open == Some(pane) {
                     return self.request_popup_close(PendingPopupClose::FloatingMenus);
                 }
+                self.keyboard_menu_selection = None;
                 self.title_menu_open = false;
                 self.view_menu_open = None;
                 self.search_mode_menu_open = None;
@@ -1690,14 +1737,13 @@ impl BExplorerIced {
                 }
                 self.request_context_menu(pane, ContextTarget::SidebarDrive(index))
             }
-            Message::ContextPasteAvailabilityResolved(menu, paste_available) => {
+            Message::ContextMenuDataResolved(mut menu, paste_available, open_with_applications) => {
                 if menu.request_id != self.context_menu_request_id {
                     return Task::none();
                 }
-                self.capture_context_menu_backdrop(ContextMenuState {
-                    paste_available,
-                    ..menu
-                })
+                menu.paste_available = paste_available;
+                menu.open_with_applications = open_with_applications;
+                self.capture_context_menu_backdrop(menu)
             }
             Message::ContextBackdropCaptured(menu, screenshot) => {
                 if menu.request_id != self.context_menu_request_id {
@@ -1974,7 +2020,9 @@ impl BExplorerIced {
                 self.current_modifiers = modifiers;
                 Task::none()
             }
-            Message::KeyPressed(key, physical_key, modifiers) => {
+            Message::KeyPressed(window_id, key, physical_key, modifiers) => {
+                #[cfg(not(target_os = "linux"))]
+                let _ = window_id;
                 self.current_modifiers = modifiers;
                 let is_enter = matches!(
                     key.as_ref(),
@@ -1984,6 +2032,99 @@ impl BExplorerIced {
                     key.as_ref(),
                     keyboard::Key::Named(keyboard::key::Named::Escape)
                 );
+                let is_arrow_up = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::ArrowUp)
+                );
+                let is_arrow_down = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::ArrowDown)
+                );
+                #[cfg(target_os = "linux")]
+                if self.is_properties_window(window_id) {
+                    let selector_menu = self
+                        .properties_window
+                        .as_ref()
+                        .and_then(properties::PropertiesWindowState::selector_menu);
+                    if let Some(selector_menu) = selector_menu {
+                        if is_escape {
+                            return self.update_properties(match selector_menu {
+                                properties::PropertiesSelectorMenu::Application => {
+                                    properties::PropertiesMessage::CloseApplicationMenu
+                                }
+                                properties::PropertiesSelectorMenu::Owner
+                                | properties::PropertiesSelectorMenu::Group => {
+                                    properties::PropertiesMessage::CloseIdentityMenu
+                                }
+                            });
+                        }
+                        if is_arrow_up || is_arrow_down {
+                            return self.update_properties(
+                                properties::PropertiesMessage::MoveMenuSelection(if is_arrow_up {
+                                    -1
+                                } else {
+                                    1
+                                }),
+                            );
+                        }
+                        if is_enter {
+                            return self.update_properties(
+                                properties::PropertiesMessage::ConfirmMenuSelection,
+                            );
+                        }
+                        if !modifiers.command()
+                            && !modifiers.alt()
+                            && !modifiers.logo()
+                            && let keyboard::Key::Character(character) = key.as_ref()
+                        {
+                            return self.update_properties(
+                                properties::PropertiesMessage::SelectMenuByCharacter(
+                                    character.to_string(),
+                                ),
+                            );
+                        }
+                        return Task::none();
+                    }
+                    if is_escape {
+                        return self.close_properties_window();
+                    }
+                    if is_enter {
+                        return self.update_properties(properties::PropertiesMessage::Accept);
+                    }
+                    return Task::none();
+                }
+                if let Some(active_menu) = self.active_keyboard_menu() {
+                    if is_escape {
+                        return self.update(
+                            if matches!(
+                                active_menu,
+                                KeyboardMenu::Context
+                                    | KeyboardMenu::ContextOpenWith
+                                    | KeyboardMenu::ContextArchive
+                                    | KeyboardMenu::ContextExtract
+                                    | KeyboardMenu::ContextNew
+                            ) {
+                                Message::CloseContextMenu
+                            } else {
+                                Message::CloseFloatingMenus
+                            },
+                        );
+                    }
+                    if is_arrow_up || is_arrow_down {
+                        return self.move_keyboard_menu_selection(if is_arrow_up { -1 } else { 1 });
+                    }
+                    if is_enter {
+                        return self.activate_keyboard_menu_selection();
+                    }
+                    if !modifiers.command()
+                        && !modifiers.alt()
+                        && !modifiers.logo()
+                        && let keyboard::Key::Character(character) = key.as_ref()
+                    {
+                        return self.select_keyboard_menu_item_by_character(character);
+                    }
+                    return Task::none();
+                }
                 if is_enter {
                     if self.elevated_transfer_dialog.is_some() {
                         return self.update(Message::ConfirmElevatedTransfer);
@@ -2193,6 +2334,19 @@ impl BExplorerIced {
                         self.start_load(pane)
                     };
                     Task::batch([pane_task, self.refresh_sidebar_storage()])
+                }
+                Err(error) => self.report_error(pane, error),
+            },
+            Message::OpenWithChooserFinished(pane, result) => match result {
+                Ok(()) => {
+                    let status = self
+                        .localized(
+                            "Selector de aplicaciones abierto",
+                            "Application chooser opened",
+                        )
+                        .to_owned();
+                    self.pane_mut(pane).status = status;
+                    Task::none()
                 }
                 Err(error) => self.report_error(pane, error),
             },
@@ -2833,6 +2987,8 @@ impl BExplorerIced {
                 let paths = std::mem::take(&mut self.pending_external_file_drops);
                 self.copy_external_files_into_focused_pane(paths)
             }
+            #[cfg(target_os = "linux")]
+            Message::Properties(message) => self.update_properties(message),
             Message::MainWindowOpened(id) => {
                 self.main_window_id = Some(id);
                 Task::batch([
@@ -2911,6 +3067,11 @@ impl BExplorerIced {
                     || self.defender_threats_window_id == Some(id)
                 {
                     self.close_window_task(id)
+                } else if self.is_properties_window(id) {
+                    #[cfg(target_os = "linux")]
+                    return self.close_properties_window();
+                    #[cfg(not(target_os = "linux"))]
+                    return Task::none();
                 } else {
                     Task::none()
                 }
@@ -2942,6 +3103,8 @@ impl BExplorerIced {
                     if self.defender_threats_window_id == Some(id) {
                         self.defender_threats_window_id = None;
                     }
+                    #[cfg(target_os = "linux")]
+                    self.properties_window_closed(id);
                     Task::none()
                 }
             }
@@ -3107,6 +3270,20 @@ impl BExplorerIced {
                     } else {
                         self.apply_window_corners_only_task_for(id)
                     }
+                } else if self.is_properties_window(id) {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let expected = properties_window_size();
+                        if progress_window_needs_resize(size, expected) {
+                            sync_fixed_progress_window_size_task(id, expected)
+                        } else {
+                            self.apply_window_corners_only_task_for(id)
+                        }
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        Task::none()
+                    }
                 } else if self.transfer_window_id == Some(id)
                     || self.archive_window_id == Some(id)
                     || self.defender_window_id == Some(id)
@@ -3171,6 +3348,25 @@ impl BExplorerIced {
                 }
             }
             Message::WindowClose => {
+                #[cfg(target_os = "linux")]
+                if self
+                    .properties_window
+                    .as_ref()
+                    .is_some_and(|state| state.applying)
+                {
+                    let pane = self.focused_pane();
+                    let status = self
+                        .localized(
+                            "Espera a que terminen de aplicarse las propiedades",
+                            "Wait until the properties have finished applying",
+                        )
+                        .to_owned();
+                    self.pane_mut(pane).status = status;
+                    return self
+                        .properties_window_id
+                        .map(window::gain_focus)
+                        .unwrap_or_else(Task::none);
+                }
                 if self
                     .main_window_id
                     .is_some_and(|id| self.closing_windows.contains(&id))

@@ -723,6 +723,15 @@ impl BExplorerIced {
         let Some(entry) = self.context_entry(pane, target) else {
             return Task::none();
         };
+        if entry.kind == EntryKind::Symlink {
+            return self.report_error(
+                pane,
+                self.localized(
+                    "El enlace simbólico está roto o su destino no está disponible",
+                    "The symbolic link is broken or its target is unavailable",
+                ),
+            );
+        }
         if is_mountable_disk_image_entry(&entry) {
             return self.mount_disk_image(pane, entry.path);
         }
@@ -753,14 +762,30 @@ impl BExplorerIced {
         let Some(entry) = self.context_entry(pane, target) else {
             return Task::none();
         };
+        if entry.kind == EntryKind::Symlink {
+            return self.report_error(
+                pane,
+                self.localized(
+                    "El enlace simbólico está roto o su destino no está disponible",
+                    "The symbolic link is broken or its target is unavailable",
+                ),
+            );
+        }
         if explorer::is_virtual_path(&entry.path) {
             return self.report_error(pane, "Open with is not available for virtual locations");
         }
-        match shell::open_with(&entry.path) {
-            Ok(()) => self.pane_mut(pane).status = "Open with requested".into(),
-            Err(error) => return self.report_error(pane, error.to_string()),
-        }
-        Task::none()
+        let path = entry.path;
+        let status = self
+            .localized(
+                "Abriendo selector de aplicaciones...",
+                "Opening application chooser...",
+            )
+            .to_owned();
+        self.pane_mut(pane).status = status;
+        Task::perform(
+            run_blocking_file_operation(move || shell::open_with(&path)),
+            move |result| Message::OpenWithChooserFinished(pane, result),
+        )
     }
 
     pub(super) fn context_open_file_location(
@@ -805,20 +830,62 @@ impl BExplorerIced {
         pane: PaneId,
         target: ContextTarget,
     ) -> Task<Message> {
-        let path = self
-            .context_entry(pane, target)
-            .map(|entry| entry.path)
-            .or_else(|| self.tab_for_pane(pane).path.clone());
-        let Some(path) = path else {
-            return self.report_error(pane, "No properties target");
+        #[cfg(not(target_os = "linux"))]
+        {
+            let path = self
+                .context_entry(pane, target)
+                .map(|entry| entry.path)
+                .or_else(|| self.tab_for_pane(pane).path.clone());
+            return self.open_properties_paths(pane, path.into_iter().collect());
+        }
+
+        #[cfg(target_os = "linux")]
+        let paths = if matches!(target, ContextTarget::Background) {
+            self.tab_for_pane(pane).path.clone().into_iter().collect()
+        } else {
+            self.context_paths(pane, target)
         };
-        if explorer::is_virtual_path(&path) {
+        #[cfg(target_os = "linux")]
+        self.open_properties_paths(pane, paths)
+    }
+
+    pub(super) fn selection_properties(&mut self, pane: PaneId) -> Task<Message> {
+        #[cfg(not(target_os = "linux"))]
+        return self.context_properties(pane, ContextTarget::Background);
+
+        #[cfg(target_os = "linux")]
+        let mut paths = self.pane(pane).selected.iter().cloned().collect::<Vec<_>>();
+        #[cfg(target_os = "linux")]
+        paths.sort();
+        #[cfg(target_os = "linux")]
+        if paths.is_empty()
+            && let Some(path) = self.tab_for_pane(pane).path.clone()
+        {
+            paths.push(path);
+        }
+        #[cfg(target_os = "linux")]
+        self.open_properties_paths(pane, paths)
+    }
+
+    fn open_properties_paths(&mut self, pane: PaneId, paths: Vec<PathBuf>) -> Task<Message> {
+        if paths.is_empty() {
+            return self.report_error(pane, "No properties target");
+        }
+        if paths.iter().any(|path| explorer::is_virtual_path(path)) {
             return self.report_error(pane, "Properties are not available for virtual locations");
         }
+
+        #[cfg(target_os = "linux")]
+        return self.open_properties_window(pane, paths);
+
+        #[cfg(not(target_os = "linux"))]
+        let path = &paths[0];
+        #[cfg(not(target_os = "linux"))]
         match shell::show_properties(&path) {
             Ok(()) => self.pane_mut(pane).status = "Properties opened".into(),
             Err(error) => return self.report_error(pane, error.to_string()),
         }
+        #[cfg(not(target_os = "linux"))]
         Task::none()
     }
 

@@ -5,6 +5,7 @@
 
 #[cfg(target_os = "linux")]
 mod gnome_blur;
+mod kio;
 mod kwin_blur;
 #[cfg(target_os = "linux")]
 mod storage_watch;
@@ -123,6 +124,42 @@ pub fn native_file_icon(path: &Path, is_directory: bool, size: u32) -> Option<Na
 
 pub fn native_file_icon_highres(path: &Path, is_directory: bool) -> Option<NativeIconImage> {
     desktop_icon_for_path(path, is_directory, 256)
+}
+
+/// Resolves a Freedesktop application icon name (or a direct icon path) using
+/// the active desktop icon theme.
+pub fn native_named_icon(name: &str, size: u32) -> Option<NativeIconImage> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let size = size.clamp(16, 512);
+    let path = Path::new(name);
+    if path.is_file()
+        && let Some(icon) = load_icon_path(path, size)
+    {
+        return Some(icon);
+    }
+
+    // Although the desktop-entry specification normally omits extensions for
+    // themed icons, real-world entries occasionally include .png or .svg.
+    // Strip only those known extensions; dots are otherwise valid in icon
+    // names such as `org.gnome.Nautilus`.
+    let themed_name = match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("png" | "svg") => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(name),
+        _ => name,
+    };
+    let icon_path = icon_theme_store().find_best_icon(&[themed_name.to_owned()], size)?;
+    load_icon_path(&icon_path, size)
 }
 
 pub fn cached_desktop_thumbnail(path: &Path) -> Option<NativeIconImage> {
@@ -386,6 +423,7 @@ pub fn poll_native_file_drag(
 pub fn network_computers() -> Vec<NetworkComputerInfo> {
     let mut computers = Vec::new();
     computers.extend(network_computers_from_gio());
+    computers.extend(kio::network_computers());
     computers.extend(network_computers_from_avahi());
     computers.extend(network_computers_from_smbtree());
     dedupe_network_computers(computers)
@@ -421,24 +459,31 @@ pub fn network_computer_at(address: &str) -> Option<NetworkComputerInfo> {
 }
 
 pub fn network_shares(host: &str) -> Vec<NetworkShareInfo> {
-    if !command_exists("smbclient") {
-        return Vec::new();
-    }
-    Command::new("smbclient")
-        .args(["-g", "-N", "-L"])
-        .arg(format!("//{host}"))
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
-        .map(|output| parse_smbclient_shares(&String::from_utf8_lossy(&output.stdout)))
-        .unwrap_or_default()
+    let mut shares = if command_exists("smbclient") {
+        Command::new("smbclient")
+            .args(["-g", "-N", "-L"])
+            .arg(format!("//{host}"))
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| parse_smbclient_shares(&String::from_utf8_lossy(&output.stdout)))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    shares.extend(kio::network_shares(host));
+    dedupe_network_shares(shares)
 }
 
 pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
     let (host, share, children) = unc_parts(path)?;
+    mounted_gvfs_network_path(host, share, &children)
+        .or_else(|| kio::mounted_network_path(host, share, &children))
+}
+
+fn mounted_gvfs_network_path(host: &str, share: &str, children: &[&str]) -> Option<PathBuf> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)?;
-    let gvfs = runtime.join("gvfs");
-    let entries = fs::read_dir(gvfs).ok()?;
+    let entries = fs::read_dir(runtime.join("gvfs")).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
         if !name.starts_with("smb-share:") {
@@ -538,15 +583,59 @@ fn parse_gio_network_hosts(text: &str) -> Vec<NetworkComputerInfo> {
 
 fn network_host_from_uri(line: &str) -> Option<String> {
     for scheme in ["smb://", "sftp://", "ftp://", "dav://", "davs://"] {
-        if let Some(index) = line.find(scheme) {
+        if let Some(index) = line.to_ascii_lowercase().find(scheme) {
             let rest = &line[index + scheme.len()..];
-            let host = rest.split(['/', ':', '?', '#']).next().unwrap_or("").trim();
-            if !host.is_empty() {
-                return Some(host.to_string());
-            }
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+            return host_from_authority(authority);
         }
     }
     None
+}
+
+fn host_from_authority(authority: &str) -> Option<String> {
+    let authority = authority.rsplit('@').next()?.trim();
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        let end = bracketed.find(']')?;
+        &bracketed[..end]
+    } else if authority.matches(':').count() == 1 {
+        let (candidate, port) = authority.rsplit_once(':')?;
+        if port.parse::<u16>().is_ok() {
+            candidate
+        } else {
+            authority
+        }
+    } else {
+        authority
+    };
+    let host = percent_decode_component(host)?;
+    (!host.trim().is_empty()).then(|| host.trim().to_string())
+}
+
+fn percent_decode_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = *bytes.get(index + 1)?;
+            let low = *bytes.get(index + 2)?;
+            decoded.push(hex_value(high)? * 16 + hex_value(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_value(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_avahi_smb_host(line: &str) -> Option<NetworkComputerInfo> {
@@ -597,15 +686,36 @@ fn dedupe_network_computers(computers: Vec<NetworkComputerInfo>) -> Vec<NetworkC
     let mut seen = HashSet::new();
     computers
         .into_iter()
-        .filter(|computer| seen.insert(computer.name.to_ascii_lowercase()))
+        .filter(|computer| seen.insert(network_host_identity(&computer.name)))
         .collect()
 }
 
-fn command_exists(program: &str) -> bool {
+fn network_host_identity(host: &str) -> String {
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    normalized
+        .strip_suffix(".local")
+        .unwrap_or(&normalized)
+        .to_string()
+}
+
+fn dedupe_network_shares(shares: Vec<NetworkShareInfo>) -> Vec<NetworkShareInfo> {
+    let mut seen = HashSet::new();
+    shares
+        .into_iter()
+        .filter(|share| seen.insert(share.name.to_ascii_lowercase()))
+        .collect()
+}
+
+fn command_path(program: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")
         .into_iter()
         .flat_map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
-        .any(|directory| directory.join(program).is_file())
+        .map(|directory| directory.join(program))
+        .find(|candidate| candidate.is_file())
+}
+
+fn command_exists(program: &str) -> bool {
+    command_path(program).is_some()
 }
 
 fn custom_drag_helper_program() -> Option<OsString> {
@@ -835,6 +945,10 @@ mod tests {
             network_host_from_uri("activation_root=smb://SERVER/Share"),
             Some("SERVER".into())
         );
+        assert_eq!(
+            network_host_from_uri("default_location=SFTP://alice@example.local:22/home/alice"),
+            Some("example.local".into())
+        );
     }
 
     #[test]
@@ -843,6 +957,17 @@ mod tests {
 
         assert_eq!(shares.len(), 1);
         assert_eq!(shares[0].name, "Public");
+    }
+
+    #[test]
+    fn named_icon_loader_accepts_a_direct_png_path() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons/appicon.png");
+        let icon = native_named_icon(path.to_str().expect("UTF-8 app icon path"), 24)
+            .expect("direct app icon");
+
+        assert!(icon.width > 0 && icon.width <= 24);
+        assert!(icon.height > 0 && icon.height <= 24);
+        assert_eq!(icon.rgba.len(), icon.width * icon.height * 4);
     }
 
     fn append_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {

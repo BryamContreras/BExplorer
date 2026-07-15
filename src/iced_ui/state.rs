@@ -172,6 +172,9 @@ enum Message {
     ToggleSplit,
     Navigate(PaneId, Option<PathBuf>),
     BeginAddressEdit(PaneId),
+    AddressEditReady(PaneId),
+    CheckAddressFocus(window::Id),
+    AddressFocusChecked(PaneId, u64, bool),
     AddressChanged(String),
     SubmitAddress(PaneId),
     RowPressed(PaneId, usize),
@@ -247,7 +250,7 @@ enum Message {
     FileDragSidebarTargetExit(PathBuf),
     OpenBackgroundContext(PaneId),
     OpenEntryContext(PaneId, usize),
-    ContextPasteAvailabilityResolved(ContextMenuState, bool),
+    ContextMenuDataResolved(ContextMenuState, bool, Vec<shell::OpenWithApplication>),
     ContextBackdropCaptured(ContextMenuState, window::Screenshot),
     ContextBackdropPrepared(ContextMenuState, Option<iced_image::Handle>),
     ContextSubmenuBackdropCaptured(u64, ContextSubmenuKind, window::Screenshot),
@@ -273,7 +276,12 @@ enum Message {
     CloseContextArchiveSubmenuIfUnhovered,
     CloseContextNewSubmenuIfUnhovered,
     RunContextCommand(ContextCommand),
-    KeyPressed(keyboard::Key, keyboard::key::Physical, keyboard::Modifiers),
+    KeyPressed(
+        window::Id,
+        keyboard::Key,
+        keyboard::key::Physical,
+        keyboard::Modifiers,
+    ),
     KeyboardModifiersChanged(keyboard::Modifiers),
     RenameChanged(String),
     RenameEdited(text_editor::Action),
@@ -286,6 +294,7 @@ enum Message {
     CancelPermanentDelete,
     DiskImageMounted(PaneId, PathBuf, Result<PathBuf, String>),
     DriveEjected(PaneId, PathBuf, Result<(), String>),
+    OpenWithChooserFinished(PaneId, Result<(), String>),
     CancelDefenderScan,
     CloseDefenderPanel,
     RemediateDefenderThreats,
@@ -317,6 +326,8 @@ enum Message {
     #[cfg(target_os = "windows")]
     DefenderWindowOpened(window::Id),
     DefenderThreatsWindowOpened(window::Id),
+    #[cfg(target_os = "linux")]
+    Properties(properties::PropertiesMessage),
     ReopenTransferWindow(window::Id, Option<Point>),
     ReopenArchiveWindow(window::Id, Option<Point>),
     WindowCloseRequested(window::Id),
@@ -433,12 +444,15 @@ struct ContextMenuState {
     submenu_backdrop: Option<iced_image::Handle>,
     submenu_backdrop_kind: Option<ContextSubmenuKind>,
     paste_available: bool,
+    open_with_applications: Vec<shell::OpenWithApplication>,
 }
 
 #[derive(Clone, Debug)]
 struct AddressEditState {
     pane: PaneId,
     value: String,
+    focus_ready: bool,
+    focus_check_id: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -524,6 +538,27 @@ enum KeyboardShortcut {
     GoBack,
     GoForward,
     Open,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KeyboardMenu {
+    Title,
+    Show,
+    View(PaneId),
+    Group(PaneId),
+    Search(PaneId),
+    New(PaneId),
+    Context,
+    ContextOpenWith,
+    ContextArchive,
+    ContextExtract,
+    ContextNew,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct KeyboardMenuSelection {
+    menu: KeyboardMenu,
+    index: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -796,6 +831,11 @@ enum IcedImageJob {
         cache_key: PathBuf,
         path: PathBuf,
         is_directory: bool,
+        size: u32,
+    },
+    ApplicationIcon {
+        cache_key: PathBuf,
+        application: shell::OpenWithApplication,
         size: u32,
     },
 }

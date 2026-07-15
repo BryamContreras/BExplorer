@@ -202,9 +202,7 @@ impl BExplorerIced {
             }
             KeyboardShortcut::Rename => self.rename_selected(pane),
             KeyboardShortcut::EditAddress => self.update(Message::BeginAddressEdit(pane)),
-            KeyboardShortcut::Properties => {
-                self.context_properties(pane, ContextTarget::Background)
-            }
+            KeyboardShortcut::Properties => self.selection_properties(pane),
             KeyboardShortcut::GoUp => self.update(Message::Up(pane)),
             KeyboardShortcut::GoBack => self.update(Message::Back(pane)),
             KeyboardShortcut::GoForward => self.update(Message::Forward(pane)),

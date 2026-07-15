@@ -1,6 +1,6 @@
 # BExplorer
 
-BExplorer 1.0 es un explorador de archivos estable y liviano para Windows y
+BExplorer 1.0.2 es un explorador de archivos estable y liviano para Windows y
 Linux, escrito en Rust. Su objetivo es mejorar la gestion diaria de archivos
 sin intentar reemplazar todo el shell del sistema.
 
@@ -10,7 +10,7 @@ integraciones nativas propias; macOS sigue siendo un objetivo experimental.
 
 ## Estado
 
-BExplorer 1.0 es la primera version estable para Windows y Linux. La interfaz,
+BExplorer 1.0.2 es la version estable actual para Windows y Linux. La interfaz,
 el motor de operaciones, los formatos de configuracion y sesion, los flujos de
 comprimidos y las integraciones de plataforma forman la base compatible de la
 serie 1.x.
@@ -28,7 +28,16 @@ eliminacion en segundo plano y transferencias en cola. Los cambios de sesion se
 guardan al producirse y las carpetas grandes se renderizan incrementalmente en
 lotes de 500 elementos, sin ocultar permanentemente los elementos restantes.
 La busqueda completa, vistas previas, comprimidos, Defender, MTP, montaje de
-imagenes, red y arrastrar y soltar nativo estan conectados a la interfaz.
+imagenes, red, arrastrar y soltar nativo, enlaces simbolicos, propiedades y
+seleccion de aplicaciones estan conectados a la interfaz.
+
+En Linux se combinan GVfs, Samba y Avahi para descubrir recursos de red. En
+KDE, los lugares guardados, montajes de KIOFuse y consultas acotadas mediante
+`kioclient` enriquecen ese resultado cuando estan disponibles, sin sustituir
+los mecanismos comunes ni convertir KDE en una dependencia obligatoria. El
+selector completo de aplicaciones utiliza el portal XDG y el paquete `.deb`
+declara como dependencias los servicios necesarios para las integraciones
+generales de Linux.
 
 La interfaz `iced` esta organizada por responsabilidad en `src/iced_ui`:
 `mod.rs` coordina la aplicacion, `state.rs` contiene mensajes y estado, y
@@ -64,6 +73,8 @@ La compatibilidad continua se valida especialmente en:
 - Pantalla dividida con vistas independientes.
 - Barra lateral redimensionable y reordenable.
 - Barra de acciones y barra de marcadores opcionales.
+- Integracion Freedesktop para iniciar `bexplorer %f`: abre la carpeta recibida
+  o, si otra aplicacion entrega un archivo, navega a su carpeta contenedora.
 - Vistas de detalles, lista, iconos, iconos grandes, iconos extra grandes y
   mosaicos.
 - Soporte para unidades locales, extraibles, ISO montadas, rutas UNC, red,
@@ -79,6 +90,8 @@ La compatibilidad continua se valida especialmente en:
   en Windows y Linux.
 - Cola de transferencias con progreso, pausa, cancelacion y manejo de
   conflictos.
+- Deshacer de un nivel para la ultima copia, movimiento o envio a la papelera
+  completado.
 - Reemplazos locales preparados: primero se copia y sincroniza el archivo o
   directorio completo junto al destino y solo entonces se sustituye el
   elemento anterior. Si la preparacion falla, el destino previo permanece
@@ -89,9 +102,84 @@ La compatibilidad continua se valida especialmente en:
 - Busqueda rapida y busqueda completa, incluyendo archivos dentro de
   comprimidos soportados.
 - Panel de vista previa para imagenes, texto, SVG y PDF.
+- Enlaces simbolicos reconocidos por destino: los enlaces a carpetas se
+  navegan como carpetas, los de archivos se abren como archivos y los rotos se
+  mantienen visibles e identificables.
+- Hoja de propiedades nativa de Windows y ventana compacta propia en Linux con
+  pestanas General, Permisos y Detalles.
+- Menus **Abrir con** con nombres e iconos de aplicaciones; en Linux, **Elegir
+  otra aplicacion** usa el portal XDG.
+- Navegacion por teclado en menus flotantes y selectores: al escribir una letra
+  se selecciona la siguiente opcion que comienza por ella, igual que en la
+  lista de archivos.
 - Integracion con Windows Defender en Windows.
 - Personalizacion de tema, color, bordes de iconos, efectos de ventana, atajos
   y distribucion de la interfaz.
+
+## Enlaces simbolicos, propiedades y aplicaciones
+
+En Linux, BExplorer clasifica cada enlace simbolico sin perder la identidad del
+propio enlace. Un enlace valido a una carpeta se puede recorrer, uno dirigido a
+un archivo se abre segun el tipo del destino y uno roto muestra un error
+explicito. Propiedades presenta tanto el destino almacenado como el resuelto y
+no aplica silenciosamente al destino cambios de permisos solicitados sobre el
+enlace.
+
+Windows conserva la hoja de propiedades nativa del Shell. En Linux, la ventana
+de propiedades de BExplorer admite:
+
+- uno o varios archivos y directorios locales;
+- renombrado, tamano logico y en disco, fechas, tipo MIME, punto de montaje,
+  sistema de archivos, dispositivo, espacio libre, UID/GID, inodo y cantidad
+  de enlaces fisicos;
+- calculo del tamano de carpetas en segundo plano;
+- seleccion de propietario y grupo desde las identidades del sistema;
+- permisos de lectura, escritura y ejecucion para propietario, grupo y otros;
+- bits setuid, setgid y sticky, con aplicacion recursiva opcional;
+- cambios elevados de permisos y propiedad mediante Polkit cuando sea
+  necesario;
+- aplicaciones instaladas con su nombre e icono, y cambio de la aplicacion
+  predeterminada para un tipo MIME mediante `xdg-mime`.
+
+La accion **Elegir otra aplicacion** de Linux llama a `OpenFile` del portal XDG
+con un descriptor del archivo y `ask=true`. Si el portal no puede atenderla,
+usa el selector real `mimeopen --ask` cuando esta instalado; no abre
+silenciosamente la aplicacion predeterminada simulando que mostro un selector.
+El submenu contextual tambien permite iniciar directamente una aplicacion
+compatible concreta.
+
+## Compatibilidad de plataforma
+
+| Funcion | Windows | Linux | macOS |
+| --- | --- | --- | --- |
+| Navegacion local, pestanas y panel dividido | Compatible | Compatible | Experimental |
+| Transferencias y comprimidos | Compatible | Compatible | Experimental |
+| Iconos y miniaturas | Integracion nativa | Freedesktop/XDG | Experimental |
+| Dispositivos portatiles | WPD/MTP | Dispositivos montados por GVfs/FUSE | No compatible |
+| Descubrimiento de red | Proveedores nativos | GVfs/Samba/Avahi y enriquecimiento SMB opcional con KIO | Solo SMB montado |
+| Montaje y expulsion de ISO | Compatible | UDisks2 | Experimental |
+| Formateo de discos no pertenecientes al sistema | Format-Volume | UDisks2/Polkit | Experimental |
+| Difuminado | Efectos nativos | KWin o Blur My Shell opcional | Experimental |
+| Microsoft Defender | Compatible | No aplica | No aplica |
+
+Compatibilidad del paquete Linux 1.0.2 generado en la base actual:
+
+| Distribucion o entorno | `.deb` actual | Nivel de validacion |
+| --- | --- | --- |
+| Debian 13 con GNOME o KDE Plasma | Compatible | Funciones principales probadas en ambos entornos |
+| Ubuntu 26.04 con GNOME | Compatible | Flujo principal probado |
+| Ubuntu 24.04 y derivadas con `libc6 >= 2.39` | Compatible por ABI y dependencias | No se han probado todas las derivadas ni todos sus escritorios |
+| Debian 12 | No compatible con este `.deb` | La aplicacion se probo anteriormente con una compilacion compatible, pero el artefacto actual exige una GLIBC posterior |
+| Ubuntu 22.04 | No compatible con este `.deb` | Requiere compilar en una base antigua compatible; no forma parte de la matriz validada actual |
+| Otras derivadas de Debian/Ubuntu | Condicional | Requieren `libc6 >= 2.39`, las dependencias declaradas y pruebas en el entorno concreto |
+
+El script de empaquetado detecta la version maxima de GLIBC utilizada por el
+binario y la escribe como requisito de `libc6`, evitando que APT instale un
+ejecutable que no puede arrancar. Compilar el paquete dentro de una base mas
+antigua puede reducir ese requisito, pero esa compilacion se debe probar por
+separado. La capa grafica mediante `iced`/`winit` admite sesiones Wayland y
+X11; otros escritorios Freedesktop pueden usar las funciones base, pero no se
+declaran probados solo por compartir las mismas bibliotecas.
 
 ## Linux
 
@@ -108,32 +196,56 @@ actual usa piezas comunes del sistema:
   su API D-Bus estable para formatear discos que no sean del sistema con
   autorizacion Polkit;
 - Polkit mediante `pkexec` para reintentos elevados;
-- `gio`, Samba y Avahi como descubrimiento de red de mejor esfuerzo;
+- `gio`, Samba y Avahi como descubrimiento de red de mejor esfuerzo, ampliado
+  opcionalmente con lugares de KDE, KIOFuse y `kioclient`;
+- portal XDG `OpenFile` para mostrar el selector completo de aplicaciones sin
+  convertir una ruta local en una URI `file://` incompatible con ese portal;
 - dispositivos MTP ya montados por GVfs/FUSE bajo `/run/user/.../gvfs`;
 - `xdg-terminal-exec` y terminales comunes como fallback;
-- `assets/linux/bexplorer.desktop` con `MimeType=inode/directory`.
+- `assets/linux/bexplorer.desktop` con `TryExec=bexplorer`,
+  `Exec=bexplorer %f` y `MimeType=inode/directory`.
 
 Diferencias e integraciones opcionales en Linux:
 
-- arrastrar archivos desde BExplorer hacia otros gestores usa helpers nativos
-  compatibles con Wayland como `ripdrag`, `dragon-drag-and-drop`, `dragon` o
-  `dragon-drop` cuando estan instalados;
+- el arrastre nativo hacia otras aplicaciones esta implementado para Wayland;
+  en X11 se puede seleccionar un helper mediante `BEXPLORER_DRAG_HELPER`, y
+  `BEXPLORER_DRAG_HELPER_FALLBACK=1` habilita como respaldo automatico
+  `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop`;
 - MTP sin montaje GVfs/FUSE todavia no tiene backend propio;
-- descubrimiento de red depende de las herramientas disponibles en la distro;
-- propiedades nativas siguen pendientes;
+- el descubrimiento de red depende de los servicios disponibles, las
+  credenciales y la configuracion de la red local;
+- el enriquecimiento KIO no reemplaza GVfs, Samba o Avahi y solo se usa cuando
+  KDE/KIO esta instalado;
 - la busqueda de iconos se hace en proceso y todavia puede no cubrir extensiones
   especificas de algunos temas de escritorio.
 
-Integraciones opcionales recomendadas en Linux:
+El `.deb` declara como dependencias obligatorias:
 
-- `wl-clipboard`, `xclip` o `xsel`;
-- `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop`;
-- `udisks2` y las herramientas de filesystem correspondientes (`e2fsprogs`,
+- las bibliotecas de ejecucion de X11, XCB, Wayland, EGL y OpenGL utilizadas
+  por `iced`/`winit`;
+- GLib/GIO, `xdg-utils`, `xdg-desktop-portal` y un backend de portal;
+- `udisks2`, `pkexec` y las herramientas de filesystem (`e2fsprogs`,
   `dosfstools`, `exfatprogs`, `ntfs-3g`, `btrfs-progs`, `xfsprogs`);
-- `polkit`;
-- `xdg-utils`, GLib/GVfs;
-- `smbclient`, `smbtree` y opcionalmente Avahi;
-- GVfs MTP/FUSE para telefonos y camaras.
+- GVfs/FUSE y sus backends para montajes de escritorio y dispositivos MTP;
+- `wl-clipboard` y `xclip` para interoperabilidad de portapapeles en Wayland y
+  X11;
+- Samba y Avahi para descubrimiento de red;
+- Shared MIME Info, el tema `hicolor` y las utilidades de base de datos de
+  escritorio e iconos.
+
+Integraciones que siguen siendo opcionales:
+
+- `xsel` y `libfile-mimeinfo-perl` como alternativas de portapapeles y selector
+  de aplicaciones;
+- `kde-cli-tools`, `kio-extras` y `kio-fuse` para enriquecer KDE sin instalar
+  toda su pila en escritorios GNOME;
+- Blur My Shell para el difuminado en GNOME;
+- `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop` para arrastrar
+  archivos en X11 o como respaldo de Wayland.
+
+Para compilar desde el codigo fuente se requiere Rust 1.92 o posterior, ademas
+de un toolchain C/C++ y las cabeceras de desarrollo de Wayland/X11/OpenGL que
+requiera `iced`/`winit` en la distribucion elegida.
 
 Comandos recomendados:
 
@@ -147,7 +259,8 @@ cargo run
 Los paquetes Linux se generan con `scripts/linux/package.sh`; el tarball, el
 paquete `.deb` y sus checksums incluyen los avisos y textos de licencia. El
 `.deb` instala el ejecutable en `/usr/bin/bexplorer`, registra la aplicacion en
-el menu del escritorio y puede instalarse con `scripts/linux/install-deb.sh`.
+el menu del escritorio, instala sus iconos escalados en el tema `hicolor` y
+puede instalarse con `scripts/linux/install-deb.sh`.
 
 En Windows, `scripts/windows/package.ps1` crea un ZIP portable y un instalador
 Inno Setup con checksum SHA-256. El instalador permite elegir espanol o ingles,

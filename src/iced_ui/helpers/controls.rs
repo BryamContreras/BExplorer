@@ -53,6 +53,37 @@ pub(in crate::iced_ui) fn native_window_minimize_button<'a>(
         .style(move |_, status| button_style(palette, false, status))
 }
 
+#[cfg(target_os = "linux")]
+pub(in crate::iced_ui) fn native_window_close_button_maybe<'a>(
+    message: Option<Message>,
+    palette: Palette,
+) -> Button<'a, Message> {
+    let button = Button::new(title_bar_icon("x", palette.text))
+        .width(34)
+        .height(TRANSFER_WINDOW_TITLE_HEIGHT)
+        .padding(0)
+        .style(move |_, status| {
+            let danger = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: danger.then(|| Color::from_rgb8(227, 107, 114).into()),
+                text_color: if danger {
+                    Color::WHITE
+                } else if status == button::Status::Disabled {
+                    palette.muted_text
+                } else {
+                    palette.text
+                },
+                border: border::rounded(border::top_right(WINDOW_RADIUS - WINDOW_BORDER_WIDTH)),
+                ..button::Style::default()
+            }
+        });
+    if let Some(message) = message {
+        button.on_press(message)
+    } else {
+        button
+    }
+}
+
 pub(in crate::iced_ui) fn title_bar_icon<'a>(
     label: &'static str,
     color: Color,
@@ -109,8 +140,12 @@ pub(in crate::iced_ui) fn context_quick_button<'a>(
     command: ContextCommand,
     palette: Palette,
     enabled: bool,
+    selected: bool,
 ) -> Element<'a, Message> {
-    let color = if enabled {
+    let selected = enabled && selected;
+    let color = if selected {
+        palette.accent_text
+    } else if enabled {
         mix_color(palette.text, palette.muted_text, 0.28)
     } else {
         translucent_color(palette.muted_text, 0.44)
@@ -140,7 +175,7 @@ pub(in crate::iced_ui) fn context_quick_button<'a>(
         button
     };
     button
-        .style(move |_, status| context_button_style(palette, status))
+        .style(move |_, status| selected_button_style(palette, selected, status))
         .into()
 }
 
@@ -150,8 +185,16 @@ pub(in crate::iced_ui) fn context_menu_row<'a>(
     trailing: Option<ContextMenuTrailing>,
     command: ContextCommand,
     palette: Palette,
+    selected: bool,
 ) -> Element<'a, Message> {
-    context_menu_dynamic_row(icon, label.to_string(), trailing, command, palette)
+    context_menu_dynamic_row(
+        icon,
+        label.to_string(),
+        trailing,
+        command,
+        palette,
+        selected,
+    )
 }
 
 pub(in crate::iced_ui) fn context_menu_dynamic_row<'a>(
@@ -160,19 +203,28 @@ pub(in crate::iced_ui) fn context_menu_dynamic_row<'a>(
     trailing: Option<ContextMenuTrailing>,
     command: ContextCommand,
     palette: Palette,
+    selected: bool,
 ) -> Element<'a, Message> {
+    let icon_color = if selected {
+        palette.accent_text
+    } else {
+        palette.muted_text
+    };
+    let text_color = if selected {
+        palette.accent_text
+    } else {
+        palette.text
+    };
     let trailing: Element<'a, Message> = match trailing {
-        Some(ContextMenuTrailing::Text(label)) => {
-            text(label).size(12.0).color(palette.muted_text).into()
-        }
-        Some(ContextMenuTrailing::Icon(icon)) => inline_icon(icon, palette.muted_text, 13.0),
+        Some(ContextMenuTrailing::Text(label)) => text(label).size(12.0).color(icon_color).into(),
+        Some(ContextMenuTrailing::Icon(icon)) => inline_icon(icon, icon_color, 13.0),
         None => Space::new().width(0).into(),
     };
     let content = row![
-        inline_icon(icon, palette.muted_text, 18.0),
+        inline_icon(icon, icon_color, 18.0),
         text(label)
             .size(13.0)
-            .color(palette.text)
+            .color(text_color)
             .wrapping(iced::widget::text::Wrapping::None)
             .width(Length::Fill),
         trailing,
@@ -190,7 +242,7 @@ pub(in crate::iced_ui) fn context_menu_dynamic_row<'a>(
     .height(34)
     .padding([0, 10])
     .on_press(Message::RunContextCommand(command))
-    .style(move |_, status| context_button_style(palette, status))
+    .style(move |_, status| selected_button_style(palette, selected, status))
     .into()
 }
 
@@ -199,7 +251,13 @@ pub(in crate::iced_ui) fn context_menu_application_row<'a>(
     icon: Option<iced_image::Handle>,
     command: ContextCommand,
     palette: Palette,
+    selected: bool,
 ) -> Element<'a, Message> {
+    let text_color = if selected {
+        palette.accent_text
+    } else {
+        palette.text
+    };
     let icon: Element<'a, Message> = if let Some(handle) = icon {
         iced_image::Image::new(handle)
             .width(Length::Fixed(18.0))
@@ -207,13 +265,21 @@ pub(in crate::iced_ui) fn context_menu_application_row<'a>(
             .content_fit(ContentFit::Contain)
             .into()
     } else {
-        inline_icon("open", palette.muted_text, 18.0)
+        inline_icon(
+            "open",
+            if selected {
+                palette.accent_text
+            } else {
+                palette.muted_text
+            },
+            18.0,
+        )
     };
     let content = row![
         icon,
         text(label)
             .size(13.0)
-            .color(palette.text)
+            .color(text_color)
             .wrapping(iced::widget::text::Wrapping::None)
             .width(Length::Fill),
     ]
@@ -229,7 +295,7 @@ pub(in crate::iced_ui) fn context_menu_application_row<'a>(
     .height(34)
     .padding([0, 10])
     .on_press(Message::RunContextCommand(command))
-    .style(move |_, status| context_button_style(palette, status))
+    .style(move |_, status| selected_button_style(palette, selected, status))
     .into()
 }
 
@@ -246,11 +312,12 @@ pub(in crate::iced_ui) fn context_separator<'a>(palette: Palette) -> Element<'a,
 pub(in crate::iced_ui) fn menu_choice_button(
     label: &'static str,
     active: bool,
+    selected: bool,
     message: Message,
     palette: Palette,
     font_size: f32,
 ) -> Element<'static, Message> {
-    let color = if active {
+    let color = if selected {
         palette.accent_text
     } else {
         palette.text
@@ -274,7 +341,7 @@ pub(in crate::iced_ui) fn menu_choice_button(
     .height(32)
     .padding([0, 8])
     .on_press(message)
-    .style(move |_, status| selected_button_style(palette, active, status))
+    .style(move |_, status| selected_button_style(palette, selected, status))
     .into()
 }
 
@@ -382,6 +449,55 @@ pub(in crate::iced_ui) fn load_iced_image(job: IcedImageJob) -> IcedImageLoadRes
                 image: image.and_then(iced_rgba_from_native),
             }
         }
+        IcedImageJob::ApplicationIcon {
+            cache_key,
+            application,
+            size,
+        } => {
+            #[cfg(target_os = "windows")]
+            let image = application
+                .icon_path
+                .as_deref()
+                .and_then(|path| thumbnail_data::load_native_icon_image(path, false, size));
+            #[cfg(target_os = "linux")]
+            let image = application
+                .icon_name
+                .as_deref()
+                .and_then(|name| crate::platform::native_named_icon(name, size));
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+            let image = None;
+            IcedImageLoadResult {
+                key: IcedImageKey::NativeIcon(cache_key),
+                image: image.and_then(iced_rgba_from_native),
+            }
+        }
+    }
+}
+
+pub(in crate::iced_ui) fn open_with_application_icon_cache_key(
+    application: &shell::OpenWithApplication,
+    size: u32,
+) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        application
+            .icon_path
+            .as_deref()
+            .map(|path| thumbnail_data::native_path_icon_cache_key(path, false, size))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        application.icon_name.as_ref().map(|_| {
+            PathBuf::from(format!(
+                "__bexplorer_open_with_{}_size_{size}",
+                application.id
+            ))
+        })
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        let _ = (application, size);
+        None
     }
 }
 
@@ -423,7 +539,10 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
     Some((
         thumbnail_data::native_entry_icon_cache_key(entry),
         icon_lookup_path,
-        matches!(entry.kind, EntryKind::Folder | EntryKind::Drive),
+        matches!(
+            entry.kind,
+            EntryKind::Folder | EntryKind::SymlinkFolder | EntryKind::Drive
+        ),
     ))
 }
 
@@ -433,7 +552,7 @@ pub(in crate::iced_ui) fn fallback_icon_label(entry: &FileEntry) -> &'static str
         EntryKind::Drive if entry.drive_kind == Some(DriveKind::Portable) => "portable",
         EntryKind::Drive => "pc",
         EntryKind::Folder => "folder",
-        EntryKind::Symlink => "lnk",
+        EntryKind::SymlinkFolder | EntryKind::SymlinkFile | EntryKind::Symlink => "lnk",
         EntryKind::File | EntryKind::Other => "file",
     }
 }
@@ -628,23 +747,6 @@ pub(in crate::iced_ui) fn button_style(
     status: button::Status,
 ) -> button::Style {
     selected_button_style(palette, selected, status)
-}
-
-pub(in crate::iced_ui) fn context_button_style(
-    palette: Palette,
-    status: button::Status,
-) -> button::Style {
-    let background = if matches!(status, button::Status::Hovered | button::Status::Pressed) {
-        Some(hover_tint(palette).into())
-    } else {
-        None
-    };
-    button::Style {
-        background,
-        text_color: palette.text,
-        border: border::rounded(4),
-        ..button::Style::default()
-    }
 }
 
 pub(in crate::iced_ui) fn selected_button_style(
