@@ -24,6 +24,7 @@ PACKAGE=$(dpkg-deb -f "$DEB" Package)
 VERSION=$(dpkg-deb -f "$DEB" Version)
 ARCH=$(dpkg-deb -f "$DEB" Architecture)
 DEPENDS=$(dpkg-deb -f "$DEB" Depends)
+MAINTAINER=$(dpkg-deb -f "$DEB" Maintainer)
 
 [ "$PACKAGE" = bexplorer ] || {
   printf 'Unexpected package name: %s\n' "$PACKAGE" >&2
@@ -39,6 +40,10 @@ if [ -n "${EXPECTED_ARCH:-}" ] && [ "$ARCH" != "$EXPECTED_ARCH" ]; then
     "$ARCH" "$EXPECTED_ARCH" >&2
   exit 1
 fi
+[ "$MAINTAINER" = "BExplorer Project <noreply@github.com>" ] || {
+  printf 'Unexpected package maintainer: %s\n' "$MAINTAINER" >&2
+  exit 1
+}
 
 field_contains_package() {
   printf '%s\n' "$1" \

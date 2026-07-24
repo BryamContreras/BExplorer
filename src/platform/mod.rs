@@ -765,12 +765,12 @@ pub fn native_file_icon_highres(_path: &Path, _is_directory: bool) -> Option<Nat
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-pub fn cached_desktop_thumbnail(path: &Path) -> Option<NativeIconImage> {
-    linux::cached_desktop_thumbnail(path)
+pub fn cached_desktop_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    linux::cached_desktop_thumbnail(path, size)
 }
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
-pub fn cached_desktop_thumbnail(_path: &Path) -> Option<NativeIconImage> {
+pub fn cached_desktop_thumbnail(_path: &Path, _size: u32) -> Option<NativeIconImage> {
     None
 }
 

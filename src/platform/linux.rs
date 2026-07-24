@@ -162,13 +162,18 @@ pub fn native_named_icon(name: &str, size: u32) -> Option<NativeIconImage> {
     load_icon_path(&icon_path, size)
 }
 
-pub fn cached_desktop_thumbnail(path: &Path) -> Option<NativeIconImage> {
+pub fn cached_desktop_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
     let uri = canonical_file_uri(path)?;
     let hash = thumbnail_hash_for_uri(&uri);
     let cache_home = xdg_cache_home();
     let metadata = fs::metadata(path).ok()?;
 
-    for directory in ["large", "x-large", "xx-large", "normal"] {
+    let directories = if size <= 128 {
+        ["normal", "large", "x-large", "xx-large"]
+    } else {
+        ["xx-large", "x-large", "large", "normal"]
+    };
+    for directory in directories {
         let thumbnail_path = cache_home
             .join("thumbnails")
             .join(directory)
@@ -179,7 +184,7 @@ pub fn cached_desktop_thumbnail(path: &Path) -> Option<NativeIconImage> {
         if !thumbnail_metadata_is_current(&bytes, &metadata, &uri) {
             continue;
         }
-        if let Some(image) = load_png_icon(&bytes, 256) {
+        if let Some(image) = load_png_icon(&bytes, size) {
             return Some(image);
         }
     }

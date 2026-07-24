@@ -74,40 +74,35 @@ impl BExplorerIced {
             ));
         }
 
-        let scroll_content: Element<'_, Message> = if self.current_modifiers.control() {
-            mouse_area(grid)
-                .on_scroll(move |delta| Message::PaneMouseWheel(pane, delta))
-                .into()
-        } else {
-            grid.into()
-        };
-        let content: Element<'_, Message> = if self.current_modifiers.control() {
-            container(scroll_content)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .clip(true)
-                .into()
-        } else {
-            scrollable(scroll_content)
-                .id(pane_scroll_id(pane))
-                .on_scroll(move |viewport| {
-                    Message::PaneScrolled(
-                        pane,
-                        viewport.relative_offset().y,
-                        viewport.absolute_offset().y,
-                        viewport.content_bounds().height > viewport.bounds().height,
-                    )
-                })
-                .style(move |theme, status| {
-                    explorer_scrollable_style(
-                        palette,
-                        theme,
-                        status,
-                        self.pane(pane).scrollbar_reveal_progress,
-                    )
-                })
-                .into()
-        };
+        // Keep the Scrollable mounted when Ctrl changes. Replacing it with a
+        // container reset its internal offset and made a lone Ctrl press jump
+        // to the top. A stable overlay captures only Ctrl+wheel for view zoom.
+        let scroller: Element<'_, Message> = scrollable(grid)
+            .id(pane_scroll_id(pane))
+            .on_scroll(move |viewport| {
+                Message::PaneScrolled(
+                    pane,
+                    viewport.relative_offset().y,
+                    viewport.absolute_offset().y,
+                    viewport.content_bounds().height > viewport.bounds().height,
+                )
+            })
+            .style(move |theme, status| {
+                explorer_scrollable_style(
+                    palette,
+                    theme,
+                    status,
+                    self.pane(pane).scrollbar_reveal_progress,
+                )
+            })
+            .into();
+        let content: Element<'_, Message> = stack(vec![
+            scroller,
+            pane_ctrl_wheel_overlay(pane, self.current_modifiers.control()),
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
         let base: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -179,17 +174,10 @@ impl BExplorerIced {
             };
             let name_editor: Element<'_, Message> = if let Some(dialog) = editing {
                 if is_this_pc_drive {
-                    inline_rename_editor(
-                        dialog.value.as_str(),
-                        dialog.extension.as_deref(),
-                        text_width,
-                        font_size,
-                        palette,
-                    )
+                    inline_rename_editor(dialog.value.as_str(), text_width, font_size, palette)
                 } else {
                     wrapped_inline_rename_editor(
                         &dialog.editor,
-                        dialog.extension.as_deref(),
                         text_width,
                         name_height,
                         font_size,
@@ -278,7 +266,6 @@ impl BExplorerIced {
             let name_editor: Element<'_, Message> = if let Some(dialog) = editing {
                 wrapped_inline_rename_editor(
                     &dialog.editor,
-                    dialog.extension.as_deref(),
                     label_width,
                     label_height,
                     font_size,

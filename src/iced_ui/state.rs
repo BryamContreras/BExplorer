@@ -676,7 +676,6 @@ struct RenameState {
     path: PathBuf,
     value: String,
     editor: text_editor::Content,
-    extension: Option<String>,
     select_end: usize,
 }
 
@@ -810,11 +809,23 @@ struct IcedRgbaImage {
     rgba: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IcedImageVariant {
+    Standard,
+    Small,
+}
+
 #[derive(Clone, Debug)]
 enum IcedImageKey {
-    Thumbnail(PathBuf),
+    Thumbnail {
+        path: PathBuf,
+        variant: IcedImageVariant,
+    },
     Preview(PathBuf),
-    NativeIcon(PathBuf),
+    NativeIcon {
+        path: PathBuf,
+        variant: IcedImageVariant,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -823,6 +834,8 @@ enum IcedImageJob {
         path: PathBuf,
         max_bytes: usize,
         allow_default_resource: bool,
+        size: u32,
+        variant: IcedImageVariant,
     },
     Preview {
         path: PathBuf,
@@ -832,6 +845,7 @@ enum IcedImageJob {
         path: PathBuf,
         is_directory: bool,
         size: u32,
+        variant: IcedImageVariant,
     },
     ApplicationIcon {
         cache_key: PathBuf,

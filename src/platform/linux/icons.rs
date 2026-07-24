@@ -139,7 +139,7 @@ fn load_icon_path(path: &Path, size: u32) -> Option<NativeIconImage> {
 fn load_png_icon(bytes: &[u8], size: u32) -> Option<NativeIconImage> {
     let image = image::load_from_memory(bytes).ok()?;
     let image = if image.width().max(image.height()) > size {
-        image.thumbnail(size, size)
+        image.resize(size, size, image::imageops::FilterType::Lanczos3)
     } else {
         image
     }

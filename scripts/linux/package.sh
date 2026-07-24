@@ -9,19 +9,21 @@ VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -n 1
 APPDIR="$ROOT_DIR/dist/bexplorer-linux-$TARGET"
 TARBALL="$ROOT_DIR/dist/bexplorer-$VERSION-linux-$TARGET.tar.gz"
 DEBROOT="$ROOT_DIR/dist/bexplorer-deb"
+RPMBUILD="$ROOT_DIR/dist/rpmbuild"
 
 case "$TARGET" in
-  x86_64-*) DEB_ARCH=amd64 ;;
-  aarch64-*) DEB_ARCH=arm64 ;;
-  i686-* | i586-*) DEB_ARCH=i386 ;;
-  *) DEB_ARCH= ;;
+  x86_64-*) DEB_ARCH=amd64; RPM_ARCH=x86_64 ;;
+  aarch64-*) DEB_ARCH=arm64; RPM_ARCH=aarch64 ;;
+  i686-* | i586-*) DEB_ARCH=i386; RPM_ARCH=i686 ;;
+  *) DEB_ARCH=; RPM_ARCH= ;;
 esac
 
 DEB="$ROOT_DIR/dist/bexplorer_${VERSION}_${DEB_ARCH:-unsupported}.deb"
+RPM="$ROOT_DIR/dist/bexplorer-${VERSION}-1.${RPM_ARCH:-unsupported}.rpm"
 
 cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release --target "$TARGET"
 
-rm -rf "$APPDIR" "$DEBROOT"
+rm -rf "$APPDIR" "$DEBROOT" "$RPMBUILD"
 mkdir -p \
   "$APPDIR/usr/bin" \
   "$APPDIR/usr/share/applications" \
@@ -54,6 +56,107 @@ tar -C "$APPDIR" -czf "$TARBALL" .
 printf 'Created %s\n' "$TARBALL"
 sha256sum "$TARBALL" > "$TARBALL.sha256.txt"
 printf 'Created %s\n' "$TARBALL.sha256.txt"
+
+if ! command -v rpmbuild >/dev/null 2>&1; then
+  printf 'Skipping .rpm: rpmbuild is not installed\n'
+elif [ -z "$RPM_ARCH" ]; then
+  printf 'Skipping .rpm: unsupported target architecture %s\n' "$TARGET"
+else
+  mkdir -p \
+    "$RPMBUILD/BUILD" \
+    "$RPMBUILD/BUILDROOT" \
+    "$RPMBUILD/RPMS" \
+    "$RPMBUILD/SOURCES/bexplorer-$VERSION" \
+    "$RPMBUILD/SPECS" \
+    "$RPMBUILD/SRPMS"
+  cp -a "$APPDIR/usr" "$RPMBUILD/SOURCES/bexplorer-$VERSION/usr"
+  tar -C "$RPMBUILD/SOURCES" \
+    -czf "$RPMBUILD/SOURCES/bexplorer-$VERSION.tar.gz" \
+    "bexplorer-$VERSION"
+  rm -rf "$RPMBUILD/SOURCES/bexplorer-$VERSION"
+
+  cat > "$RPMBUILD/SPECS/bexplorer.spec" <<EOF
+Name:           bexplorer
+Version:        $VERSION
+Release:        1
+Summary:        Native Rust file explorer
+License:        MIT
+Vendor:         BExplorer Project
+Source0:        %{name}-%{version}.tar.gz
+BuildArch:      $RPM_ARCH
+
+Requires:       hicolor-icon-theme
+Requires:       polkit
+Requires:       shared-mime-info
+Requires:       udisks2
+Requires:       xdg-desktop-portal
+Requires:       xdg-utils
+Recommends:     desktop-file-utils
+Recommends:     gvfs-fuse
+
+%description
+BExplorer is a native Rust desktop file explorer with tabs, split-pane
+workflows, archive handling, previews, and Linux desktop integration.
+
+%prep
+%setup -q
+
+%build
+
+%install
+mkdir -p %{buildroot}
+cp -a usr %{buildroot}/
+
+%post
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || :
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || :
+fi
+
+%postun
+if command -v update-desktop-database >/dev/null 2>&1; then
+  update-desktop-database -q /usr/share/applications || :
+fi
+if command -v gtk-update-icon-cache >/dev/null 2>&1; then
+  gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || :
+fi
+
+%files
+%{_bindir}/bexplorer
+%{_datadir}/applications/bexplorer.desktop
+%{_datadir}/icons/hicolor/*/apps/bexplorer.png
+%{_datadir}/metainfo/io.github.BryamContreras.BExplorer.metainfo.xml
+%{_datadir}/pixmaps/bexplorer.png
+%{_datadir}/polkit-1/actions/io.github.BryamContreras.BExplorer.policy
+%doc %{_datadir}/doc/bexplorer/README.md
+%doc %{_datadir}/doc/bexplorer/THIRD_PARTY_NOTICES.md
+%doc %{_datadir}/doc/bexplorer/License-7Zip.txt
+%doc %{_datadir}/doc/bexplorer/copying-7Zip.txt
+%doc %{_datadir}/doc/bexplorer/unRarLicense.txt
+%license %{_datadir}/doc/bexplorer/LICENSE
+
+%changelog
+* Fri Jul 24 2026 BExplorer Project <noreply@github.com> - $VERSION-1
+- Automated BExplorer package.
+EOF
+
+  rpmbuild --define "_topdir $RPMBUILD" \
+    -bb "$RPMBUILD/SPECS/bexplorer.spec"
+  RPM_CREATED=$(find "$RPMBUILD/RPMS" -type f \
+    -name "bexplorer-$VERSION-1.$RPM_ARCH.rpm" -print | head -n 1)
+  [ -n "$RPM_CREATED" ] || {
+    printf 'rpmbuild completed but the package was not found\n' >&2
+    exit 1
+  }
+  cp "$RPM_CREATED" "$RPM"
+  printf 'Created %s\n' "$RPM"
+  EXPECTED_VERSION=$VERSION EXPECTED_ARCH=$RPM_ARCH \
+    sh "$ROOT_DIR/scripts/linux/validate-rpm.sh" "$RPM"
+  sha256sum "$RPM" > "$RPM.sha256.txt"
+  printf 'Created %s\n' "$RPM.sha256.txt"
+fi
 
 if ! command -v dpkg-deb >/dev/null 2>&1; then
   printf 'Skipping .deb: dpkg-deb is not installed\n'
@@ -92,7 +195,7 @@ Version: $VERSION
 Section: utils
 Priority: optional
 Architecture: $DEB_ARCH
-Maintainer: Bryam Contreras <noreply@github.com>
+Maintainer: BExplorer Project <noreply@github.com>
 Depends: $LIBC_DEPENDENCY,
  libgcc-s1,
  libstdc++6,

@@ -404,8 +404,12 @@ impl BExplorerIced {
     }
 
     pub(super) fn sidebar_directory_icon_handle(&self, path: &Path) -> Option<iced_image::Handle> {
-        let cache_key = sidebar_native_icon_cache_key(path, &self.sidebar_storage_entries);
-        match self.native_icon_cache.get(&cache_key) {
+        let cache_key = sidebar_native_icon_cache_key(
+            path,
+            &self.sidebar_storage_entries,
+            thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+        );
+        match self.small_native_icon_cache.get(&cache_key) {
             Some(IcedImageState::Ready(handle)) => Some(handle.clone()),
             _ => None,
         }

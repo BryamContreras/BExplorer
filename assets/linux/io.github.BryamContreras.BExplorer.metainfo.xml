@@ -5,8 +5,8 @@
   <project_license>MIT</project_license>
   <name>BExplorer</name>
   <summary>Native Rust file explorer</summary>
-  <developer id="io.github.bryamcontreras">
-    <name>Bryam Contreras</name>
+  <developer id="io.github.bexplorer-project">
+    <name>BExplorer Project</name>
   </developer>
   <description>
     <p>
@@ -23,10 +23,18 @@
     <category>Utility</category>
     <category>FileManager</category>
   </categories>
-  <url type="homepage">https://github.com/BryamContreras/BExplorer</url>
-  <url type="bugtracker">https://github.com/BryamContreras/BExplorer/issues</url>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.3" date="2026-07-24">
+      <description>
+        <p>Compact-image, rename, scrolling, and release-packaging update.</p>
+        <ul>
+          <li>Fixed Control-key scrolling and filename-extension editing in every file view.</li>
+          <li>Added dedicated compact thumbnails and native icons for small views and the sidebar.</li>
+          <li>Added automated Windows Setup, Debian, and RPM package generation.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.2" date="2026-07-15">
       <description>
         <p>Linux desktop integration and native properties update.</p>

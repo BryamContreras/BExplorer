@@ -1518,15 +1518,25 @@ impl BExplorerIced {
                     .unwrap_or(IcedImageState::Missing);
 
                 match result.key {
-                    IcedImageKey::Thumbnail(path) => {
-                        self.thumbnail_cache.insert(path, state);
-                    }
+                    IcedImageKey::Thumbnail { path, variant } => match variant {
+                        IcedImageVariant::Standard => {
+                            self.thumbnail_cache.insert(path, state);
+                        }
+                        IcedImageVariant::Small => {
+                            self.small_thumbnail_cache.insert(path, state);
+                        }
+                    },
                     IcedImageKey::Preview(path) => {
                         self.preview_cache.insert(path, state);
                     }
-                    IcedImageKey::NativeIcon(path) => {
-                        self.native_icon_cache.insert(path, state);
-                    }
+                    IcedImageKey::NativeIcon { path, variant } => match variant {
+                        IcedImageVariant::Standard => {
+                            self.native_icon_cache.insert(path, state);
+                        }
+                        IcedImageVariant::Small => {
+                            self.small_native_icon_cache.insert(path, state);
+                        }
+                    },
                 }
                 Task::none()
             }
@@ -2017,6 +2027,9 @@ impl BExplorerIced {
             }
             Message::RunContextCommand(command) => self.run_context_command(command),
             Message::KeyboardModifiersChanged(modifiers) => {
+                if self.current_modifiers.control() != modifiers.control() {
+                    self.view_scroll_accumulator = 0.0;
+                }
                 self.current_modifiers = modifiers;
                 Task::none()
             }
@@ -2237,20 +2250,21 @@ impl BExplorerIced {
                                 pane: dialog.pane,
                                 action: operations::ElevatedFileAction::Rename {
                                     path: dialog.path.clone(),
-                                    name: rename_target_name(
-                                        &dialog.value,
-                                        dialog.extension.as_deref(),
-                                    ),
+                                    name: rename_target_name(&dialog.value),
                                 },
                                 error,
                             });
                             return Task::none();
                         }
-                        dialog.editor.perform(text_editor::Action::SelectAll);
-                        self.rename_dialog = Some(dialog.clone());
+                        let pane = dialog.pane;
+                        let select_end = dialog.select_end;
+                        select_rename_editor_prefix(&mut dialog.editor, select_end);
+                        // Moving the dialog preserves the TextEditor cursor
+                        // and selection. Cloning Content would keep only text.
+                        self.rename_dialog = Some(dialog);
                         Task::batch([
-                            self.report_error(dialog.pane, error),
-                            focus_inline_rename_task(dialog.select_end),
+                            self.report_error(pane, error),
+                            focus_inline_rename_task(select_end),
                         ])
                     }
                 }

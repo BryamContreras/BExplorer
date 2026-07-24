@@ -239,6 +239,13 @@ pub(in crate::iced_ui) fn visual_view_metrics(mode: ViewMode) -> VisualViewMetri
     }
 }
 
+pub(in crate::iced_ui) fn uses_small_entry_images(mode: ViewMode) -> bool {
+    matches!(
+        mode,
+        ViewMode::Details | ViewMode::SmallIcons | ViewMode::List
+    )
+}
+
 pub(in crate::iced_ui) fn visual_min_cell_width(mode: ViewMode) -> f32 {
     match mode {
         ViewMode::Tiles => 220.0,

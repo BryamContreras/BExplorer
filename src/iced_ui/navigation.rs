@@ -225,6 +225,11 @@ impl BExplorerIced {
 
     pub(in crate::iced_ui) fn queue_visible_images(&mut self, pane: PaneId) -> Task<Message> {
         let limit = self.pane(pane).render_limit;
+        let variant = if uses_small_entry_images(self.effective_view_mode(pane)) {
+            IcedImageVariant::Small
+        } else {
+            IcedImageVariant::Standard
+        };
 
         let entries: Vec<_> = self
             .filtered_entries(pane)
@@ -235,7 +240,7 @@ impl BExplorerIced {
         let mut tasks = Vec::new();
 
         for entry in entries {
-            tasks.extend(self.queue_entry_images(&entry));
+            tasks.extend(self.queue_entry_images_for_variant(&entry, variant));
         }
 
         Task::batch(tasks)
@@ -321,12 +326,24 @@ impl BExplorerIced {
         &mut self,
         entry: &FileEntry,
     ) -> Vec<Task<Message>> {
+        self.queue_entry_images_for_variant(entry, IcedImageVariant::Standard)
+    }
+
+    fn queue_entry_images_for_variant(
+        &mut self,
+        entry: &FileEntry,
+        variant: IcedImageVariant,
+    ) -> Vec<Task<Message>> {
         let mut tasks = Vec::new();
+        let image_size = match variant {
+            IcedImageVariant::Standard => thumbnail_data::NATIVE_ICON_SIZE,
+            IcedImageVariant::Small => thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+        };
 
         if thumbnail_data::is_thumbnail_candidate(entry) {
             if explorer::is_portable_path(&entry.path) {
-                if !self.thumbnail_cache.contains_key(&entry.path) {
-                    self.thumbnail_cache
+                if !self.thumbnail_cache_for(variant).contains_key(&entry.path) {
+                    self.thumbnail_cache_for_mut(variant)
                         .insert(entry.path.clone(), IcedImageState::Loading);
                     let max_bytes = self.config.preview_limit_bytes.max(512 * 1024);
                     let allow_default_resource = entry
@@ -336,6 +353,8 @@ impl BExplorerIced {
                         path: entry.path.clone(),
                         max_bytes,
                         allow_default_resource,
+                        size: image_size,
+                        variant,
                     }));
                 }
             } else if thumbnail_data::is_pdf_preview_candidate(entry)
@@ -343,35 +362,76 @@ impl BExplorerIced {
                     .size
                     .is_some_and(|size| size <= self.config.preview_limit_bytes as u64)
             {
-                if !self.thumbnail_cache.contains_key(&entry.path) {
-                    self.thumbnail_cache
+                if !self.thumbnail_cache_for(variant).contains_key(&entry.path) {
+                    self.thumbnail_cache_for_mut(variant)
                         .insert(entry.path.clone(), IcedImageState::Loading);
                     tasks.push(load_iced_image_task(IcedImageJob::Thumbnail {
                         path: entry.path.clone(),
                         max_bytes: self.config.preview_limit_bytes,
                         allow_default_resource: false,
+                        size: image_size,
+                        variant,
                     }));
                 }
             } else {
-                self.thumbnail_cache
+                self.thumbnail_cache_for_mut(variant)
                     .insert(entry.path.clone(), IcedImageState::Missing);
             }
         }
 
-        if let Some((cache_key, path, is_directory)) = native_icon_request_for_entry(entry)
-            && !self.native_icon_cache.contains_key(&cache_key)
+        if let Some((cache_key, path, is_directory)) =
+            native_icon_request_for_entry(entry, image_size)
+            && !self.native_icon_cache_for(variant).contains_key(&cache_key)
         {
-            self.native_icon_cache
+            self.native_icon_cache_for_mut(variant)
                 .insert(cache_key.clone(), IcedImageState::Loading);
             tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
                 cache_key,
                 path,
                 is_directory,
-                size: thumbnail_data::NATIVE_ICON_SIZE,
+                size: image_size,
+                variant,
             }));
         }
 
         tasks
+    }
+
+    fn thumbnail_cache_for(&self, variant: IcedImageVariant) -> &HashMap<PathBuf, IcedImageState> {
+        match variant {
+            IcedImageVariant::Standard => &self.thumbnail_cache,
+            IcedImageVariant::Small => &self.small_thumbnail_cache,
+        }
+    }
+
+    fn thumbnail_cache_for_mut(
+        &mut self,
+        variant: IcedImageVariant,
+    ) -> &mut HashMap<PathBuf, IcedImageState> {
+        match variant {
+            IcedImageVariant::Standard => &mut self.thumbnail_cache,
+            IcedImageVariant::Small => &mut self.small_thumbnail_cache,
+        }
+    }
+
+    fn native_icon_cache_for(
+        &self,
+        variant: IcedImageVariant,
+    ) -> &HashMap<PathBuf, IcedImageState> {
+        match variant {
+            IcedImageVariant::Standard => &self.native_icon_cache,
+            IcedImageVariant::Small => &self.small_native_icon_cache,
+        }
+    }
+
+    fn native_icon_cache_for_mut(
+        &mut self,
+        variant: IcedImageVariant,
+    ) -> &mut HashMap<PathBuf, IcedImageState> {
+        match variant {
+            IcedImageVariant::Standard => &mut self.native_icon_cache,
+            IcedImageVariant::Small => &mut self.small_native_icon_cache,
+        }
     }
 
     pub(in crate::iced_ui) fn queue_sidebar_icons(&mut self) -> Task<Message> {
@@ -412,35 +472,39 @@ impl BExplorerIced {
         let cache_key = thumbnail_data::native_path_icon_cache_key(
             path,
             true,
-            thumbnail_data::NATIVE_ICON_SIZE,
+            thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
         );
-        if self.native_icon_cache.contains_key(&cache_key) {
+        if self.small_native_icon_cache.contains_key(&cache_key) {
             return Task::none();
         }
-        self.native_icon_cache
+        self.small_native_icon_cache
             .insert(cache_key.clone(), IcedImageState::Loading);
         load_iced_image_task(IcedImageJob::NativeIcon {
             cache_key,
             path: path.to_path_buf(),
             is_directory: true,
-            size: thumbnail_data::NATIVE_ICON_SIZE,
+            size: thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+            variant: IcedImageVariant::Small,
         })
     }
 
     fn queue_sidebar_storage_icon(&mut self, entry: &FileEntry) -> Task<Message> {
-        let Some((cache_key, path, is_directory)) = native_icon_request_for_entry(entry) else {
+        let Some((cache_key, path, is_directory)) =
+            native_icon_request_for_entry(entry, thumbnail_data::SMALL_ENTRY_IMAGE_SIZE)
+        else {
             return Task::none();
         };
-        if self.native_icon_cache.contains_key(&cache_key) {
+        if self.small_native_icon_cache.contains_key(&cache_key) {
             return Task::none();
         }
-        self.native_icon_cache
+        self.small_native_icon_cache
             .insert(cache_key.clone(), IcedImageState::Loading);
         load_iced_image_task(IcedImageJob::NativeIcon {
             cache_key,
             path,
             is_directory,
-            size: thumbnail_data::NATIVE_ICON_SIZE,
+            size: thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+            variant: IcedImageVariant::Small,
         })
     }
 

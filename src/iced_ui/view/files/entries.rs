@@ -11,7 +11,7 @@ impl BExplorerIced {
         width: f32,
         height: f32,
     ) -> Element<'static, Message> {
-        if let Some(handle) = self.entry_image_handle(entry).cloned() {
+        if let Some(handle) = self.entry_image_handle_for_size(entry, icon_size).cloned() {
             let opacity = self.entry_presentation_opacity(entry, selected);
             return container(
                 iced_image::Image::new(handle)
@@ -54,7 +54,7 @@ impl BExplorerIced {
         selected: bool,
         size: f32,
     ) -> Element<'static, Message> {
-        if let Some(handle) = self.entry_image_handle(entry).cloned() {
+        if let Some(handle) = self.entry_image_handle_for_size(entry, size).cloned() {
             let opacity = self.entry_presentation_opacity(entry, selected);
             return iced_image::Image::new(handle)
                 .width(Length::Fixed(size))
@@ -82,15 +82,51 @@ impl BExplorerIced {
         &self,
         entry: &FileEntry,
     ) -> Option<&iced_image::Handle> {
+        self.entry_image_handle_for_variant(entry, IcedImageVariant::Standard)
+    }
+
+    fn entry_image_handle_for_size(
+        &self,
+        entry: &FileEntry,
+        size: f32,
+    ) -> Option<&iced_image::Handle> {
+        let variant = if size <= 32.0 {
+            IcedImageVariant::Small
+        } else {
+            IcedImageVariant::Standard
+        };
+        self.entry_image_handle_for_variant(entry, variant)
+    }
+
+    fn entry_image_handle_for_variant(
+        &self,
+        entry: &FileEntry,
+        variant: IcedImageVariant,
+    ) -> Option<&iced_image::Handle> {
+        let thumbnail_cache = match variant {
+            IcedImageVariant::Standard => &self.thumbnail_cache,
+            IcedImageVariant::Small => &self.small_thumbnail_cache,
+        };
         if thumbnail_data::is_thumbnail_candidate(entry)
-            && let Some(IcedImageState::Ready(handle)) = self.thumbnail_cache.get(&entry.path)
+            && let Some(IcedImageState::Ready(handle)) = thumbnail_cache.get(&entry.path)
         {
             return Some(handle);
         }
 
-        let (cache_key, _, _) = native_icon_request_for_entry(entry)?;
-        match self.native_icon_cache.get(&cache_key) {
+        let source_size = match variant {
+            IcedImageVariant::Standard => thumbnail_data::NATIVE_ICON_SIZE,
+            IcedImageVariant::Small => thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+        };
+        let (cache_key, _, _) = native_icon_request_for_entry(entry, source_size)?;
+        let native_cache = match variant {
+            IcedImageVariant::Standard => &self.native_icon_cache,
+            IcedImageVariant::Small => &self.small_native_icon_cache,
+        };
+        match native_cache.get(&cache_key) {
             Some(IcedImageState::Ready(handle)) => Some(handle),
+            _ if variant == IcedImageVariant::Small => {
+                self.entry_image_handle_for_variant(entry, IcedImageVariant::Standard)
+            }
             _ => None,
         }
     }
@@ -298,7 +334,6 @@ impl BExplorerIced {
                 self.detail_file_entry_icon(entry, palette, selected, DETAIL_ICON_SIZE),
                 inline_rename_editor(
                     dialog.value.as_str(),
-                    dialog.extension.as_deref(),
                     widths.name - DETAIL_ICON_SIZE - 6.0,
                     table_font_size,
                     palette,

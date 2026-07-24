@@ -1,0 +1,141 @@
+name: Build installers
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: installers-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  windows-setup:
+    name: Windows Setup
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust 1.92
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup default 1.92.0
+
+      - name: Ensure Inno Setup is available
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 7\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 7\ISCC.exe"
+          )
+          if (-not ($candidates | Where-Object { Test-Path -LiteralPath $_ })) {
+            choco install innosetup --no-progress --yes
+          }
+
+      - name: Build Windows Setup
+        shell: pwsh
+        run: ./scripts/windows/package.ps1
+
+      - name: Verify Windows artifacts
+        shell: pwsh
+        run: |
+          $setups = @(Get-ChildItem dist/BExplorer-*-Setup-x64.exe)
+          $checksums = @(Get-ChildItem dist/BExplorer-*-Setup-x64.exe.sha256.txt)
+          if ($setups.Count -ne 1 -or $checksums.Count -ne 1) {
+            throw "Expected one Windows Setup and one checksum"
+          }
+
+      - name: Upload Windows Setup
+        uses: actions/upload-artifact@v7
+        with:
+          name: bexplorer-windows-setup-${{ github.sha }}
+          path: |
+            dist/BExplorer-*-Setup-x64.exe
+            dist/BExplorer-*-Setup-x64.exe.sha256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  linux-packages:
+    name: Linux DEB and RPM
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust 1.92
+        run: |
+          rustup toolchain install 1.92.0 --profile minimal
+          rustup default 1.92.0
+
+      - name: Install Linux build and packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            libdbus-1-dev \
+            libegl1-mesa-dev \
+            libfontconfig1-dev \
+            libgl1-mesa-dev \
+            libudev-dev \
+            libwayland-dev \
+            libx11-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxcb-render0-dev \
+            libxcb-shape0-dev \
+            libxcb-xfixes0-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            pkg-config \
+            rpm
+
+      - name: Build Linux packages
+        run: sh scripts/linux/package.sh
+
+      - name: Verify Linux artifacts
+        run: |
+          set -eu
+          test "$(find dist -maxdepth 1 -type f -name 'bexplorer_*.deb' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name 'bexplorer-*.rpm' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name 'bexplorer_*.deb.sha256.txt' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name 'bexplorer-*.rpm.sha256.txt' | wc -l)" -eq 1
+
+      - name: Upload Debian package
+        uses: actions/upload-artifact@v7
+        with:
+          name: bexplorer-deb-${{ github.sha }}
+          path: |
+            dist/bexplorer_*.deb
+            dist/bexplorer_*.deb.sha256.txt
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload RPM package
+        uses: actions/upload-artifact@v7
+        with:
+          name: bexplorer-rpm-${{ github.sha }}
+          path: |
+            dist/bexplorer-*.rpm
+            dist/bexplorer-*.rpm.sha256.txt
+          if-no-files-found: error
+          retention-days: 30

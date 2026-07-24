@@ -2,6 +2,20 @@
 
 All notable user-facing changes to BExplorer are documented here.
 
+## 1.0.3 - 2026-07-24
+
+- Fixed the file view jumping to the top when Control was pressed while
+  preserving Control+wheel view-size changes.
+- Made rename editing select only the filename stem initially while keeping the
+  extension editable in Details, Tiles, and every icon view.
+- Added dedicated 48 px thumbnail and native-icon sources for compact views and
+  the sidebar; Tiles continue using the large source.
+- Added automated GitHub Actions packaging for the Windows Setup executable,
+  Debian package, and RPM package.
+- Refined Windows installer metadata and shortcuts: language is selected during
+  setup, the Start Menu shortcut is created by default, the Desktop shortcut is
+  optional, and the uninstaller is displayed simply as BExplorer.
+
 ## 1.0.2 - 2026-07-15
 
 - Fixed Debian/Ubuntu installation failures by keeping optional clipboard,

@@ -620,6 +620,19 @@ pub(in crate::iced_ui) fn pane_scroll_id(pane: PaneId) -> Id {
     })
 }
 
+pub(in crate::iced_ui) fn pane_ctrl_wheel_overlay(
+    pane: PaneId,
+    capture_wheel: bool,
+) -> Element<'static, Message> {
+    let area = mouse_area(Space::new().width(Length::Fill).height(Length::Fill));
+    if capture_wheel {
+        area.on_scroll(move |delta| Message::PaneMouseWheel(pane, delta))
+            .into()
+    } else {
+        area.into()
+    }
+}
+
 pub(in crate::iced_ui) fn scroll_pane_to_top_task(pane: PaneId) -> Task<Message> {
     iced::widget::operation::snap_to(
         pane_scroll_id(pane),
@@ -629,20 +642,12 @@ pub(in crate::iced_ui) fn scroll_pane_to_top_task(pane: PaneId) -> Task<Message>
 
 pub(in crate::iced_ui) fn inline_rename_editor<'a>(
     value: &'a str,
-    extension: Option<&'a str>,
     width: f32,
     font_size: f32,
     palette: Palette,
 ) -> Element<'a, Message> {
-    // The editable control grows with its value, up to the available name
-    // column. This keeps a preserved extension directly after a short name
-    // instead of pinning it to the far edge of the column.
-    let extension_width = extension
-        .filter(|value| !value.is_empty())
-        .map(|value| ((value.chars().count() + 1) as f32 * font_size * 0.58).ceil())
-        .unwrap_or(0.0);
     let light_surface = palette.table_bg.r + palette.table_bg.g + palette.table_bg.b > 2.1;
-    let maximum_input_width = (width - extension_width).max(28.0);
+    let maximum_input_width = width.max(28.0);
     let desired_input_width = (value.chars().count() as f32 * font_size * 0.58 + 14.0).ceil();
     let input_width =
         desired_input_width.clamp(44.0_f32.min(maximum_input_width), maximum_input_width);
@@ -677,19 +682,10 @@ pub(in crate::iced_ui) fn inline_rename_editor<'a>(
             selection: hover_tint(palette),
         });
 
-    let mut editor = row![input]
+    let editor = row![input]
         .spacing(0)
         .align_y(Alignment::Center)
         .width(Length::Fixed(width.max(64.0)));
-
-    if let Some(extension) = extension.filter(|value| !value.is_empty()) {
-        editor = editor.push(
-            text(format!(".{extension}"))
-                .size(font_size)
-                .color(palette.accent_text)
-                .wrapping(iced::widget::text::Wrapping::None),
-        );
-    }
 
     container(editor)
         .width(Length::Fixed(width.max(64.0)))
@@ -700,18 +696,13 @@ pub(in crate::iced_ui) fn inline_rename_editor<'a>(
 
 pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
     content: &'a text_editor::Content,
-    extension: Option<&'a str>,
     width: f32,
     height: f32,
     font_size: f32,
     palette: Palette,
 ) -> Element<'a, Message> {
-    let extension_width = extension
-        .filter(|value| !value.is_empty())
-        .map(|value| ((value.chars().count() + 1) as f32 * font_size * 0.58).ceil())
-        .unwrap_or(0.0);
     let light_surface = palette.table_bg.r + palette.table_bg.g + palette.table_bg.b > 2.1;
-    let input_width = (width - extension_width).max(28.0);
+    let input_width = width.max(28.0);
     let rename_border = if light_surface {
         Color::from_rgb8(176, 181, 185)
     } else {
@@ -753,19 +744,10 @@ pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
             selection: hover_tint(palette),
         });
 
-    let mut editor = row![input]
+    let editor = row![input]
         .spacing(0)
         .align_y(Alignment::Start)
         .width(Length::Fixed(width.max(64.0)));
-
-    if let Some(extension) = extension.filter(|value| !value.is_empty()) {
-        editor = editor.push(
-            text(format!(".{extension}"))
-                .size(font_size)
-                .color(palette.accent_text)
-                .wrapping(iced::widget::text::Wrapping::None),
-        );
-    }
 
     container(editor)
         .width(Length::Fixed(width.max(64.0)))
@@ -773,60 +755,56 @@ pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
         .into()
 }
 
-pub(in crate::iced_ui) fn rename_preserved_extension(entry: &FileEntry) -> Option<String> {
-    if entry.kind.is_container() {
-        return None;
-    }
+pub(in crate::iced_ui) fn rename_edit_value(entry: &FileEntry) -> String {
     entry
-        .path
-        .extension()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-}
-
-pub(in crate::iced_ui) fn rename_edit_value(entry: &FileEntry, extension: Option<&str>) -> String {
-    let file_name = entry
         .path
         .file_name()
         .and_then(|value| value.to_str())
-        .unwrap_or(entry.name.as_str());
-
-    if let Some(extension) = extension.filter(|value| !value.is_empty()) {
-        let suffix = format!(".{extension}");
-        if let Some(stem) = file_name.strip_suffix(&suffix) {
-            return stem.to_string();
-        }
-    }
-
-    file_name.to_string()
+        .unwrap_or(entry.name.as_str())
+        .to_string()
 }
 
-pub(in crate::iced_ui) fn rename_target_name(value: &str, extension: Option<&str>) -> String {
-    let base = value.trim();
-    if base.is_empty() {
-        return String::new();
-    }
+pub(in crate::iced_ui) fn rename_selection_end(entry: &FileEntry, value: &str) -> usize {
+    let selected = if entry.kind.is_container() {
+        value
+    } else if let Some(extension) = entry
+        .path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+    {
+        value
+            .strip_suffix(&format!(".{extension}"))
+            .unwrap_or(value)
+    } else {
+        value
+    };
 
-    if let Some(extension) = extension.filter(|value| !value.is_empty()) {
-        let suffix = format!(".{extension}");
-        if base.ends_with(&suffix) {
-            return base.to_string();
-        }
-        return format!("{base}{suffix}");
-    }
-
-    base.to_string()
+    iced::widget::text_input::Value::new(selected).len()
 }
 
-pub(in crate::iced_ui) fn focus_inline_rename_task(_select_end: usize) -> Task<Message> {
+pub(in crate::iced_ui) fn select_rename_editor_prefix(
+    editor: &mut text_editor::Content,
+    select_end: usize,
+) {
+    use iced::widget::text_editor::{Action, Motion};
+
+    editor.perform(Action::Move(Motion::DocumentStart));
+    for _ in 0..select_end {
+        editor.perform(Action::Select(Motion::Right));
+    }
+}
+
+pub(in crate::iced_ui) fn rename_target_name(value: &str) -> String {
+    value.trim().to_string()
+}
+
+pub(in crate::iced_ui) fn focus_inline_rename_task(select_end: usize) -> Task<Message> {
     let id = inline_rename_input_id();
-    iced::widget::operation::focus(id.clone()).chain(
-        // Ask the widget itself to select its complete editable value. Using
-        // a calculated range left some UTF-8 names and clipped editors with
-        // only a partial selection after focus was restored.
-        iced::widget::operation::select_all(id),
-    )
+    // TextInput uses grapheme indices. Wrapped TextEditor instances already
+    // carry the same prefix selection in their Content before being mounted.
+    iced::widget::operation::focus(id.clone())
+        .chain(iced::widget::operation::select_range(id, select_end, 0))
 }
 
 #[cfg(test)]

@@ -1027,7 +1027,7 @@ impl BExplorerIced {
         self.suppress_open_after_rename_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(350));
 
-        let target_name = rename_target_name(&dialog.value, dialog.extension.as_deref());
+        let target_name = rename_target_name(&dialog.value);
         if target_name.is_empty() {
             self.pane_mut(dialog.pane).status = "Name cannot be empty".into();
             return Task::none();
@@ -1098,17 +1098,15 @@ impl BExplorerIced {
             self.pane_mut(pane).status = "Rename is not available for virtual locations yet".into();
             return Task::none();
         }
-        let extension = rename_preserved_extension(&entry);
-        let edit_value = rename_edit_value(&entry, extension.as_deref());
-        let select_end = edit_value.chars().count();
+        let edit_value = rename_edit_value(&entry);
+        let select_end = rename_selection_end(&entry, &edit_value);
         let mut editor = text_editor::Content::with_text(&edit_value);
-        editor.perform(text_editor::Action::SelectAll);
+        select_rename_editor_prefix(&mut editor, select_end);
         let dialog = RenameState {
             pane,
             path: entry.path.clone(),
             value: edit_value,
             editor,
-            extension,
             select_end,
         };
         if let Some(index) = self

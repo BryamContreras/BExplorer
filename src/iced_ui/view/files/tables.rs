@@ -258,46 +258,41 @@ impl BExplorerIced {
             ));
         }
 
-        let scroll_content: Element<'_, Message> = if self.current_modifiers.control() {
-            mouse_area(rows)
-                .on_scroll(move |delta| Message::PaneMouseWheel(pane, delta))
-                .into()
-        } else {
-            rows.into()
-        };
-        let content: Element<'_, Message> = if self.current_modifiers.control() {
-            container(scroll_content)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .clip(true)
-                .into()
-        } else {
-            scrollable(scroll_content)
-                .id(pane_scroll_id(pane))
-                .direction(scrollable::Direction::Both {
-                    vertical: scrollable::Scrollbar::default(),
-                    horizontal: scrollable::Scrollbar::default(),
-                })
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .on_scroll(move |viewport| {
-                    Message::PaneScrolled(
-                        pane,
-                        viewport.relative_offset().y,
-                        viewport.absolute_offset().y,
-                        viewport.content_bounds().height > viewport.bounds().height,
-                    )
-                })
-                .style(move |theme, status| {
-                    explorer_scrollable_style(
-                        palette,
-                        theme,
-                        status,
-                        self.pane(pane).scrollbar_reveal_progress,
-                    )
-                })
-                .into()
-        };
+        // The Scrollable must remain in the widget tree while Ctrl is held so
+        // its offset survives modifier-only updates. The overlay intercepts
+        // Ctrl+wheel without changing the tree that owns the scroll state.
+        let scroller: Element<'_, Message> = scrollable(rows)
+            .id(pane_scroll_id(pane))
+            .direction(scrollable::Direction::Both {
+                vertical: scrollable::Scrollbar::default(),
+                horizontal: scrollable::Scrollbar::default(),
+            })
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .on_scroll(move |viewport| {
+                Message::PaneScrolled(
+                    pane,
+                    viewport.relative_offset().y,
+                    viewport.absolute_offset().y,
+                    viewport.content_bounds().height > viewport.bounds().height,
+                )
+            })
+            .style(move |theme, status| {
+                explorer_scrollable_style(
+                    palette,
+                    theme,
+                    status,
+                    self.pane(pane).scrollbar_reveal_progress,
+                )
+            })
+            .into();
+        let content: Element<'_, Message> = stack(vec![
+            scroller,
+            pane_ctrl_wheel_overlay(pane, self.current_modifiers.control()),
+        ])
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into();
         let base: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fill)

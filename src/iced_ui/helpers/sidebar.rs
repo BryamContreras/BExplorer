@@ -216,14 +216,13 @@ pub(in crate::iced_ui) fn sidebar_storage_items(
 pub(in crate::iced_ui) fn sidebar_native_icon_cache_key(
     path: &Path,
     storage_entries: &[FileEntry],
+    size: u32,
 ) -> PathBuf {
     storage_entries
         .iter()
         .find(|entry| entry.path == path)
-        .map(thumbnail_data::native_entry_icon_cache_key)
-        .unwrap_or_else(|| {
-            thumbnail_data::native_path_icon_cache_key(path, true, thumbnail_data::NATIVE_ICON_SIZE)
-        })
+        .map(|entry| thumbnail_data::native_entry_icon_cache_key_at_size(entry, size))
+        .unwrap_or_else(|| thumbnail_data::native_path_icon_cache_key(path, true, size))
 }
 
 pub(in crate::iced_ui) fn sidebar_portable_items(

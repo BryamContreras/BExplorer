@@ -4,7 +4,6 @@
  "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
 <policyconfig>
   <vendor>BExplorer</vendor>
-  <vendor_url>https://github.com/BryamContreras/BExplorer</vendor_url>
   <icon_name>bexplorer</icon_name>
 
   <action id="io.github.BryamContreras.BExplorer.elevated-helper">

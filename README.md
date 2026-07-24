@@ -2,7 +2,7 @@
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Version](https://img.shields.io/badge/version-1.0.2-brightgreen)
+![Version](https://img.shields.io/badge/version-1.0.3-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -20,7 +20,7 @@ platform modules.
 
 ## Status
 
-BExplorer 1.0.2 is the current stable Windows and Linux version. Its desktop
+BExplorer 1.0.3 is the current stable Windows and Linux version. Its desktop
 interface, file-operation engine, archive workflows, platform integrations,
 configuration format, and session format form the supported 1.x baseline.
 Development now prioritizes compatibility fixes, reliability, and focused
@@ -426,7 +426,9 @@ portable ZIP, a bilingual Inno Setup installer, and SHA-256 checksums under
 - creates its Start Menu entry by default;
 - offers an optional Desktop shortcut;
 - offers adding BExplorer to the system `PATH`, enabled by default;
-- removes only its own `PATH` entry during uninstall.
+- removes only its own `PATH` entry during uninstall;
+- identifies the installed application and uninstaller simply as BExplorer,
+  without adding the release version to the displayed name.
 
 Use `-SkipInstaller` to create only the portable ZIP. A manual portable
 installation can copy:
@@ -461,12 +463,14 @@ Linux packages can be built with:
 scripts/linux/package.sh
 ```
 
-The script creates a versioned tarball and SHA-256 checksum under `dist/` and,
-when `dpkg-deb` is installed, a `.deb` package and checksum. It also validates
-the package metadata, architecture, installed executable, and dependency
-classification through `scripts/linux/validate-deb.sh`. The package
-contains the desktop entry, metainfo, Polkit policy, hicolor icons from 16 to
-512 pixels, license, third-party notices, and the original 7-Zip license texts.
+The script creates a versioned tarball and SHA-256 checksum under `dist/`.
+When the corresponding packaging tools are installed, it also creates `.deb`
+and `.rpm` packages with checksums. Their metadata, architecture, installed
+executable, and dependency classification are checked through
+`scripts/linux/validate-deb.sh` and `scripts/linux/validate-rpm.sh`. Both
+packages contain the desktop entry, metainfo, Polkit policy, hicolor icons from
+16 to 512 pixels, license, third-party notices, and the original 7-Zip license
+texts.
 It installs the executable as `/usr/bin/bexplorer`, registers BExplorer as an
 available `inode/directory` handler, and uses `Exec=bexplorer %f` so a desktop
 invocation navigates to the requested folder. This makes BExplorer selectable
@@ -486,6 +490,10 @@ scripts/linux/install-deb.sh
 ```
 
 Both legacy commands under `tools/` remain as compatibility wrappers.
+
+The `Build installers` GitHub Actions workflow runs for pushes to `master`,
+version tags, and manual dispatches. It publishes the Windows Setup executable,
+Debian package, RPM package, and their SHA-256 checksums as workflow artifacts.
 
 ## Local Data
 

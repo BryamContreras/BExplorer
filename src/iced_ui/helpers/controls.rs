@@ -418,18 +418,21 @@ pub(in crate::iced_ui) fn load_iced_image(job: IcedImageJob) -> IcedImageLoadRes
             path,
             max_bytes,
             allow_default_resource,
+            size,
+            variant,
         } => {
             let image = if explorer::is_portable_path(&path) {
                 thumbnail_data::load_portable_thumbnail_image(
                     &path,
                     max_bytes,
                     allow_default_resource,
+                    size,
                 )
             } else {
-                thumbnail_data::load_thumbnail_image_with_fallback(&path)
+                thumbnail_data::load_thumbnail_image_with_fallback(&path, size)
             };
             IcedImageLoadResult {
-                key: IcedImageKey::Thumbnail(path),
+                key: IcedImageKey::Thumbnail { path, variant },
                 image: image.and_then(iced_rgba_from_native),
             }
         }
@@ -442,10 +445,14 @@ pub(in crate::iced_ui) fn load_iced_image(job: IcedImageJob) -> IcedImageLoadRes
             path,
             is_directory,
             size,
+            variant,
         } => {
             let image = thumbnail_data::load_native_icon_image(&path, is_directory, size);
             IcedImageLoadResult {
-                key: IcedImageKey::NativeIcon(cache_key),
+                key: IcedImageKey::NativeIcon {
+                    path: cache_key,
+                    variant,
+                },
                 image: image.and_then(iced_rgba_from_native),
             }
         }
@@ -467,7 +474,10 @@ pub(in crate::iced_ui) fn load_iced_image(job: IcedImageJob) -> IcedImageLoadRes
             #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             let image = None;
             IcedImageLoadResult {
-                key: IcedImageKey::NativeIcon(cache_key),
+                key: IcedImageKey::NativeIcon {
+                    path: cache_key,
+                    variant: IcedImageVariant::Standard,
+                },
                 image: image.and_then(iced_rgba_from_native),
             }
         }
@@ -515,9 +525,10 @@ pub(in crate::iced_ui) fn iced_rgba_from_native(
 
 pub(in crate::iced_ui) fn native_icon_request_for_entry(
     entry: &FileEntry,
+    size: u32,
 ) -> Option<(PathBuf, PathBuf, bool)> {
     if explorer::is_virtual_path(&entry.path) {
-        return thumbnail_data::virtual_native_icon_request(entry);
+        return thumbnail_data::virtual_native_icon_request(entry, size);
     }
 
     // Linux icon themes infer removable media from mount paths such as
@@ -537,7 +548,7 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
     let icon_lookup_path = entry.path.clone();
 
     Some((
-        thumbnail_data::native_entry_icon_cache_key(entry),
+        thumbnail_data::native_entry_icon_cache_key_at_size(entry, size),
         icon_lookup_path,
         matches!(
             entry.kind,

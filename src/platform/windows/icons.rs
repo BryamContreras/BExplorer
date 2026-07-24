@@ -24,6 +24,16 @@ pub fn native_file_icon(
     use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
     use windows::core::PCWSTR;
 
+    // SHGetFileInfo only exposes the legacy 16 px and 32 px image lists.
+    // Ask the Shell item factory for compact 48 px sources so Details and
+    // Small Icons do not upscale a 32 px icon or downscale the 256 px one.
+    if size > 32
+        && size < 128
+        && let Some(image) = shell_item_icon(path, size)
+    {
+        return Some(image);
+    }
+
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
 

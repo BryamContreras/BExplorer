@@ -426,8 +426,13 @@ impl BExplorerIced {
             PopupBackdropTarget::ColorPicker => {
                 self.color_picker_open = true;
             }
-            PopupBackdropTarget::Rename(dialog) => {
+            PopupBackdropTarget::Rename(mut dialog) => {
                 let select_end = dialog.select_end;
+                // `text_editor::Content::clone` intentionally clones only
+                // text, not its cursor or selection. Popup backdrop capture
+                // clones the target before it is shown, so restore the
+                // filename-only selection after that clone has completed.
+                select_rename_editor_prefix(&mut dialog.editor, select_end);
                 self.rename_dialog = Some(dialog);
                 return focus_inline_rename_task(select_end);
             }

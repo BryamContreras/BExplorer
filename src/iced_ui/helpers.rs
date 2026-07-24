@@ -489,13 +489,15 @@ mod tests {
         local.drive_kind = Some(DriveKind::Local);
 
         let (_, lookup_path, is_directory) =
-            native_icon_request_for_entry(&local).expect("local drive icon request");
+            native_icon_request_for_entry(&local, thumbnail_data::NATIVE_ICON_SIZE)
+                .expect("local drive icon request");
         assert_eq!(lookup_path, Path::new("/"));
         assert!(is_directory);
 
         local.drive_kind = Some(DriveKind::Usb);
         let (_, lookup_path, _) =
-            native_icon_request_for_entry(&local).expect("USB drive icon request");
+            native_icon_request_for_entry(&local, thumbnail_data::NATIVE_ICON_SIZE)
+                .expect("USB drive icon request");
         assert_eq!(lookup_path, Path::new("/media/dev/PRUEBAS"));
     }
 
@@ -506,8 +508,18 @@ mod tests {
         local.path = PathBuf::from("/media/dev/PRUEBAS");
         local.drive_kind = Some(DriveKind::Local);
 
-        let key = sidebar_native_icon_cache_key(&local.path, &[local.clone()]);
-        assert_eq!(key, thumbnail_data::native_entry_icon_cache_key(&local));
+        let key = sidebar_native_icon_cache_key(
+            &local.path,
+            &[local.clone()],
+            thumbnail_data::NATIVE_ICON_SIZE,
+        );
+        assert_eq!(
+            key,
+            thumbnail_data::native_entry_icon_cache_key_at_size(
+                &local,
+                thumbnail_data::NATIVE_ICON_SIZE,
+            )
+        );
         assert_ne!(
             key,
             thumbnail_data::native_path_icon_cache_key(
@@ -584,15 +596,48 @@ mod tests {
     }
 
     #[test]
-    fn rename_target_preserves_the_original_extension() {
+    fn rename_target_uses_the_complete_edited_filename() {
+        assert_eq!(rename_target_name("vacaciones.webp"), "vacaciones.webp");
+        assert_eq!(rename_target_name("vacaciones"), "vacaciones");
+    }
+
+    #[test]
+    fn rename_initially_selects_the_name_but_not_the_extension() {
+        let file = test_entry("vacaciones.jpeg", EntryKind::File, Some(10));
+        let folder = test_entry("vacaciones.2026", EntryKind::Folder, None);
+
         assert_eq!(
-            rename_target_name("vacaciones", Some("jpeg")),
-            "vacaciones.jpeg"
+            rename_selection_end(&file, &rename_edit_value(&file)),
+            "vacaciones".chars().count()
         );
         assert_eq!(
-            rename_target_name("vacaciones.jpeg", Some("jpeg")),
-            "vacaciones.jpeg"
+            rename_selection_end(&folder, &rename_edit_value(&folder)),
+            "vacaciones.2026".chars().count()
         );
+
+        let mut editor = text_editor::Content::with_text("vacaciones.jpeg");
+        select_rename_editor_prefix(&mut editor, "vacaciones".chars().count());
+        assert_eq!(editor.selection().as_deref(), Some("vacaciones"));
+
+        let mut backdrop_clone = editor.clone();
+        assert_eq!(backdrop_clone.selection(), None);
+        select_rename_editor_prefix(&mut backdrop_clone, "vacaciones".chars().count());
+        assert_eq!(backdrop_clone.selection().as_deref(), Some("vacaciones"));
+    }
+
+    #[test]
+    fn compact_views_request_small_entry_images() {
+        for mode in [ViewMode::Details, ViewMode::SmallIcons, ViewMode::List] {
+            assert!(uses_small_entry_images(mode));
+        }
+        for mode in [
+            ViewMode::Tiles,
+            ViewMode::MediumIcons,
+            ViewMode::LargeIcons,
+            ViewMode::ExtraLargeIcons,
+        ] {
+            assert!(!uses_small_entry_images(mode));
+        }
     }
 
     #[test]

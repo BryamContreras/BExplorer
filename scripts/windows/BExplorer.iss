@@ -1,9 +1,9 @@
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.2"
+  #define MyAppVersion "1.0.3"
 #endif
 
 #define MyAppName "BExplorer"
-#define MyAppPublisher "Bryam Contreras"
+#define MyAppPublisher "BExplorer"
 #define MyAppExeName "BExplorer.exe"
 #define ProjectRoot SourcePath + "\..\.."
 #define StagedFiles ProjectRoot + "\dist\bexplorer-windows-x86_64-pc-windows-msvc"
@@ -12,11 +12,8 @@
 AppId={{8E567F0D-BC79-4AB8-956A-20ED0FAEAD95}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
-AppVerName={#MyAppName} {#MyAppVersion}
+AppVerName={#MyAppName}
 AppPublisher={#MyAppPublisher}
-AppPublisherURL=https://github.com/BryamContreras/BExplorer
-AppSupportURL=https://github.com/BryamContreras/BExplorer/issues
-AppUpdatesURL=https://github.com/BryamContreras/BExplorer/releases
 DefaultDirName={autopf}\BExplorer
 DefaultGroupName=BExplorer
 DisableProgramGroupPage=yes
@@ -26,6 +23,7 @@ OutputDir={#ProjectRoot}\dist
 OutputBaseFilename=BExplorer-{#MyAppVersion}-Setup-x64
 SetupIconFile={#ProjectRoot}\assets\windows\bexplorer.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
+UninstallDisplayName={#MyAppName}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -36,7 +34,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ChangesEnvironment=yes
 CloseApplications=yes
 RestartApplications=no
-UsePreviousLanguage=yes
+UsePreviousLanguage=no
 UsePreviousTasks=yes
 
 [Languages]

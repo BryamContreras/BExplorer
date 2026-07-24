@@ -8,6 +8,7 @@ use crate::fs::explorer::{self, EntryKind, FileCategory, FileEntry};
 use crate::platform::NativeIconImage;
 
 pub const NATIVE_ICON_SIZE: u32 = 256;
+pub const SMALL_ENTRY_IMAGE_SIZE: u32 = 48;
 const PREVIEW_MAX_EDGE: u32 = 1200;
 const MAX_PDF_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 const PDF_PREVIEW_SCALE: f32 = 1.15;
@@ -105,16 +106,17 @@ pub fn read_text_preview(path: &Path, max_bytes: usize) -> Option<String> {
     (!preview.trim().is_empty()).then_some(preview)
 }
 
-pub fn virtual_native_icon_request(entry: &FileEntry) -> Option<(PathBuf, PathBuf, bool)> {
+pub fn virtual_native_icon_request(
+    entry: &FileEntry,
+    size: u32,
+) -> Option<(PathBuf, PathBuf, bool)> {
     if !explorer::is_portable_path(&entry.path) {
         return None;
     }
 
     match entry.kind {
         EntryKind::Folder | EntryKind::SymlinkFolder => Some((
-            PathBuf::from(format!(
-                "__bexplorer_portable_folder_icon_size_{NATIVE_ICON_SIZE}"
-            )),
+            PathBuf::from(format!("__bexplorer_portable_folder_icon_size_{size}")),
             PathBuf::from("bexplorer-folder"),
             true,
         )),
@@ -133,9 +135,7 @@ pub fn virtual_native_icon_request(entry: &FileEntry) -> Option<(PathBuf, PathBu
                 .filter(|extension| !extension.is_empty())
                 .unwrap_or_else(|| "file".into());
             Some((
-                PathBuf::from(format!(
-                    "__bexplorer_portable_ext_{extension}_size_{NATIVE_ICON_SIZE}"
-                )),
+                PathBuf::from(format!("__bexplorer_portable_ext_{extension}_size_{size}")),
                 PathBuf::from(format!("bexplorer.{extension}")),
                 false,
             ))
@@ -145,7 +145,7 @@ pub fn virtual_native_icon_request(entry: &FileEntry) -> Option<(PathBuf, PathBu
 }
 
 #[cfg(target_os = "windows")]
-pub fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
+pub fn native_entry_icon_cache_key_at_size(entry: &FileEntry, _size: u32) -> PathBuf {
     match entry.kind {
         EntryKind::Drive => PathBuf::from(format!(
             "__bexplorer_drive_{:?}_{}",
@@ -162,18 +162,18 @@ pub fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn native_entry_icon_cache_key(entry: &FileEntry) -> PathBuf {
+pub fn native_entry_icon_cache_key_at_size(entry: &FileEntry, size: u32) -> PathBuf {
     match entry.kind {
         EntryKind::Drive => PathBuf::from(format!(
-            "__bexplorer_drive_{:?}_{}_size_{NATIVE_ICON_SIZE}",
+            "__bexplorer_drive_{:?}_{}_size_{size}",
             entry.drive_kind,
             native_directory_icon_class(&entry.path)
         )),
         EntryKind::Folder | EntryKind::SymlinkFolder => {
-            native_path_icon_cache_key(&entry.path, true, NATIVE_ICON_SIZE)
+            native_path_icon_cache_key(&entry.path, true, size)
         }
         EntryKind::File | EntryKind::SymlinkFile | EntryKind::Symlink | EntryKind::Other => {
-            native_file_icon_cache_key(&entry.path, Some(&entry.name), NATIVE_ICON_SIZE)
+            native_file_icon_cache_key(&entry.path, Some(&entry.name), size)
         }
     }
 }
@@ -252,24 +252,28 @@ fn native_file_icon_cache_key(path: &Path, fallback_name: Option<&str>, size: u3
     ))
 }
 
-pub fn load_thumbnail_image(path: &Path) -> Option<NativeIconImage> {
+pub fn load_thumbnail_image(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
     let bytes = std::fs::read(path).ok()?;
-    load_thumbnail_image_from_bytes(&bytes).or_else(|| render_svg_image(path, NATIVE_ICON_SIZE))
+    load_thumbnail_image_from_bytes(&bytes, max_edge).or_else(|| render_svg_image(path, max_edge))
 }
 
-pub fn load_desktop_thumbnail_image(path: &Path) -> Option<NativeIconImage> {
-    crate::platform::cached_desktop_thumbnail(path)
+pub fn load_desktop_thumbnail_image(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
+    crate::platform::cached_desktop_thumbnail(path, max_edge)
 }
 
-pub fn load_thumbnail_image_with_fallback(path: &Path) -> Option<NativeIconImage> {
+pub fn load_thumbnail_image_with_fallback(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
     if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     {
-        return load_desktop_thumbnail_image(path).or_else(|| render_pdf_first_page(path));
+        return load_desktop_thumbnail_image(path, max_edge)
+            .or_else(|| render_pdf_first_page(path))
+            .and_then(|image| resize_native_image(image, max_edge));
     }
-    load_desktop_thumbnail_image(path).or_else(|| load_thumbnail_image(path))
+    load_desktop_thumbnail_image(path, max_edge)
+        .and_then(|image| resize_native_image(image, max_edge))
+        .or_else(|| load_thumbnail_image(path, max_edge))
 }
 
 /// Rendered only for the selected item in the preview panel. Keeping this separate
@@ -280,17 +284,18 @@ pub fn load_preview_image(path: &Path) -> Option<NativeIconImage> {
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     {
-        return render_pdf_first_page(path).or_else(|| load_desktop_thumbnail_image(path));
+        return render_pdf_first_page(path)
+            .or_else(|| load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE));
     }
 
     if std::fs::metadata(path).ok()?.len() > MAX_PDF_PREVIEW_BYTES {
-        return load_desktop_thumbnail_image(path);
+        return load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE);
     }
 
     let bytes = std::fs::read(path).ok()?;
     load_image_from_bytes(&bytes, PREVIEW_MAX_EDGE)
         .or_else(|| render_svg_image(path, PREVIEW_MAX_EDGE))
-        .or_else(|| load_desktop_thumbnail_image(path))
+        .or_else(|| load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE))
 }
 
 pub fn render_pdf_preview_page(path: &Path, page_index: usize) -> Option<(usize, NativeIconImage)> {
@@ -348,17 +353,37 @@ pub fn load_native_icon_image(
     }
 }
 
-pub fn load_thumbnail_image_from_bytes(bytes: &[u8]) -> Option<NativeIconImage> {
-    load_image_from_bytes(bytes, NATIVE_ICON_SIZE)
+pub fn load_thumbnail_image_from_bytes(bytes: &[u8], max_edge: u32) -> Option<NativeIconImage> {
+    load_image_from_bytes(bytes, max_edge)
 }
 
 fn load_image_from_bytes(bytes: &[u8], max_edge: u32) -> Option<NativeIconImage> {
     let image = image::load_from_memory(bytes).ok()?;
-    let thumbnail = image.thumbnail(max_edge, max_edge).to_rgba8();
+    let thumbnail = image
+        .resize(max_edge, max_edge, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
     Some(NativeIconImage {
         width: thumbnail.width() as usize,
         height: thumbnail.height() as usize,
         rgba: thumbnail.into_raw(),
+    })
+}
+
+fn resize_native_image(image: NativeIconImage, max_edge: u32) -> Option<NativeIconImage> {
+    if image.width <= max_edge as usize && image.height <= max_edge as usize {
+        return Some(image);
+    }
+
+    let width = u32::try_from(image.width).ok()?;
+    let height = u32::try_from(image.height).ok()?;
+    let source = image::RgbaImage::from_raw(width, height, image.rgba)?;
+    let resized = image::DynamicImage::ImageRgba8(source)
+        .resize(max_edge, max_edge, image::imageops::FilterType::Lanczos3)
+        .to_rgba8();
+    Some(NativeIconImage {
+        width: resized.width() as usize,
+        height: resized.height() as usize,
+        rgba: resized.into_raw(),
     })
 }
 
@@ -395,10 +420,38 @@ fn unpremultiply_rgba(data: &mut [u8]) {
     }
 }
 
-#[cfg(all(test, not(target_os = "windows")))]
+#[cfg(target_os = "windows")]
+pub fn load_portable_thumbnail_image(
+    path: &Path,
+    max_bytes: usize,
+    allow_default_resource: bool,
+    max_edge: u32,
+) -> Option<NativeIconImage> {
+    let (device_id, object_id) = explorer::portable_object_from_path(path)?;
+    let bytes = crate::platform::portable_device_thumbnail(
+        &device_id,
+        &object_id,
+        max_bytes,
+        allow_default_resource,
+    )?;
+    load_thumbnail_image_from_bytes(&bytes, max_edge)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn load_portable_thumbnail_image(
+    _path: &Path,
+    _max_bytes: usize,
+    _allow_default_resource: bool,
+    _max_edge: u32,
+) -> Option<NativeIconImage> {
+    None
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn user_home_and_generic_folders_have_distinct_native_icon_keys() {
         let Some(directories) = UserDirs::new() else {
@@ -413,29 +466,39 @@ mod tests {
         assert_ne!(home, generic);
         assert!(home.to_string_lossy().contains("home"));
     }
-}
 
-#[cfg(target_os = "windows")]
-pub fn load_portable_thumbnail_image(
-    path: &Path,
-    max_bytes: usize,
-    allow_default_resource: bool,
-) -> Option<NativeIconImage> {
-    let (device_id, object_id) = explorer::portable_object_from_path(path)?;
-    let bytes = crate::platform::portable_device_thumbnail(
-        &device_id,
-        &object_id,
-        max_bytes,
-        allow_default_resource,
-    )?;
-    load_thumbnail_image_from_bytes(&bytes)
-}
+    #[test]
+    fn small_entry_image_is_resampled_to_its_own_pixel_size() {
+        let source = NativeIconImage {
+            width: 120,
+            height: 60,
+            rgba: vec![255; 120 * 60 * 4],
+        };
 
-#[cfg(not(target_os = "windows"))]
-pub fn load_portable_thumbnail_image(
-    _path: &Path,
-    _max_bytes: usize,
-    _allow_default_resource: bool,
-) -> Option<NativeIconImage> {
-    None
+        let resized =
+            resize_native_image(source, SMALL_ENTRY_IMAGE_SIZE).expect("resized thumbnail");
+
+        assert_eq!(resized.width, SMALL_ENTRY_IMAGE_SIZE as usize);
+        assert_eq!(resized.height, (SMALL_ENTRY_IMAGE_SIZE / 2) as usize);
+        assert_eq!(resized.rgba.len(), resized.width * resized.height * 4);
+    }
+
+    #[test]
+    fn thumbnail_loader_keeps_separate_small_and_standard_sources() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons/appicon.png");
+        let small = load_thumbnail_image_with_fallback(&path, SMALL_ENTRY_IMAGE_SIZE)
+            .expect("small thumbnail");
+        let standard = load_thumbnail_image_with_fallback(&path, NATIVE_ICON_SIZE)
+            .expect("standard thumbnail");
+
+        assert_eq!(
+            small.width.max(small.height),
+            SMALL_ENTRY_IMAGE_SIZE as usize
+        );
+        assert_eq!(
+            standard.width.max(standard.height),
+            NATIVE_ICON_SIZE as usize
+        );
+        assert!(small.rgba.len() < standard.rgba.len());
+    }
 }

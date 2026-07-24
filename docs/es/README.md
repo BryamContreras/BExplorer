@@ -1,6 +1,6 @@
 # BExplorer
 
-BExplorer 1.0.2 es un explorador de archivos estable y liviano para Windows y
+BExplorer 1.0.3 es un explorador de archivos estable y liviano para Windows y
 Linux, escrito en Rust. Su objetivo es mejorar la gestion diaria de archivos
 sin intentar reemplazar todo el shell del sistema.
 
@@ -10,7 +10,7 @@ integraciones nativas propias; macOS sigue siendo un objetivo experimental.
 
 ## Estado
 
-BExplorer 1.0.2 es la version estable actual para Windows y Linux. La interfaz,
+BExplorer 1.0.3 es la version estable actual para Windows y Linux. La interfaz,
 el motor de operaciones, los formatos de configuracion y sesion, los flujos de
 comprimidos y las integraciones de plataforma forman la base compatible de la
 serie 1.x.
@@ -162,7 +162,7 @@ compatible concreta.
 | Difuminado | Efectos nativos | KWin o Blur My Shell opcional | Experimental |
 | Microsoft Defender | Compatible | No aplica | No aplica |
 
-Compatibilidad del paquete Linux 1.0.2 generado en la base actual:
+Compatibilidad del paquete Linux 1.0.3 generado en la base actual:
 
 | Distribucion o entorno | `.deb` actual | Nivel de validacion |
 | --- | --- | --- |
@@ -256,20 +256,25 @@ cargo clippy --all-targets -- -D warnings
 cargo run
 ```
 
-Los paquetes Linux se generan con `scripts/linux/package.sh`; el tarball, el
-paquete `.deb` y sus checksums incluyen los avisos y textos de licencia. El
-script valida automaticamente metadatos, arquitectura, ejecutable y
-clasificacion de dependencias con `scripts/linux/validate-deb.sh`. El `.deb`
-instala el ejecutable en `/usr/bin/bexplorer`, registra la aplicacion en el menu
-del escritorio, instala sus iconos escalados en el tema `hicolor` y puede
-instalarse con `scripts/linux/install-deb.sh`.
+Los paquetes Linux se generan con `scripts/linux/package.sh`; el tarball, los
+paquetes `.deb` y `.rpm`, y sus checksums incluyen los avisos y textos de
+licencia. El script valida automaticamente metadatos, arquitectura y ejecutable
+con `scripts/linux/validate-deb.sh` y `scripts/linux/validate-rpm.sh`. Ambos
+paquetes instalan el ejecutable en `/usr/bin/bexplorer`, registran la aplicacion
+en el menu del escritorio e instalan sus iconos escalados en el tema `hicolor`.
+El `.deb` puede instalarse con `scripts/linux/install-deb.sh`.
 
 En Windows, `scripts/windows/package.ps1` crea un ZIP portable y un instalador
 Inno Setup con checksum SHA-256. El instalador permite elegir espanol o ingles,
 crea por defecto una entrada en el menu Inicio y ofrece casillas para crear un
 acceso directo en el escritorio y agregar BExplorer al `PATH`. Al desinstalar
-retira solamente su propia entrada del `PATH`. Los comandos antiguos de
-`tools/` se conservan como wrappers compatibles.
+retira solamente su propia entrada del `PATH`, y el desinstalador aparece
+simplemente como BExplorer, sin la version en su nombre. Los comandos antiguos
+de `tools/` se conservan como wrappers compatibles.
+
+El flujo `Build installers` de GitHub Actions se ejecuta con cada push a
+`master`, con etiquetas de version o manualmente. Publica como artefactos el
+Setup de Windows, el `.deb`, el `.rpm` y sus checksums SHA-256.
 
 ## Comprimidos
 
