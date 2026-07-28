@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use crate::utils::errors::{BExplorerError, Result};
 
@@ -191,28 +193,29 @@ fn executable_exists(program: &str) -> bool {
 
 #[cfg(target_os = "linux")]
 fn mail_composer_available() -> bool {
-    use std::process::{Command, Stdio};
-
-    if !executable_exists("xdg-email") || !executable_exists("xdg-mime") {
+    if !executable_exists("xdg-email") {
         return false;
     }
-    Command::new("xdg-mime")
-        .args(["query", "default", "x-scheme-handler/mailto"])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .is_ok_and(|output| {
-            output.status.success() && !String::from_utf8_lossy(&output.stdout).trim().is_empty()
-        })
+    crate::fs::properties::query_default_application("x-scheme-handler/mailto").is_some()
 }
 
 #[cfg(target_os = "linux")]
 fn gnome_bluetooth_targets() -> Vec<NativeSendToTarget> {
-    use zbus::blocking::{Connection, Proxy};
+    use zbus::blocking::{Connection, Proxy, fdo::DBusProxy};
     use zbus::fdo::ManagedObjects;
+    use zbus::names::BusName;
 
     let Some(objects) = (|| {
         let connection = Connection::system().ok()?;
+        let bus = DBusProxy::new(&connection).ok()?;
+        let bluez_name = BusName::try_from("org.bluez").ok()?;
+        // Building a context menu must not activate an optional system
+        // service. On systems without a Bluetooth adapter, BlueZ can remain
+        // activatable while systemd refuses to start it; calling it directly
+        // then blocks until D-Bus' service-start timeout expires.
+        if !bus.name_has_owner(bluez_name).ok()? {
+            return None;
+        }
         let proxy = Proxy::new(
             &connection,
             "org.bluez",
@@ -303,12 +306,15 @@ fn kde_connect_targets() -> Vec<NativeSendToTarget> {
 fn kde_connect_output(arguments: &[&str]) -> Option<String> {
     use std::process::{Command, Stdio};
 
-    let output = Command::new("kdeconnect-cli")
+    let mut command = Command::new("kdeconnect-cli");
+    command
         .args(arguments)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+        .stderr(Stdio::null());
+    let output = crate::utils::process::command_output_with_timeout(
+        &mut command,
+        Duration::from_millis(900),
+    )?;
     output
         .status
         .success()

@@ -14,18 +14,27 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use crate::utils::errors::{BExplorerError, Result};
+use crate::utils::process::command_output_with_timeout;
 
 const ELEVATED_HELPER_ARG: &str = "--bexplorer-elevated-properties-helper";
 const MAX_ELEVATED_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 const VALID_PERMISSION_BITS: u32 = 0o7777;
 const SIZE_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 const SIZE_PROGRESS_ITEMS: usize = 256;
+const GIO_QUERY_TIMEOUT: Duration = Duration::from_millis(500);
+const XDG_QUERY_TIMEOUT: Duration = Duration::from_millis(700);
+const IDENTITY_QUERY_TIMEOUT: Duration = Duration::from_millis(1_500);
+const DESKTOP_ENTRY_CACHE_TTL: Duration = Duration::from_secs(30);
+static GIO_QUERY_UNRESPONSIVE: AtomicBool = AtomicBool::new(false);
+type DesktopEntryCache = Option<(String, Instant, Vec<DesktopEntry>)>;
+static DESKTOP_ENTRY_CACHE: OnceLock<Mutex<DesktopEntryCache>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PropertyKind {
@@ -589,21 +598,42 @@ fn mime_type_for_path(path: &Path, kind: PropertyKind) -> String {
     if kind == PropertyKind::BrokenSymlink {
         return "inode/symlink".into();
     }
-    Command::new("xdg-mime")
+    gio_mime_type_for_path(path)
+        .or_else(|| xdg_mime_type_for_path(path))
+        .unwrap_or_else(|| fallback_mime_type(path).to_owned())
+}
+
+fn gio_mime_type_for_path(path: &Path) -> Option<String> {
+    let mut command = Command::new("gio");
+    command
+        .args(["info", "-a", "standard::content-type", "--"])
+        .arg(path)
+        .env("LC_ALL", "C");
+    run_gio_query(command).and_then(|output| parse_gio_content_type(&output))
+}
+
+fn xdg_mime_type_for_path(path: &Path) -> Option<String> {
+    let mut command = Command::new("xdg-mime");
+    command
         .args([
             OsStr::new("query"),
             OsStr::new("filetype"),
             path.as_os_str(),
         ])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
+        .stderr(Stdio::null());
+    command_output_with_timeout(&mut command, XDG_QUERY_TIMEOUT)
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .map(|mime| mime.trim().to_owned())
         .filter(|mime| valid_mime_type(mime))
-        .unwrap_or_else(|| fallback_mime_type(path).to_owned())
+}
+
+fn parse_gio_content_type(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mime = line.trim().strip_prefix("standard::content-type:")?.trim();
+        valid_mime_type(mime).then(|| mime.to_owned())
+    })
 }
 
 fn fallback_mime_type(path: &Path) -> &'static str {
@@ -652,12 +682,12 @@ pub fn list_groups() -> Vec<PropertyIdentity> {
 
 fn identity_name(database: &str, id: u32) -> Option<String> {
     let id = id.to_string();
-    let output = Command::new("getent")
+    let mut command = Command::new("getent");
+    command
         .args([database, &id])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
+        .stderr(Stdio::null());
+    let output = command_output_with_timeout(&mut command, IDENTITY_QUERY_TIMEOUT)
         .filter(|output| output.status.success())?;
     parse_identity_line(&String::from_utf8_lossy(&output.stdout), 2)
         .filter(|identity| identity.id.to_string() == id)
@@ -665,12 +695,12 @@ fn identity_name(database: &str, id: u32) -> Option<String> {
 }
 
 fn list_identities(database: &str, fallback: &Path, id_field: usize) -> Vec<PropertyIdentity> {
-    let text = Command::new("getent")
+    let mut command = Command::new("getent");
+    command
         .arg(database)
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
+        .stderr(Stdio::null());
+    let text = command_output_with_timeout(&mut command, IDENTITY_QUERY_TIMEOUT)
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .or_else(|| fs::read_to_string(fallback).ok())
@@ -708,7 +738,7 @@ fn applications_for_mime(
     locale: &str,
 ) -> (Vec<PropertyApplication>, Option<PropertyApplication>) {
     let default_id = query_default_application(mime_type);
-    let entries = scan_desktop_entries(locale);
+    let entries = cached_desktop_entries(locale);
     let current_desktops = current_desktops();
     let mut default_application = default_id.as_deref().and_then(|id| {
         entries
@@ -765,20 +795,82 @@ pub fn applications_for_path(path: &Path) -> Vec<PropertyApplication> {
     applications_for_mime(&mime_type, &desktop_locale()).0
 }
 
-fn query_default_application(mime_type: &str) -> Option<String> {
+pub(crate) fn query_default_application(mime_type: &str) -> Option<String> {
     if !valid_mime_type(mime_type) {
         return None;
     }
-    Command::new("xdg-mime")
+    gio_default_application(mime_type).or_else(|| xdg_default_application(mime_type))
+}
+
+fn gio_default_application(mime_type: &str) -> Option<String> {
+    let mut command = Command::new("gio");
+    command.args(["mime", mime_type]).env("LC_ALL", "C");
+    run_gio_query(command).and_then(|output| parse_gio_default_application(&output))
+}
+
+fn xdg_default_application(mime_type: &str) -> Option<String> {
+    let mut command = Command::new("xdg-mime");
+    command
         .args(["query", "default", mime_type])
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
+        .stderr(Stdio::null());
+    command_output_with_timeout(&mut command, XDG_QUERY_TIMEOUT)
         .filter(|output| output.status.success())
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .and_then(|output| output.lines().next().map(str::trim).map(str::to_owned))
         .filter(|id| valid_desktop_id(id))
+}
+
+fn parse_gio_default_application(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let id = line
+            .strip_prefix("Default application for ")?
+            .rsplit_once(": ")?
+            .1
+            .trim();
+        valid_desktop_id(id).then(|| id.to_owned())
+    })
+}
+
+/// Runs the optional GIO fast path without allowing a broken helper to stall
+/// context-menu construction. A missing executable, command failure, malformed
+/// output, or timeout is intentionally reported as `None` so callers continue
+/// through the existing xdg-mime path.
+fn run_gio_query(mut command: Command) -> Option<String> {
+    if GIO_QUERY_UNRESPONSIVE.load(Ordering::Relaxed) {
+        return None;
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let Some(output) = command_output_with_timeout(&mut command, GIO_QUERY_TIMEOUT) else {
+        // Do not pay the timeout repeatedly during this process. The
+        // standards-compatible xdg-mime backend remains available.
+        GIO_QUERY_UNRESPONSIVE.store(true, Ordering::Relaxed);
+        return None;
+    };
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn cached_desktop_entries(locale: &str) -> Vec<DesktopEntry> {
+    let cache = DESKTOP_ENTRY_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(cache) = cache.lock()
+        && let Some((cached_locale, loaded_at, entries)) = cache.as_ref()
+        && cached_locale == locale
+        && loaded_at.elapsed() <= DESKTOP_ENTRY_CACHE_TTL
+    {
+        return entries.clone();
+    }
+
+    let entries = scan_desktop_entries(locale);
+    if let Ok(mut cache) = cache.lock() {
+        *cache = Some((locale.to_owned(), Instant::now(), entries.clone()));
+    }
+    entries
 }
 
 fn scan_desktop_entries(locale: &str) -> Vec<DesktopEntry> {
@@ -1549,7 +1641,7 @@ fn validate_default_application_change(mime_type: &str, desktop_id: &str) -> Res
             "Invalid desktop application id: {desktop_id}"
         )));
     }
-    let installed = scan_desktop_entries(&desktop_locale())
+    let installed = cached_desktop_entries(&desktop_locale())
         .into_iter()
         .any(|entry| entry.application.desktop_id == desktop_id && !entry.hidden);
     if !installed {
@@ -1564,11 +1656,13 @@ fn set_default_application_validated(mime_type: &str, desktop_id: &str) -> Resul
     if query_default_application(mime_type).as_deref() == Some(desktop_id) {
         return Ok(false);
     }
-    let output = Command::new("xdg-mime")
+    let mut command = Command::new("xdg-mime");
+    command
         .args(["default", desktop_id, mime_type])
         .stdin(Stdio::null())
-        .output()
-        .map_err(|error| BExplorerError::Operation(format!("Could not run xdg-mime: {error}")))?;
+        .stderr(Stdio::piped());
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(2))
+        .ok_or_else(|| BExplorerError::Operation("xdg-mime did not respond in time".into()))?;
     if !output.status.success() {
         let error = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         return Err(BExplorerError::Operation(if error.is_empty() {
@@ -1767,6 +1861,35 @@ mod tests {
         assert_eq!(entry.application.name, "Editor Simple");
         assert_eq!(entry.application.icon.as_deref(), Some("example"));
         assert_eq!(entry.mime_types, ["text/plain", "application/json"]);
+    }
+
+    #[test]
+    fn parses_gio_content_type_without_localized_metadata() {
+        assert_eq!(
+            parse_gio_content_type(
+                "uri: file:///tmp/document.md\n\
+                 attributes:\n  standard::content-type: text/markdown\n"
+            )
+            .as_deref(),
+            Some("text/markdown")
+        );
+        assert_eq!(parse_gio_content_type("attributes:\n"), None);
+    }
+
+    #[test]
+    fn parses_gio_default_application_and_rejects_missing_defaults() {
+        assert_eq!(
+            parse_gio_default_application(
+                "Default application for “text/plain”: org.example.Editor.desktop\n\
+                 Registered applications:\n\torg.example.Editor.desktop\n"
+            )
+            .as_deref(),
+            Some("org.example.Editor.desktop")
+        );
+        assert_eq!(
+            parse_gio_default_application("No default applications for “application/x-example”\n"),
+            None
+        );
     }
 
     #[test]

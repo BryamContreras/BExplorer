@@ -340,6 +340,7 @@ pub(in crate::iced_ui) fn context_menu_native_icon_row<'a>(
             .width(Length::Fixed(icon_size))
             .height(Length::Fixed(icon_size))
             .content_fit(ContentFit::Contain)
+            .filter_method(iced_image::FilterMethod::Linear)
             .into()
     } else {
         inline_icon(

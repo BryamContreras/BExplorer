@@ -28,8 +28,9 @@ use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
-use std::time::UNIX_EPOCH;
+use std::sync::{Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use directories::UserDirs;
 use image::ImageEncoder;
@@ -41,10 +42,18 @@ use raw_window_handle::{
 use crate::platform::NativeIconImage;
 use crate::platform::{NetworkComputerInfo, NetworkDeviceKind, NetworkShareInfo};
 use crate::utils::errors::{BExplorerError, Result};
+use crate::utils::process::command_output_with_timeout;
 
 const ICON_EXTENSIONS: &[&str] = &["png", "svg"];
 const FALLBACK_THEMES: &[&str] = &["Adwaita", "Breeze", "Yaru", "Papirus", "hicolor"];
 const PORTABLE_DEVICE_ICON_LOOKUP_PREFIX: &str = "bexplorer-portable-device-icons@";
+const NETWORK_FAST_TIMEOUT: Duration = Duration::from_millis(1_200);
+const NETWORK_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(1_500);
+const NETWORK_SHARE_TIMEOUT: Duration = Duration::from_secs(3);
+const NETWORK_MOUNT_TIMEOUT: Duration = Duration::from_millis(2_500);
+const AVAHI_CACHE_TTL: Duration = Duration::from_secs(2);
+type AvahiOutputCache = Option<(Instant, String)>;
+static AVAHI_OUTPUT_CACHE: OnceLock<Mutex<AvahiOutputCache>> = OnceLock::new();
 const LINUX_DRAG_HELPERS: &[LinuxDragHelper] = &[
     LinuxDragHelper {
         program: "ripdrag",
@@ -464,25 +473,30 @@ pub fn poll_native_file_drag(
 }
 
 pub fn network_computers() -> Vec<NetworkComputerInfo> {
-    let mut computers = Vec::new();
-    computers.extend(network_computers_from_gio());
-    computers.extend(kio::network_computers());
+    let mut computers = kio::network_computers();
     computers.extend(network_computers_from_avahi());
-    computers.extend(network_computers_from_smbtree());
+    // Modern SMB2/3 discovery is supplied by KIO, Avahi, or GVfs/WSD.
+    // `smbtree` remains useful on older NetBIOS networks, but only as a
+    // fallback so a working desktop provider never waits for it.
+    if computers.is_empty() {
+        computers.extend(network_computers_from_smbtree());
+    }
+    dedupe_network_computers(computers)
+}
+
+/// Returns cheap session-local sources separately from active Samba/Avahi/KIO
+/// browsing. The incremental network view runs both functions concurrently,
+/// so keeping their providers distinct avoids launching every helper twice.
+pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
+    let mut computers = network_computers_from_gio();
+    computers.extend(network_computers_from_gvfs_mounts());
     dedupe_network_computers(computers)
 }
 
 pub fn network_neighbor_addresses() -> Vec<String> {
-    if !command_exists("avahi-browse") {
-        return Vec::new();
-    }
-    Command::new("avahi-browse")
-        .args(["-rtp", "_smb._tcp"])
-        .output()
-        .ok()
-        .filter(|output| output.status.success())
+    avahi_smb_output()
         .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
+            output
                 .lines()
                 .filter_map(|line| line.split(';').nth(7))
                 .map(str::trim)
@@ -502,19 +516,18 @@ pub fn network_computer_at(address: &str) -> Option<NetworkComputerInfo> {
 }
 
 pub fn network_shares(host: &str) -> Vec<NetworkShareInfo> {
-    let mut shares = if command_exists("smbclient") {
-        Command::new("smbclient")
+    let mut shares = kio::network_shares(host);
+    if shares.is_empty() && command_exists("smbclient") {
+        let mut command = Command::new("smbclient");
+        command
             .args(["-g", "-N", "-L"])
             .arg(format!("//{host}"))
-            .output()
-            .ok()
+            .stdin(Stdio::null());
+        shares = command_output_with_timeout(&mut command, NETWORK_SHARE_TIMEOUT)
             .filter(|output| output.status.success())
             .map(|output| parse_smbclient_shares(&String::from_utf8_lossy(&output.stdout)))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-    shares.extend(kio::network_shares(host));
+            .unwrap_or_default();
+    }
     dedupe_network_shares(shares)
 }
 
@@ -522,6 +535,7 @@ pub fn mounted_network_path(path: &Path) -> Option<PathBuf> {
     let (host, share, children) = unc_parts(path)?;
     mounted_gvfs_network_path(host, share, &children)
         .or_else(|| kio::mounted_network_path(host, share, &children))
+        .or_else(|| mount_gvfs_network_path(host, share, &children))
 }
 
 fn mounted_gvfs_network_path(host: &str, share: &str, children: &[&str]) -> Option<PathBuf> {
@@ -554,6 +568,54 @@ fn mounted_gvfs_network_path(host: &str, share: &str, children: &[&str]) -> Opti
     None
 }
 
+fn mount_gvfs_network_path(host: &str, share: &str, children: &[&str]) -> Option<PathBuf> {
+    if !command_exists("gio") || host.trim().is_empty() || share.trim().is_empty() {
+        return None;
+    }
+    let authority = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    };
+    let uri = format!(
+        "smb://{authority}/{}",
+        percent_encode_uri_path_segment(share)
+    );
+    let mut command = Command::new("gio");
+    command
+        .args(["mount", &uri])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null());
+    let mounted = command_output_with_timeout(&mut command, NETWORK_MOUNT_TIMEOUT)
+        .is_some_and(|output| output.status.success());
+    if !mounted {
+        return mounted_gvfs_network_path(host, share, children);
+    }
+
+    for _ in 0..15 {
+        if let Some(path) = mounted_gvfs_network_path(host, share, children) {
+            return Some(path);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    None
+}
+
+fn percent_encode_uri_path_segment(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(HEX[(byte >> 4) as usize]));
+            encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+        }
+    }
+    encoded
+}
+
 fn unc_parts(path: &Path) -> Option<(&str, &str, Vec<&str>)> {
     let text = path.to_str()?.trim_start_matches(['\\', '/']);
     let mut parts = text.split(['\\', '/']).filter(|part| !part.is_empty());
@@ -573,41 +635,85 @@ fn network_computers_from_gio() -> Vec<NetworkComputerInfo> {
     if !command_exists("gio") {
         return Vec::new();
     }
-    Command::new("gio")
-        .args(["mount", "-li"])
-        .output()
-        .ok()
+    let mut command = Command::new("gio");
+    command
+        .args([
+            "list",
+            "-a",
+            "standard::name,standard::display-name,standard::target-uri",
+            "network:///",
+        ])
+        .env("LC_ALL", "C")
+        .stdin(Stdio::null());
+    command_output_with_timeout(&mut command, NETWORK_FAST_TIMEOUT)
         .filter(|output| output.status.success())
         .map(|output| parse_gio_network_hosts(&String::from_utf8_lossy(&output.stdout)))
         .unwrap_or_default()
 }
 
-fn network_computers_from_avahi() -> Vec<NetworkComputerInfo> {
-    if !command_exists("avahi-browse") {
+fn network_computers_from_gvfs_mounts() -> Vec<NetworkComputerInfo> {
+    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {
         return Vec::new();
-    }
-    Command::new("avahi-browse")
-        .args(["-rtp", "_smb._tcp"])
-        .output()
+    };
+    fs::read_dir(runtime.join("gvfs"))
         .ok()
-        .filter(|output| output.status.success())
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .filter_map(parse_avahi_smb_host)
-                .collect()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let fields = name.split_once(':')?.1;
+            let host = fields.split(',').find_map(|field| {
+                field
+                    .strip_prefix("server=")
+                    .or_else(|| field.strip_prefix("host="))
+            })?;
+            let host = percent_decode_component(host)?;
+            (!host.trim().is_empty()).then(|| NetworkComputerInfo {
+                name: host,
+                comment: "Mounted GVfs network location".into(),
+                kind: NetworkDeviceKind::Computer,
+            })
         })
+        .collect()
+}
+
+fn network_computers_from_avahi() -> Vec<NetworkComputerInfo> {
+    avahi_smb_output()
+        .map(|output| output.lines().filter_map(parse_avahi_smb_host).collect())
         .unwrap_or_default()
+}
+
+fn avahi_smb_output() -> Option<String> {
+    if !command_exists("avahi-browse") {
+        return None;
+    }
+    let cache = AVAHI_OUTPUT_CACHE.get_or_init(|| Mutex::new(None));
+    let mut cache = cache.lock().ok()?;
+    if let Some((loaded_at, output)) = cache.as_ref()
+        && loaded_at.elapsed() <= AVAHI_CACHE_TTL
+    {
+        return Some(output.clone());
+    }
+
+    let mut command = Command::new("avahi-browse");
+    command.args(["-rtp", "_smb._tcp"]).stdin(Stdio::null());
+    let output = command_output_with_timeout(&mut command, NETWORK_DISCOVERY_TIMEOUT)
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+        .unwrap_or_default();
+    *cache = Some((Instant::now(), output.clone()));
+    Some(output)
 }
 
 fn network_computers_from_smbtree() -> Vec<NetworkComputerInfo> {
     if !command_exists("smbtree") {
         return Vec::new();
     }
-    Command::new("smbtree")
-        .args(["-N", "-b"])
-        .output()
-        .ok()
+    let mut command = Command::new("smbtree");
+    command.args(["-N"]).stdin(Stdio::null());
+    command_output_with_timeout(&mut command, NETWORK_DISCOVERY_TIMEOUT)
         .filter(|output| output.status.success())
         .map(|output| parse_smbtree_hosts(&String::from_utf8_lossy(&output.stdout)))
         .unwrap_or_default()
@@ -618,7 +724,7 @@ fn parse_gio_network_hosts(text: &str) -> Vec<NetworkComputerInfo> {
         .filter_map(network_host_from_uri)
         .map(|host| NetworkComputerInfo {
             name: host,
-            comment: "Mounted network location".into(),
+            comment: "GVfs network discovery".into(),
             kind: NetworkDeviceKind::Computer,
         })
         .collect()
@@ -1301,6 +1407,32 @@ mod tests {
         assert_eq!(
             network_host_from_uri("default_location=SFTP://alice@example.local:22/home/alice"),
             Some("example.local".into())
+        );
+    }
+
+    #[test]
+    fn parses_gvfs_wsd_network_shortcuts() {
+        let computers = parse_gio_network_hosts(
+            "wsdd-server-1\t0\t(shortcut)\tstandard::display-name=TIM \
+             standard::target-uri=smb://TIM.local/\n\
+             wsdd-server-2\t0\t(shortcut)\tstandard::display-name=OFFICE \
+             standard::target-uri=smb://OFFICE.local/\n",
+        );
+
+        assert_eq!(
+            computers
+                .iter()
+                .map(|computer| computer.name.as_str())
+                .collect::<Vec<_>>(),
+            ["TIM.local", "OFFICE.local"]
+        );
+    }
+
+    #[test]
+    fn percent_encodes_smb_share_path_segments() {
+        assert_eq!(
+            percent_encode_uri_path_segment("Public Files/Cámara"),
+            "Public%20Files%2FC%C3%A1mara"
         );
     }
 

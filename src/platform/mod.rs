@@ -613,7 +613,7 @@ pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
-    linux::network_computers()
+    linux::network_computers_fast()
 }
 
 #[cfg(target_os = "macos")]

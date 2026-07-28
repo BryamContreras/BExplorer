@@ -9,10 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::platform::{NetworkComputerInfo, NetworkDeviceKind, NetworkShareInfo};
+use crate::utils::process::command_output_with_timeout;
 
 const DISCOVERY_BUDGET: Duration = Duration::from_millis(2_500);
 const COMMAND_TIMEOUT: Duration = Duration::from_millis(900);
@@ -328,27 +328,9 @@ fn run_ls(client: &Path, url: &str, timeout: Duration) -> Option<String> {
 }
 
 fn bounded_command_output(mut command: Command, timeout: Duration) -> Option<String> {
-    let mut child = command.spawn().ok()?;
-    let deadline = Instant::now() + timeout;
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => {
-                let output = child.wait_with_output().ok()?;
-                return output
-                    .status
-                    .success()
-                    .then(|| String::from_utf8_lossy(&output.stdout).into_owned());
-            }
-            Ok(None) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    }
+    command_output_with_timeout(&mut command, timeout)
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn parse_listing_names(text: &str) -> Vec<String> {
