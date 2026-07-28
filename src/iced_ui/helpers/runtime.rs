@@ -406,6 +406,41 @@ pub(in crate::iced_ui) fn storage_change_stream() -> impl iced::futures::Stream<
     })
 }
 
+#[cfg(target_os = "windows")]
+pub(in crate::iced_ui) fn windows_window_appearance_stream()
+-> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::channel::mpsc;
+
+    iced::stream::channel(1, move |output: mpsc::Sender<Message>| async move {
+        thread::spawn(move || {
+            let receiver = crate::platform::main_window_appearance_receiver();
+            let mut output = output;
+            while receiver.recv().is_ok() {
+                let event = crate::platform::take_main_window_appearance_event();
+                let message = Message::WindowsWindowAppearanceSettled(
+                    event.generation,
+                    event.revision,
+                    event.maximized,
+                    event.refresh_backdrop,
+                );
+                // This dedicated bridge thread must honor backpressure. The
+                // native snapshot contains a consumed cumulative refresh bit;
+                // dropping it merely because Iced's one-slot channel is full
+                // can leave Acrylic absent after a rapid series of Snaps.
+                if iced::futures::executor::block_on(iced::futures::SinkExt::send(
+                    &mut output,
+                    message,
+                ))
+                .is_err()
+                {
+                    return;
+                }
+            }
+        });
+        iced::futures::future::pending::<()>().await;
+    })
+}
+
 pub(in crate::iced_ui) fn directory_change_stream() -> impl iced::futures::Stream<Item = Message> {
     use iced::futures::channel::mpsc;
 

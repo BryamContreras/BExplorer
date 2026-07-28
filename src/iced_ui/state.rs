@@ -428,7 +428,18 @@ enum Message {
     WindowResize(window::Direction),
     WindowMinimize,
     WindowMaximize,
+    #[cfg(not(target_os = "windows"))]
     WindowMaximizedState(window::Id, bool),
+    #[cfg(target_os = "windows")]
+    WindowsWindowAppearanceSettled(u64, u64, bool, bool),
+    #[cfg(target_os = "windows")]
+    WindowsBackdropRefreshReady(u64, u64, u8),
+    #[cfg(target_os = "windows")]
+    WindowsBackdropRefreshFinished(u64, u64, u8, Option<bool>),
+    #[cfg(target_os = "windows")]
+    WindowMaximizeAppearanceWatchdog(window::Id, u64),
+    #[cfg(target_os = "windows")]
+    WindowMaximizeAppearanceWatchdogState(window::Id, u64, bool),
     WindowClose,
     StartSidebarResize,
     StartPreviewResize(PaneId),
@@ -443,6 +454,7 @@ enum Message {
     ExternalFileDropped(PathBuf),
     FlushExternalFileDrops,
     ClearFileDragClickSuppression,
+    WindowUnfocused(window::Id),
     WindowResized(window::Id, Size),
     #[cfg(debug_assertions)]
     DebugAddArchive(usize),
@@ -504,6 +516,7 @@ struct ContextMenuState {
     source_screenshot: Option<window::Screenshot>,
     submenu_backdrop: Option<iced_image::Handle>,
     submenu_backdrop_kind: Option<ContextSubmenuKind>,
+    submenu_backdrop_pending_kind: Option<ContextSubmenuKind>,
     paste_available: bool,
     open_with_applications: Vec<shell::OpenWithApplication>,
     send_to_targets: Vec<ContextSendToTarget>,

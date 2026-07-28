@@ -11,6 +11,12 @@ pub mod macos;
 
 #[cfg(target_os = "windows")]
 pub mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::{
+    apply_main_window_region, main_window_appearance_generation, main_window_appearance_receiver,
+    main_window_appearance_revision, main_window_backdrop_update_is_current,
+    main_window_region_update_is_current, take_main_window_appearance_event,
+};
 
 use std::path::{Path, PathBuf};
 
@@ -273,7 +279,7 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
 ) -> Result<bool> {
     #[cfg(target_os = "windows")]
     {
-        use window_vibrancy::{apply_acrylic, clear_acrylic, clear_blur, clear_mica};
+        use window_vibrancy::{clear_acrylic, clear_blur, clear_mica};
 
         let _ = clear_mica(window);
         let _ = clear_acrylic(window);
@@ -282,20 +288,8 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
             VibrancyMode::None => Ok(false),
             VibrancyMode::Mica | VibrancyMode::Blur => Ok(false),
             VibrancyMode::Acrylic => {
-                // Keep the native tint a touch lighter than the configured
-                // intensity so the acrylic backdrop is more noticeable while
-                // retaining enough contrast for the explorer content.
-                let alpha = (intensity.min(100) as u16 * 9 / 5) as u8;
-                let color = if dark {
-                    (24, 29, 32, alpha)
-                } else {
-                    (246, 246, 248, alpha)
-                };
-                apply_acrylic(window, Some(color))
-                    .map(|_| true)
-                    .map_err(|error| {
-                        crate::utils::errors::BExplorerError::Operation(error.to_string())
-                    })
+                let color = windows_acrylic_color(intensity, dark);
+                apply_windows_acrylic(window, color).map(|_| true)
             }
         }
     }
@@ -352,6 +346,102 @@ pub fn apply_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
                     "Native Wayland blur unavailable; using opaque fallback: {error}"
                 ));
                 Ok(false)
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_acrylic_color(intensity: u8, dark: bool) -> (u8, u8, u8, u8) {
+    // Keep the native tint a touch lighter than the configured intensity so
+    // the acrylic backdrop is noticeable while retaining content contrast.
+    let alpha = (intensity.min(100) as u16 * 9 / 5) as u8;
+    if dark {
+        (24, 29, 32, alpha)
+    } else {
+        (246, 246, 248, alpha)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_acrylic<W: HasWindowHandle + ?Sized>(
+    window: &W,
+    color: (u8, u8, u8, u8),
+) -> Result<bool> {
+    use ::windows::Win32::Foundation::HWND;
+    use ::windows::Win32::Graphics::Dwm::{
+        DWM_SYSTEMBACKDROP_TYPE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+        DwmGetWindowAttribute, DwmSetWindowAttribute,
+    };
+
+    let handle = window.window_handle().map_err(|error| {
+        crate::utils::errors::BExplorerError::Operation(format!(
+            "Could not access the Windows handle: {error}"
+        ))
+    })?;
+    if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+        let hwnd = HWND(handle.hwnd.get() as *mut _);
+        let backdrop = DWMSBT_TRANSIENTWINDOW;
+        let backdrop_result = unsafe {
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_SYSTEMBACKDROP_TYPE,
+                &backdrop as *const _ as *const _,
+                std::mem::size_of_val(&backdrop) as u32,
+            )
+        };
+        if backdrop_result.is_ok() {
+            let mut current = DWM_SYSTEMBACKDROP_TYPE::default();
+            let confirmed = unsafe {
+                DwmGetWindowAttribute(
+                    hwnd,
+                    DWMWA_SYSTEMBACKDROP_TYPE,
+                    &mut current as *mut _ as *mut _,
+                    std::mem::size_of_val(&current) as u32,
+                )
+            }
+            .is_ok()
+                && current == DWMSBT_TRANSIENTWINDOW;
+            if !confirmed {
+                crate::utils::log::info(
+                    "DWM accepted Acrylic while its immediate state query still reported the previous backdrop",
+                );
+            }
+            return Ok(confirmed);
+        }
+
+        // Older Windows releases use the composition-attribute
+        // implementation selected by window-vibrancy.
+        window_vibrancy::apply_acrylic(window, Some(color))
+            .map(|_| true)
+            .map_err(|error| crate::utils::errors::BExplorerError::Operation(error.to_string()))
+    } else {
+        window_vibrancy::apply_acrylic(window, Some(color))
+            .map(|_| true)
+            .map_err(|error| crate::utils::errors::BExplorerError::Operation(error.to_string()))
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn refresh_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
+    window: &W,
+    mode: VibrancyMode,
+    intensity: u8,
+    dark: bool,
+) -> Result<bool> {
+    match mode {
+        VibrancyMode::None => Ok(false),
+        VibrancyMode::Mica | VibrancyMode::Blur => Ok(false),
+        VibrancyMode::Acrylic => {
+            // Reassert the existing backdrop after DWM finishes a native
+            // maximize/restore transition. Do not clear it first: clearing the
+            // system backdrop is the flash this recovery path must avoid.
+            if apply_windows_acrylic(window, windows_acrylic_color(intensity, dark))? {
+                Ok(true)
+            } else {
+                Err(crate::utils::errors::BExplorerError::Operation(
+                    "DWM did not confirm the requested Acrylic backdrop".to_owned(),
+                ))
             }
         }
     }

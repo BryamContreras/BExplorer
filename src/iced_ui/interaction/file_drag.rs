@@ -1,7 +1,7 @@
 use super::*;
 
 fn file_drag_source_allowed(is_this_pc_root: bool, is_trash_item: bool, kind: &EntryKind) -> bool {
-    !is_trash_item && !(is_this_pc_root && *kind == EntryKind::Drive)
+    !(is_trash_item || (is_this_pc_root && *kind == EntryKind::Drive))
 }
 
 impl BExplorerIced {

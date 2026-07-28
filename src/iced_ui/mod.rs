@@ -100,10 +100,62 @@ const LAYOUT_ANIMATION_RESPONSE: f32 = 24.0;
 const POPUP_ANIMATION_RESPONSE: f32 = 30.0;
 const CONTEXT_MENU_ANIMATION_RESPONSE: f32 = 64.0;
 const CONTEXT_MENU_INITIAL_SCALE: f32 = 0.98;
+#[cfg(target_os = "windows")]
+const WINDOWS_BACKDROP_REFRESH_SETTLE: Duration = Duration::from_millis(160);
+#[cfg(target_os = "windows")]
+const WINDOWS_MAXIMIZE_APPEARANCE_WATCHDOG: Duration = Duration::from_millis(240);
+#[cfg(target_os = "windows")]
+const WINDOWS_BACKDROP_REFRESH_MAX_RETRIES: u8 = 3;
 const SPLIT_DIVIDER_WIDTH: f32 = 6.0;
 const SPLIT_MIN_RATIO: f32 = 0.24;
 const SPLIT_MAX_RATIO: f32 = 0.76;
 const DETAIL_HEADER_HEIGHT: f32 = 30.0;
+
+#[derive(Clone, Copy)]
+enum WindowVibrancyUpdate {
+    Skip,
+    Reset,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy)]
+struct WindowsMaximizeTransition {
+    epoch: u64,
+    target: bool,
+    after_generation: u64,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WindowsBackdropRefresh {
+    token: u64,
+    revision: u64,
+    maximized: bool,
+    attempt: u8,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_maximize_transition_completed(
+    transition: WindowsMaximizeTransition,
+    generation: u64,
+    maximized: bool,
+) -> bool {
+    generation > transition.after_generation && maximized == transition.target
+}
+
+#[cfg(target_os = "windows")]
+fn windows_backdrop_refresh_is_due(requested: bool, pending: bool) -> bool {
+    requested || pending
+}
+
+#[cfg(target_os = "windows")]
+fn windows_maximized_visual_state(reported_maximized: bool, pending_target: Option<bool>) -> bool {
+    // The public state is updated optimistically when the caption button is
+    // pressed. Keep painting the old material density until the native
+    // maximize/restore transaction has actually settled.
+    pending_target.map_or(reported_maximized, |target| !target)
+}
+
 const DETAIL_ROW_HEIGHT: f32 = 26.0;
 const DETAIL_ICON_SIZE: f32 = 18.0;
 const DETAIL_GROUP_HEIGHT: f32 = 26.0;
@@ -630,6 +682,16 @@ struct BExplorerIced {
     sidebar_visible: bool,
     sidebar_pointer_inside: bool,
     window_maximized: bool,
+    #[cfg(target_os = "windows")]
+    pending_window_maximized_appearance: Option<WindowsMaximizeTransition>,
+    #[cfg(target_os = "windows")]
+    window_appearance_epoch: u64,
+    #[cfg(target_os = "windows")]
+    windows_native_appearance_generation: u64,
+    #[cfg(target_os = "windows")]
+    windows_pending_backdrop_refresh: Option<WindowsBackdropRefresh>,
+    #[cfg(target_os = "windows")]
+    windows_backdrop_refresh_token: u64,
     startup: StartupState,
     main_window_id: Option<window::Id>,
     main_window_detached_for_operations: bool,
@@ -684,6 +746,7 @@ fn input_event_message(event: Event, status: event::Status, window: window::Id) 
         Event::Touch(iced::touch::Event::FingerPressed { .. }) => {
             Some(Message::CheckAddressFocus(window))
         }
+        Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused(window)),
         Event::Window(window::Event::FileDropped(path)) => Some(Message::ExternalFileDropped(path)),
         _ => None,
     }
@@ -1193,6 +1256,16 @@ impl BExplorerIced {
             accent_hue_dragging: false,
             accent_hue_pointer: None,
             window_maximized: initial_window_maximized,
+            #[cfg(target_os = "windows")]
+            pending_window_maximized_appearance: None,
+            #[cfg(target_os = "windows")]
+            window_appearance_epoch: 0,
+            #[cfg(target_os = "windows")]
+            windows_native_appearance_generation: 0,
+            #[cfg(target_os = "windows")]
+            windows_pending_backdrop_refresh: None,
+            #[cfg(target_os = "windows")]
+            windows_backdrop_refresh_token: 0,
             startup,
             main_window_id: None,
             main_window_detached_for_operations: false,
@@ -1370,6 +1443,22 @@ impl BExplorerIced {
         self.config.vibrancy_active && self.requests_linux_surface_blur()
     }
 
+    fn uses_windows_maximized_acrylic(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            windows_maximized_visual_state(
+                self.window_maximized,
+                self.pending_window_maximized_appearance
+                    .map(|transition| transition.target),
+            ) && self.config.vibrancy_active
+                && self.config.vibrancy == VibrancyMode::Acrylic
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            false
+        }
+    }
+
     fn file_content_background(&self, palette: Palette) -> Color {
         let mut background = palette.table_bg;
         if self.uses_linux_surface_blur() {
@@ -1416,7 +1505,7 @@ impl BExplorerIced {
     }
 
     fn apply_window_corners_task_for(&self, id: window::Id) -> Task<Message> {
-        self.apply_window_appearance_task_for(id, true)
+        self.apply_window_appearance_task_for(id, WindowVibrancyUpdate::Reset)
     }
 
     fn close_window_task(&mut self, id: window::Id) -> Task<Message> {
@@ -1602,8 +1691,66 @@ impl BExplorerIced {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     fn sync_main_window_maximized_task(&self, id: window::Id) -> Task<Message> {
         window::is_maximized(id).map(move |maximized| Message::WindowMaximizedState(id, maximized))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn next_window_appearance_epoch(&mut self) -> u64 {
+        self.window_appearance_epoch = self.window_appearance_epoch.wrapping_add(1).max(1);
+        self.window_appearance_epoch
+    }
+
+    #[cfg(target_os = "windows")]
+    fn next_windows_backdrop_refresh(
+        &mut self,
+        revision: u64,
+        maximized: bool,
+    ) -> (WindowsBackdropRefresh, Task<Message>) {
+        self.windows_backdrop_refresh_token =
+            self.windows_backdrop_refresh_token.wrapping_add(1).max(1);
+        let refresh = WindowsBackdropRefresh {
+            token: self.windows_backdrop_refresh_token,
+            revision,
+            maximized,
+            attempt: 0,
+        };
+        self.windows_pending_backdrop_refresh = Some(refresh);
+        let task = Task::perform(delay(WINDOWS_BACKDROP_REFRESH_SETTLE), move |_| {
+            Message::WindowsBackdropRefreshReady(refresh.token, refresh.revision, refresh.attempt)
+        });
+        (refresh, task)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn retry_windows_backdrop_refresh(
+        &mut self,
+        mut refresh: WindowsBackdropRefresh,
+    ) -> Task<Message> {
+        refresh.attempt = refresh.attempt.saturating_add(1);
+        self.windows_pending_backdrop_refresh = Some(refresh);
+        Task::perform(delay(WINDOWS_BACKDROP_REFRESH_SETTLE), move |_| {
+            Message::WindowsBackdropRefreshReady(refresh.token, refresh.revision, refresh.attempt)
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn apply_main_window_region_task_for(
+        &self,
+        id: window::Id,
+        revision: u64,
+        maximized: bool,
+    ) -> Task<Message> {
+        let radius = if maximized { 1 } else { WINDOW_RADIUS as u32 };
+        window::run(id, move |native_window| {
+            if crate::platform::main_window_region_update_is_current(revision)
+                && let Ok(window_handle) = native_window.window_handle()
+            {
+                let _ = crate::platform::apply_main_window_region(&window_handle, radius);
+            }
+            Message::Noop
+        })
     }
 
     fn main_window_corner_radius(&self) -> f32 {
@@ -1650,7 +1797,56 @@ impl BExplorerIced {
     }
 
     fn apply_window_corners_only_task_for(&self, id: window::Id) -> Task<Message> {
-        self.apply_window_appearance_task_for(id, false)
+        self.apply_window_appearance_task_for(id, WindowVibrancyUpdate::Skip)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn refresh_window_backdrop_task_for(
+        &self,
+        id: window::Id,
+        refresh: WindowsBackdropRefresh,
+    ) -> Task<Message> {
+        let vibrancy = self.config.vibrancy;
+        let vibrancy_intensity = self.config.vibrancy_intensity;
+        let dark = self.is_dark_theme();
+        window::run(id, move |native_window| {
+            if !crate::platform::main_window_backdrop_update_is_current(refresh.revision) {
+                return Message::WindowsBackdropRefreshFinished(
+                    refresh.token,
+                    refresh.revision,
+                    refresh.attempt,
+                    None,
+                );
+            }
+            let active = match crate::platform::refresh_window_vibrancy(
+                native_window,
+                vibrancy,
+                vibrancy_intensity,
+                dark,
+            ) {
+                Ok(active) => active,
+                Err(error) => {
+                    // A transient DWM failure must not switch the Iced
+                    // surfaces to their opaque fallback or consume the
+                    // outstanding recovery request.
+                    crate::utils::log::info(format!(
+                        "Native window effect could not be restored: {error}"
+                    ));
+                    return Message::WindowsBackdropRefreshFinished(
+                        refresh.token,
+                        refresh.revision,
+                        refresh.attempt,
+                        None,
+                    );
+                }
+            };
+            Message::WindowsBackdropRefreshFinished(
+                refresh.token,
+                refresh.revision,
+                refresh.attempt,
+                Some(active),
+            )
+        })
     }
 
     fn prepare_native_file_drag_task_for(&self, id: window::Id) -> Task<Message> {
@@ -1733,7 +1929,7 @@ impl BExplorerIced {
     fn apply_window_appearance_task_for(
         &self,
         id: window::Id,
-        apply_vibrancy: bool,
+        vibrancy_update: WindowVibrancyUpdate,
     ) -> Task<Message> {
         let radius = if self.main_window_id == Some(id) {
             self.main_window_corner_radius()
@@ -1774,25 +1970,27 @@ impl BExplorerIced {
                     let _ = crate::platform::prepare_storage_change_notifications(&window_handle);
                 }
             }
-            if apply_vibrancy {
-                let active = crate::platform::apply_window_vibrancy(
-                    native_window,
-                    vibrancy,
-                    vibrancy_intensity,
-                    dark,
-                    width,
-                    height,
-                    radius,
-                )
-                .unwrap_or_else(|error| {
-                    crate::utils::log::info(format!(
-                        "Native window effect could not be applied; using opaque fallback: {error}"
-                    ));
-                    false
-                });
-                return Message::VibrancyApplied(active);
+            match vibrancy_update {
+                WindowVibrancyUpdate::Skip => Message::Noop,
+                WindowVibrancyUpdate::Reset => {
+                    let active = crate::platform::apply_window_vibrancy(
+                        native_window,
+                        vibrancy,
+                        vibrancy_intensity,
+                        dark,
+                        width,
+                        height,
+                        radius,
+                    )
+                    .unwrap_or_else(|error| {
+                        crate::utils::log::info(format!(
+                            "Native window effect could not be applied; using opaque fallback: {error}"
+                        ));
+                        false
+                    });
+                    Message::VibrancyApplied(active)
+                }
             }
-            Message::Noop
         })
     }
 
@@ -1894,6 +2092,10 @@ impl BExplorerIced {
         } else {
             Subscription::none()
         };
+        #[cfg(target_os = "windows")]
+        let windows_window_appearance = Subscription::run(windows_window_appearance_stream);
+        #[cfg(not(target_os = "windows"))]
+        let windows_window_appearance = Subscription::none();
         let directory_changes = if cfg!(any(target_os = "windows", target_os = "linux")) {
             Subscription::run(directory_change_stream)
         } else {
@@ -1916,6 +2118,7 @@ impl BExplorerIced {
             search_tick,
             system_theme_changes,
             storage_changes,
+            windows_window_appearance,
             directory_changes,
         ])
     }
@@ -1937,6 +2140,21 @@ mod address_focus_tests {
         assert!(matches!(
             message,
             Some(Message::CheckAddressFocus(id)) if id == window
+        ));
+    }
+
+    #[test]
+    fn an_unfocused_window_is_identified_by_the_input_subscription() {
+        let window = window::Id::unique();
+        let message = input_event_message(
+            Event::Window(window::Event::Unfocused),
+            event::Status::Ignored,
+            window,
+        );
+
+        assert!(matches!(
+            message,
+            Some(Message::WindowUnfocused(id)) if id == window
         ));
     }
 }
@@ -1994,5 +2212,43 @@ mod context_layout_tests {
             fitted_tab_width(100.0, 10, 32.0, 3.0, preferred, minimum),
             minimum
         );
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_appearance_state_tests {
+    use super::{
+        WindowsMaximizeTransition, windows_backdrop_refresh_is_due,
+        windows_maximize_transition_completed, windows_maximized_visual_state,
+    };
+
+    #[test]
+    fn queued_settle_does_not_complete_a_new_maximize_request() {
+        let transition = WindowsMaximizeTransition {
+            epoch: 7,
+            target: true,
+            after_generation: 12,
+        };
+
+        assert!(!windows_maximize_transition_completed(transition, 12, true));
+        assert!(!windows_maximize_transition_completed(
+            transition, 13, false
+        ));
+        assert!(windows_maximize_transition_completed(transition, 13, true));
+    }
+
+    #[test]
+    fn backdrop_refresh_debt_survives_a_settle_without_a_new_request() {
+        assert!(windows_backdrop_refresh_is_due(false, true));
+        assert!(windows_backdrop_refresh_is_due(true, false));
+        assert!(!windows_backdrop_refresh_is_due(false, false));
+    }
+
+    #[test]
+    fn acrylic_density_changes_only_after_native_maximize_settles() {
+        assert!(!windows_maximized_visual_state(true, Some(true)));
+        assert!(windows_maximized_visual_state(false, Some(false)));
+        assert!(windows_maximized_visual_state(true, None));
+        assert!(!windows_maximized_visual_state(false, None));
     }
 }

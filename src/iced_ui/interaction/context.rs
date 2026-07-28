@@ -149,6 +149,7 @@ impl BExplorerIced {
             source_screenshot: None,
             submenu_backdrop: None,
             submenu_backdrop_kind: None,
+            submenu_backdrop_pending_kind: None,
             paste_available: false,
             open_with_applications: Vec::new(),
             send_to_targets,
@@ -366,9 +367,25 @@ impl BExplorerIced {
         let Some(menu) = self.context_menu.as_ref() else {
             return Task::none();
         };
+        if menu.submenu_backdrop_kind == Some(kind) {
+            if let Some(menu) = self.context_menu.as_mut() {
+                menu.submenu_backdrop_pending_kind = None;
+            }
+            return Task::none();
+        }
         let request_id = menu.request_id;
-        if let Some(screenshot) = menu.source_screenshot.clone() {
-            let (origin, size) = self.context_submenu_geometry(menu, kind);
+        let source = menu
+            .source_screenshot
+            .clone()
+            .map(|screenshot| (screenshot, self.context_submenu_geometry(menu, kind)));
+        if let Some(menu) = self
+            .context_menu
+            .as_mut()
+            .filter(|menu| menu.request_id == request_id)
+        {
+            menu.submenu_backdrop_pending_kind = Some(kind);
+        }
+        if let Some((screenshot, (origin, size))) = source {
             return Task::perform(
                 async move {
                     run_blocking_file_operation(move || {
@@ -385,11 +402,35 @@ impl BExplorerIced {
             );
         }
         let Some(id) = self.main_window_id else {
-            return Task::none();
+            return Task::done(Message::ContextSubmenuBackdropPrepared(
+                request_id, kind, None,
+            ));
         };
         window::screenshot(id).map(move |screenshot| {
             Message::ContextSubmenuBackdropCaptured(request_id, kind, screenshot)
         })
+    }
+
+    pub(in crate::iced_ui) fn context_submenu_backdrop_ready(
+        &self,
+        kind: ContextSubmenuKind,
+    ) -> bool {
+        self.context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.submenu_backdrop_kind == Some(kind))
+    }
+
+    pub(in crate::iced_ui) fn cancel_context_submenu_backdrop_request(
+        &mut self,
+        kind: ContextSubmenuKind,
+    ) {
+        if let Some(menu) = self
+            .context_menu
+            .as_mut()
+            .filter(|menu| menu.submenu_backdrop_pending_kind == Some(kind))
+        {
+            menu.submenu_backdrop_pending_kind = None;
+        }
     }
 
     /// Captures the content below a popup before making that popup visible.
@@ -808,7 +849,8 @@ impl BExplorerIced {
         }
         if command == ContextCommand::CompressMenu {
             self.keyboard_menu_selection = None;
-            self.context_archive_submenu = true;
+            self.context_archive_submenu =
+                self.context_submenu_backdrop_ready(ContextSubmenuKind::Archive);
             self.context_open_with_submenu = false;
             self.context_send_to_submenu = false;
             self.context_extract_submenu = false;
@@ -817,7 +859,8 @@ impl BExplorerIced {
         }
         if command == ContextCommand::ExtractMenu {
             self.keyboard_menu_selection = None;
-            self.context_archive_submenu = true;
+            self.context_archive_submenu =
+                self.context_submenu_backdrop_ready(ContextSubmenuKind::Extract);
             self.context_open_with_submenu = false;
             self.context_send_to_submenu = false;
             self.context_extract_submenu = true;
@@ -826,7 +869,8 @@ impl BExplorerIced {
         }
         if command == ContextCommand::OpenWithMenu {
             self.keyboard_menu_selection = None;
-            self.context_open_with_submenu = true;
+            self.context_open_with_submenu =
+                self.context_submenu_backdrop_ready(ContextSubmenuKind::OpenWith);
             self.context_send_to_submenu = false;
             self.context_archive_submenu = false;
             self.context_extract_submenu = false;
@@ -838,7 +882,8 @@ impl BExplorerIced {
         }
         if command == ContextCommand::SendToMenu {
             self.keyboard_menu_selection = None;
-            self.context_send_to_submenu = true;
+            self.context_send_to_submenu =
+                self.context_submenu_backdrop_ready(ContextSubmenuKind::SendTo);
             self.context_open_with_submenu = false;
             self.context_archive_submenu = false;
             self.context_extract_submenu = false;
@@ -850,7 +895,7 @@ impl BExplorerIced {
         }
         if command == ContextCommand::NewMenu {
             self.keyboard_menu_selection = None;
-            self.context_new_submenu = true;
+            self.context_new_submenu = self.context_submenu_backdrop_ready(ContextSubmenuKind::New);
             self.context_open_with_submenu = false;
             self.context_send_to_submenu = false;
             self.context_archive_submenu = false;

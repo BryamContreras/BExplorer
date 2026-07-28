@@ -1176,3 +1176,11 @@ pub(in crate::iced_ui) fn layered_blur_tint_alpha(primary_alpha: f32) -> f32 {
 pub(in crate::iced_ui) fn blur_frame_tint_alpha(primary_alpha: f32) -> f32 {
     ((1.0 - primary_alpha.clamp(0.0, 1.0)) * 0.50).clamp(0.0, 1.0)
 }
+
+#[cfg(target_os = "windows")]
+pub(in crate::iced_ui) fn maximized_acrylic_frame_tint_alpha(primary_alpha: f32) -> f32 {
+    // The title bar, sidebar, pane and file surface already cover the whole
+    // client area. Keep only a light root tint while maximized so those nested
+    // surfaces do not hide most of Desktop Acrylic on a full-screen canvas.
+    ((1.0 - primary_alpha.clamp(0.0, 1.0)) * 0.12).clamp(0.0, 1.0)
+}
