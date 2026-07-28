@@ -1,6 +1,14 @@
 use super::*;
 use iced::widget::{column, row};
 
+fn context_menu_shadow(opacity: f32) -> iced::Shadow {
+    iced::Shadow {
+        color: Color::from_rgba8(0, 0, 0, 0.28 * opacity.clamp(0.0, 1.0)),
+        offset: iced::Vector::new(0.0, 7.0),
+        blur_radius: 18.0,
+    }
+}
+
 impl BExplorerIced {
     pub(super) fn title_bar(&self, palette: Palette) -> Element<'_, Message> {
         let menu = icon_button(
@@ -425,6 +433,7 @@ impl BExplorerIced {
         let Some(menu_state) = &self.context_menu else {
             return Space::new().into();
         };
+        let shadow_opacity = self.popup_fade_progress;
         let (x, y) = self.context_menu_window_position(menu_state);
         let menu_height = self.context_menu_height(menu_state);
         let menu_width = context_menu_width(self.font_size());
@@ -860,11 +869,7 @@ impl BExplorerIced {
                 container::Style::default()
                     .background(palette.menu_bg)
                     .border(border::rounded(7).color(palette.strong_border).width(1))
-                    .shadow(iced::Shadow {
-                        color: Color::from_rgba8(0, 0, 0, 0.28),
-                        offset: iced::Vector::new(0.0, 7.0),
-                        blur_radius: 18.0,
-                    })
+                    .shadow(context_menu_shadow(shadow_opacity))
             });
         let menu = self.frosted_popup_surface(
             menu_state.backdrop.as_ref(),
@@ -907,7 +912,12 @@ impl BExplorerIced {
             .into();
 
         let mut overlay_layers = vec![backdrop.into(), floating_menu];
-        if self.context_open_with_submenu && is_entry && !trash_view {
+        let submenu_backdrop_ready = |kind| menu_state.submenu_backdrop_kind == Some(kind);
+        if self.context_open_with_submenu
+            && is_entry
+            && !trash_view
+            && submenu_backdrop_ready(ContextSubmenuKind::OpenWith)
+        {
             let applications = &menu_state.open_with_applications;
             let mut submenu_labels = applications
                 .iter()
@@ -965,11 +975,7 @@ impl BExplorerIced {
                 container::Style::default()
                     .background(palette.menu_bg)
                     .border(border::rounded(7).color(palette.strong_border).width(1))
-                    .shadow(iced::Shadow {
-                        color: Color::from_rgba8(0, 0, 0, 0.28),
-                        offset: iced::Vector::new(0.0, 7.0),
-                        blur_radius: 18.0,
-                    })
+                    .shadow(context_menu_shadow(shadow_opacity))
             });
             let submenu_backdrop = (menu_state.submenu_backdrop_kind
                 == Some(ContextSubmenuKind::OpenWith))
@@ -1004,6 +1010,7 @@ impl BExplorerIced {
             && is_entry
             && !trash_view
             && !menu_state.send_to_targets.is_empty()
+            && submenu_backdrop_ready(ContextSubmenuKind::SendTo)
         {
             let labels = menu_state
                 .send_to_targets
@@ -1039,11 +1046,7 @@ impl BExplorerIced {
                 container::Style::default()
                     .background(palette.menu_bg)
                     .border(border::rounded(7).color(palette.strong_border).width(1))
-                    .shadow(iced::Shadow {
-                        color: Color::from_rgba8(0, 0, 0, 0.28),
-                        offset: iced::Vector::new(0.0, 7.0),
-                        blur_radius: 18.0,
-                    })
+                    .shadow(context_menu_shadow(shadow_opacity))
             });
             let submenu_backdrop = (menu_state.submenu_backdrop_kind
                 == Some(ContextSubmenuKind::SendTo))
@@ -1074,7 +1077,13 @@ impl BExplorerIced {
                     .into(),
             );
         }
-        if self.context_archive_submenu && is_entry {
+        let archive_submenu_kind = if self.context_extract_submenu {
+            ContextSubmenuKind::Extract
+        } else {
+            ContextSubmenuKind::Archive
+        };
+        if self.context_archive_submenu && is_entry && submenu_backdrop_ready(archive_submenu_kind)
+        {
             let (submenu_rows, submenu_labels): (Element<'_, Message>, Vec<String>) =
                 if self.context_extract_submenu {
                     let extract_to_label = self
@@ -1205,17 +1214,9 @@ impl BExplorerIced {
                     container::Style::default()
                         .background(palette.menu_bg)
                         .border(border::rounded(7).color(palette.strong_border).width(1))
-                        .shadow(iced::Shadow {
-                            color: Color::from_rgba8(0, 0, 0, 0.28),
-                            offset: iced::Vector::new(0.0, 7.0),
-                            blur_radius: 18.0,
-                        })
+                        .shadow(context_menu_shadow(shadow_opacity))
                 });
-            let submenu_kind = if self.context_extract_submenu {
-                ContextSubmenuKind::Extract
-            } else {
-                ContextSubmenuKind::Archive
-            };
+            let submenu_kind = archive_submenu_kind;
             let submenu_backdrop = (menu_state.submenu_backdrop_kind == Some(submenu_kind))
                 .then_some(menu_state.submenu_backdrop.as_ref())
                 .flatten();
@@ -1249,7 +1250,10 @@ impl BExplorerIced {
                     .translate(move |_, _| Vector::new(submenu_x, submenu_y))
                     .into(),
             );
-        } else if self.context_new_submenu && !is_entry {
+        } else if self.context_new_submenu
+            && !is_entry
+            && submenu_backdrop_ready(ContextSubmenuKind::New)
+        {
             let labels = vec![
                 self.localized("Nueva carpeta", "New folder").to_owned(),
                 self.localized("Documento de texto", "Text document")
@@ -1285,11 +1289,7 @@ impl BExplorerIced {
                 container::Style::default()
                     .background(palette.menu_bg)
                     .border(border::rounded(7).color(palette.strong_border).width(1))
-                    .shadow(iced::Shadow {
-                        color: Color::from_rgba8(0, 0, 0, 0.28),
-                        offset: iced::Vector::new(0.0, 7.0),
-                        blur_radius: 18.0,
-                    })
+                    .shadow(context_menu_shadow(shadow_opacity))
             });
             let submenu_x = if x + menu_width + submenu_width <= self.window_size.width - 8.0 {
                 x + menu_width - 6.0

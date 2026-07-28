@@ -339,6 +339,19 @@ mod tests {
         assert_eq!(vibrancy_surface_alpha(0, VibrancyMode::Blur, true), 1.0);
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn maximized_acrylic_uses_only_a_light_root_tint() {
+        let primary = vibrancy_surface_alpha(100, VibrancyMode::Acrylic, false);
+        let frame = maximized_acrylic_frame_tint_alpha(primary);
+        let restored_file_surface = 1.0 - (1.0 - primary).powi(3);
+        let maximized_file_surface = 1.0 - (1.0 - frame) * (1.0 - primary).powi(2);
+
+        assert!((primary - 0.30).abs() < f32::EPSILON);
+        assert!((frame - 0.084).abs() < 0.000_01);
+        assert!(maximized_file_surface < restored_file_surface - 0.10);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn kwin_blur_curve_is_smooth_and_keeps_the_backdrop_readable() {

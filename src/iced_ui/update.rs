@@ -1974,8 +1974,8 @@ impl BExplorerIced {
                     return Task::none();
                 }
                 menu.backdrop = backdrop;
-                self.popup_fade_progress = 0.0;
                 self.context_menu = Some(menu);
+                self.begin_popup_animation(false);
                 Task::none()
             }
             Message::ContextSubmenuBackdropCaptured(request_id, kind, screenshot) => {
@@ -2006,13 +2006,32 @@ impl BExplorerIced {
                 )
             }
             Message::ContextSubmenuBackdropPrepared(request_id, kind, backdrop) => {
-                if let Some(menu) = self
-                    .context_menu
-                    .as_mut()
-                    .filter(|menu| menu.request_id == request_id)
-                {
+                let prepared = if let Some(menu) = self.context_menu.as_mut().filter(|menu| {
+                    menu.request_id == request_id
+                        && menu.submenu_backdrop_pending_kind == Some(kind)
+                }) {
                     menu.submenu_backdrop = backdrop;
                     menu.submenu_backdrop_kind = Some(kind);
+                    menu.submenu_backdrop_pending_kind = None;
+                    true
+                } else {
+                    false
+                };
+                if prepared {
+                    match kind {
+                        ContextSubmenuKind::OpenWith => {
+                            self.context_open_with_submenu = true;
+                        }
+                        ContextSubmenuKind::SendTo => {
+                            self.context_send_to_submenu = true;
+                        }
+                        ContextSubmenuKind::Archive | ContextSubmenuKind::Extract => {
+                            self.context_archive_submenu = true;
+                        }
+                        ContextSubmenuKind::New => {
+                            self.context_new_submenu = true;
+                        }
+                    }
                 }
                 Task::none()
             }
@@ -2128,7 +2147,8 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::ContextArchiveParentEnter => {
-                self.context_archive_submenu = true;
+                self.context_archive_submenu =
+                    self.context_submenu_backdrop_ready(ContextSubmenuKind::Archive);
                 self.context_open_with_submenu = false;
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
@@ -2139,7 +2159,8 @@ impl BExplorerIced {
                 self.request_context_submenu_backdrop(ContextSubmenuKind::Archive)
             }
             Message::ContextExtractParentEnter => {
-                self.context_archive_submenu = true;
+                self.context_archive_submenu =
+                    self.context_submenu_backdrop_ready(ContextSubmenuKind::Extract);
                 self.context_open_with_submenu = false;
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
@@ -2150,7 +2171,8 @@ impl BExplorerIced {
                 self.request_context_submenu_backdrop(ContextSubmenuKind::Extract)
             }
             Message::ContextNewParentEnter => {
-                self.context_new_submenu = true;
+                self.context_new_submenu =
+                    self.context_submenu_backdrop_ready(ContextSubmenuKind::New);
                 self.context_open_with_submenu = false;
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
@@ -2166,7 +2188,8 @@ impl BExplorerIced {
                 };
                 let pane = menu.pane;
                 let target = menu.target;
-                self.context_open_with_submenu = true;
+                self.context_open_with_submenu =
+                    self.context_submenu_backdrop_ready(ContextSubmenuKind::OpenWith);
                 self.context_open_with_parent_hovered = true;
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
@@ -2180,6 +2203,7 @@ impl BExplorerIced {
             }
             Message::ContextOpenWithParentExit => {
                 self.context_open_with_parent_hovered = false;
+                self.cancel_context_submenu_backdrop_request(ContextSubmenuKind::OpenWith);
                 Task::perform(delay(Duration::from_millis(140)), |_| {
                     Message::CloseContextOpenWithSubmenuIfUnhovered
                 })
@@ -2202,7 +2226,8 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::ContextSendToParentEnter => {
-                self.context_send_to_submenu = true;
+                self.context_send_to_submenu =
+                    self.context_submenu_backdrop_ready(ContextSubmenuKind::SendTo);
                 self.context_send_to_parent_hovered = true;
                 self.context_open_with_submenu = false;
                 self.context_open_with_parent_hovered = false;
@@ -2217,6 +2242,7 @@ impl BExplorerIced {
             }
             Message::ContextSendToParentExit => {
                 self.context_send_to_parent_hovered = false;
+                self.cancel_context_submenu_backdrop_request(ContextSubmenuKind::SendTo);
                 Task::perform(delay(Duration::from_millis(140)), |_| {
                     Message::CloseContextSendToSubmenuIfUnhovered
                 })
@@ -2240,12 +2266,19 @@ impl BExplorerIced {
             }
             Message::ContextArchiveParentExit => {
                 self.context_archive_parent_hovered = false;
+                let kind = if self.context_extract_submenu {
+                    ContextSubmenuKind::Extract
+                } else {
+                    ContextSubmenuKind::Archive
+                };
+                self.cancel_context_submenu_backdrop_request(kind);
                 Task::perform(delay(Duration::from_millis(140)), |_| {
                     Message::CloseContextArchiveSubmenuIfUnhovered
                 })
             }
             Message::ContextNewParentExit => {
                 self.context_new_parent_hovered = false;
+                self.cancel_context_submenu_backdrop_request(ContextSubmenuKind::New);
                 Task::perform(delay(Duration::from_millis(140)), |_| {
                     Message::CloseContextNewSubmenuIfUnhovered
                 })
@@ -3530,15 +3563,35 @@ impl BExplorerIced {
             }
             Message::MainWindowOpened(id) => {
                 self.main_window_id = Some(id);
+                #[cfg(target_os = "windows")]
+                {
+                    self.pending_window_maximized_appearance = None;
+                    self.windows_pending_backdrop_refresh = None;
+                    self.windows_native_appearance_generation =
+                        crate::platform::main_window_appearance_generation();
+                    self.next_window_appearance_epoch();
+                }
                 self.main_window_detached_for_operations = false;
                 self.pending_main_window_reactivation = false;
-                Task::batch([
-                    self.apply_window_corners_task_for(id),
-                    self.prepare_native_file_drag_task_for(id),
-                    self.sync_main_window_maximized_task(id),
-                    window::minimize(id, false),
-                    window::gain_focus(id),
-                ])
+                #[cfg(target_os = "windows")]
+                {
+                    Task::batch([
+                        self.apply_window_corners_task_for(id),
+                        self.prepare_native_file_drag_task_for(id),
+                        window::minimize(id, false),
+                        window::gain_focus(id),
+                    ])
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    Task::batch([
+                        self.apply_window_corners_task_for(id),
+                        self.prepare_native_file_drag_task_for(id),
+                        self.sync_main_window_maximized_task(id),
+                        window::minimize(id, false),
+                        window::gain_focus(id),
+                    ])
+                }
             }
             Message::TransferWindowOpened(id) => {
                 self.transfer_window_id = Some(id);
@@ -3635,6 +3688,15 @@ impl BExplorerIced {
                     self.save_session();
                     save_config(&self.config);
                     self.main_window_id = None;
+                    #[cfg(target_os = "windows")]
+                    {
+                        self.pending_window_maximized_appearance = None;
+                        self.windows_pending_backdrop_refresh = None;
+                        self.windows_native_appearance_generation = self
+                            .windows_native_appearance_generation
+                            .max(crate::platform::main_window_appearance_generation());
+                        self.next_window_appearance_epoch();
+                    }
                     #[cfg(any(target_os = "windows", target_os = "linux"))]
                     crate::fs::watcher::set_visible_directories(Vec::new());
                     if self.pending_main_window_reactivation {
@@ -3882,10 +3944,23 @@ impl BExplorerIced {
                 if self.main_window_id == Some(id) {
                     self.window_size = size;
                     self.config.window_size = [size.width, size.height];
-                    Task::batch([
-                        self.apply_window_corners_only_task_for(id),
-                        self.sync_main_window_maximized_task(id),
-                    ])
+                    #[cfg(target_os = "windows")]
+                    {
+                        // Native WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE now owns
+                        // region suspension and final reconciliation. Iced only
+                        // follows the renderer size here. This event can arrive
+                        // after the native settle (including one induced by
+                        // SetWindowRgn), so it must not invalidate the pending
+                        // Acrylic recovery.
+                        Task::none()
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        Task::batch([
+                            self.apply_window_corners_only_task_for(id),
+                            self.sync_main_window_maximized_task(id),
+                        ])
+                    }
                 } else if self.transfer_window_id == Some(id)
                     && progress_window_needs_resize(size, self.transfer_window_size())
                 {
@@ -3947,6 +4022,18 @@ impl BExplorerIced {
                     Task::none()
                 }
             }
+            Message::WindowUnfocused(id) => {
+                if self.main_window_id == Some(id) {
+                    // The cached backdrop represents the active window. Do not
+                    // keep it over DWM's inactive Acrylic state, and invalidate
+                    // any capture that was still being prepared.
+                    self.context_menu_request_id = self.context_menu_request_id.saturating_add(1);
+                    if self.context_menu.is_some() {
+                        self.dismiss_context_menu();
+                    }
+                }
+                Task::none()
+            }
             Message::WindowDrag => {
                 if let Some(id) = self.main_window_id {
                     window::drag(id)
@@ -3977,14 +4064,39 @@ impl BExplorerIced {
                     // is restored through the compositor or system shortcuts.
                     self.window_maximized = !self.window_maximized;
                     self.config.window_maximized = self.window_maximized;
-                    Task::batch([
-                        window::maximize(id, self.window_maximized),
-                        self.apply_window_corners_task_for(id),
-                    ])
+                    #[cfg(target_os = "windows")]
+                    {
+                        // Winit changes native styles and the DWM visual while
+                        // maximizing. Wait for the resulting resize/state event
+                        // before touching the backdrop.
+                        let target = self.window_maximized;
+                        let epoch = self.next_window_appearance_epoch();
+                        let after_generation = crate::platform::main_window_appearance_generation();
+                        self.pending_window_maximized_appearance =
+                            Some(WindowsMaximizeTransition {
+                                epoch,
+                                target,
+                                after_generation,
+                            });
+                        Task::batch([
+                            window::maximize(id, target),
+                            Task::perform(delay(WINDOWS_MAXIMIZE_APPEARANCE_WATCHDOG), move |_| {
+                                Message::WindowMaximizeAppearanceWatchdog(id, epoch)
+                            }),
+                        ])
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        Task::batch([
+                            window::maximize(id, self.window_maximized),
+                            self.apply_window_corners_task_for(id),
+                        ])
+                    }
                 } else {
                     Task::none()
                 }
             }
+            #[cfg(not(target_os = "windows"))]
             Message::WindowMaximizedState(id, maximized) => {
                 if self.main_window_id != Some(id) {
                     return Task::none();
@@ -4000,6 +4112,140 @@ impl BExplorerIced {
                 } else {
                     Task::none()
                 }
+            }
+            #[cfg(target_os = "windows")]
+            Message::WindowsWindowAppearanceSettled(
+                generation,
+                revision,
+                maximized,
+                refresh_backdrop,
+            ) => {
+                let Some(id) = self.main_window_id else {
+                    return Task::none();
+                };
+                if generation <= self.windows_native_appearance_generation {
+                    return Task::none();
+                }
+                self.windows_native_appearance_generation = generation;
+
+                let pending = self.pending_window_maximized_appearance;
+                let completes_pending = pending.is_some_and(|transition| {
+                    windows_maximize_transition_completed(transition, generation, maximized)
+                });
+                if pending.is_none() || completes_pending {
+                    self.pending_window_maximized_appearance = None;
+                    self.window_maximized = maximized;
+                    self.config.window_maximized = maximized;
+                    if maximized {
+                        self.resize_drag = None;
+                    }
+                }
+
+                let region = self.apply_main_window_region_task_for(id, revision, maximized);
+                if windows_backdrop_refresh_is_due(
+                    refresh_backdrop,
+                    self.windows_pending_backdrop_refresh.is_some(),
+                ) {
+                    // DWM can rebuild the system-backdrop visual after WM_SIZE
+                    // has already completed. Restore the final HRGN now, then
+                    // reassert Acrylic only after the newest compositor
+                    // transition. An existing refresh debt remains latched
+                    // even when this particular settle did not request one.
+                    let (_, settle) = self.next_windows_backdrop_refresh(revision, maximized);
+                    region.chain(settle)
+                } else {
+                    region
+                }
+            }
+            #[cfg(target_os = "windows")]
+            Message::WindowsBackdropRefreshReady(token, revision, attempt) => {
+                let Some(refresh) = self.windows_pending_backdrop_refresh.filter(|refresh| {
+                    refresh.token == token
+                        && refresh.revision == revision
+                        && refresh.attempt == attempt
+                }) else {
+                    return Task::none();
+                };
+                self.main_window_id
+                    .map(|id| self.refresh_window_backdrop_task_for(id, refresh))
+                    .unwrap_or_else(Task::none)
+            }
+            #[cfg(target_os = "windows")]
+            Message::WindowsBackdropRefreshFinished(token, revision, attempt, active) => {
+                let Some(refresh) = self.windows_pending_backdrop_refresh.filter(|refresh| {
+                    refresh.token == token
+                        && refresh.revision == revision
+                        && refresh.attempt == attempt
+                }) else {
+                    return Task::none();
+                };
+                if let Some(active) = active {
+                    self.windows_pending_backdrop_refresh = None;
+                    self.config.vibrancy_active = active;
+                    return Task::none();
+                }
+
+                if crate::platform::main_window_region_update_is_current(revision)
+                    && refresh.attempt < WINDOWS_BACKDROP_REFRESH_MAX_RETRIES
+                    && let Some(id) = self.main_window_id
+                {
+                    // Retry both pieces: a transient SetWindowRgn failure keeps
+                    // the region marked suspended, while a transient DWM
+                    // failure leaves the region ready but Acrylic unconfirmed.
+                    let region = self.apply_main_window_region_task_for(
+                        id,
+                        refresh.revision,
+                        refresh.maximized,
+                    );
+                    let retry = self.retry_windows_backdrop_refresh(refresh);
+                    return region.chain(retry);
+                }
+                if crate::platform::main_window_region_update_is_current(revision) {
+                    crate::utils::log::info(
+                        "Native window appearance recovery exhausted its bounded retries; keeping the request latched for the next settle",
+                    );
+                }
+                Task::none()
+            }
+            #[cfg(target_os = "windows")]
+            Message::WindowMaximizeAppearanceWatchdog(id, epoch) => {
+                if self.main_window_id != Some(id)
+                    || self.window_appearance_epoch != epoch
+                    || self
+                        .pending_window_maximized_appearance
+                        .is_none_or(|transition| transition.epoch != epoch)
+                {
+                    return Task::none();
+                }
+                window::is_maximized(id).map(move |maximized| {
+                    Message::WindowMaximizeAppearanceWatchdogState(id, epoch, maximized)
+                })
+            }
+            #[cfg(target_os = "windows")]
+            Message::WindowMaximizeAppearanceWatchdogState(id, epoch, maximized) => {
+                if self.main_window_id != Some(id)
+                    || self.window_appearance_epoch != epoch
+                    || self
+                        .pending_window_maximized_appearance
+                        .is_none_or(|transition| transition.epoch != epoch)
+                {
+                    return Task::none();
+                }
+
+                // Windows did not produce another matching resize/state
+                // acknowledgement. Accept the authoritative native result so
+                // the pending transition cannot suppress appearance updates
+                // indefinitely.
+                self.pending_window_maximized_appearance = None;
+                self.window_maximized = maximized;
+                self.config.window_maximized = maximized;
+                if maximized {
+                    self.resize_drag = None;
+                }
+                let revision = crate::platform::main_window_appearance_revision();
+                let region = self.apply_main_window_region_task_for(id, revision, maximized);
+                let (_, settle) = self.next_windows_backdrop_refresh(revision, maximized);
+                region.chain(settle)
             }
             Message::WindowClose => {
                 #[cfg(target_os = "linux")]

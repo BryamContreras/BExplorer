@@ -171,6 +171,16 @@ impl BExplorerIced {
                 a: blur_frame_tint_alpha(palette.page_bg.a),
                 ..palette.page_bg
             }
+        } else if self.uses_windows_maximized_acrylic() {
+            #[cfg(target_os = "windows")]
+            {
+                Color {
+                    a: maximized_acrylic_frame_tint_alpha(palette.page_bg.a),
+                    ..palette.page_bg
+                }
+            }
+            #[cfg(not(target_os = "windows"))]
+            unreachable!();
         } else {
             palette.page_bg
         };
