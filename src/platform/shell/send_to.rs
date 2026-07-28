@@ -19,6 +19,12 @@ impl NativeSendToTarget {
     pub fn icon(&self) -> &'static str {
         self.icon
     }
+
+    #[cfg(target_os = "windows")]
+    pub fn icon_path(&self) -> &std::path::Path {
+        let NativeSendToAction::WindowsShell { path } = &self.action;
+        path
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,11 +58,10 @@ pub fn native_send_to_targets(paths: &[PathBuf], spanish: bool) -> Vec<NativeSen
 
     #[cfg(target_os = "windows")]
     {
-        let _ = spanish;
         if !paths.iter().all(|path| path.exists()) {
             return Vec::new();
         }
-        crate::platform::windows::send_to_targets()
+        crate::platform::windows::send_to_targets(spanish)
             .into_iter()
             .map(|target| NativeSendToTarget {
                 icon: windows_target_icon(&target.name),
