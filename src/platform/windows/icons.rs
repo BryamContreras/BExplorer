@@ -51,6 +51,13 @@ pub fn native_file_icon(
     use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
     use windows::core::PCWSTR;
 
+    if path == std::path::Path::new(crate::app::thumbnail_data::TRASH_EMPTY_ICON_LOOKUP_PATH) {
+        return native_recycle_bin_icon(false, size);
+    }
+    if path == std::path::Path::new(crate::app::thumbnail_data::TRASH_FULL_ICON_LOOKUP_PATH) {
+        return native_recycle_bin_icon(true, size);
+    }
+
     // SHGetFileInfo only exposes the legacy 16 px and 32 px image lists.
     // Ask the Shell item factory for compact 48 px sources so Details and
     // Small Icons do not upscale a 32 px icon or downscale the 256 px one.
@@ -107,6 +114,41 @@ pub fn native_file_icon(
     let icon = info.hIcon;
     let image = hicon_to_rgba(icon, size);
     let _ = unsafe { DestroyIcon(icon) };
+    image
+}
+
+fn native_recycle_bin_icon(full: bool, size: u32) -> Option<NativeIconImage> {
+    use std::mem::size_of;
+
+    use windows::Win32::UI::Shell::{
+        SHGSI_ICON, SHGSI_LARGEICON, SHGSI_SMALLICON, SHGetStockIconInfo, SHSTOCKICONINFO,
+        SIID_RECYCLER, SIID_RECYCLERFULL,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::DestroyIcon;
+
+    let mut info = SHSTOCKICONINFO {
+        cbSize: size_of::<SHSTOCKICONINFO>() as u32,
+        ..Default::default()
+    };
+    let stock_id = if full {
+        SIID_RECYCLERFULL
+    } else {
+        SIID_RECYCLER
+    };
+    let size_flag = if size <= 16 {
+        SHGSI_SMALLICON
+    } else {
+        SHGSI_LARGEICON
+    };
+    unsafe {
+        SHGetStockIconInfo(stock_id, SHGSI_ICON | size_flag, &mut info).ok()?;
+    }
+    if info.hIcon.0.is_null() {
+        return None;
+    }
+
+    let image = hicon_to_rgba(info.hIcon, size.clamp(16, 256));
+    let _ = unsafe { DestroyIcon(info.hIcon) };
     image
 }
 

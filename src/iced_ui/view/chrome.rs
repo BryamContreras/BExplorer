@@ -424,6 +424,16 @@ impl BExplorerIced {
             palette.accent
         };
         let icon: Element<'static, Message> = match &item.target {
+            SidebarTarget::Navigate(Some(path)) if explorer::is_trash_root_path(path) => self
+                .sidebar_trash_icon_handle()
+                .map(|handle| {
+                    iced_image::Image::new(handle)
+                        .width(native_icon_size)
+                        .height(native_icon_size)
+                        .content_fit(ContentFit::Contain)
+                        .into()
+                })
+                .unwrap_or_else(|| inline_icon(item.icon, fallback_icon_color, fallback_icon_size)),
             SidebarTarget::Navigate(Some(path)) if !explorer::is_virtual_path(path) => self
                 .sidebar_directory_icon_handle(path)
                 .map(|handle| {
@@ -487,6 +497,17 @@ impl BExplorerIced {
         let cache_key = sidebar_native_icon_cache_key(
             path,
             &self.sidebar_storage_entries,
+            thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+        );
+        match self.small_native_icon_cache.get(&cache_key) {
+            Some(IcedImageState::Ready(handle)) => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
+    fn sidebar_trash_icon_handle(&self) -> Option<iced_image::Handle> {
+        let (cache_key, _, _) = thumbnail_data::trash_native_icon_request(
+            self.trash_has_items?,
             thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
         );
         match self.small_native_icon_cache.get(&cache_key) {

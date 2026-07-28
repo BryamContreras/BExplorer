@@ -106,6 +106,25 @@ impl BExplorerIced {
             }
             Message::Loaded(pane, request_id, result) => {
                 let is_storage_root = self.tab_for_pane(pane).path.is_none();
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                let loaded_watch_directory = result
+                    .is_ok()
+                    .then(|| self.tab_for_pane(pane).path.clone())
+                    .flatten()
+                    .filter(|path| {
+                        !explorer::is_virtual_path(path)
+                            && !explorer::is_unc_path(path)
+                            && !crate::fs::archive_listing::is_archive_navigation_path(path)
+                            && path.is_dir()
+                    });
+                let is_trash_root = self
+                    .tab_for_pane(pane)
+                    .path
+                    .as_deref()
+                    .is_some_and(explorer::is_trash_root_path);
+                let loaded_trash_has_items = is_trash_root
+                    .then(|| result.as_ref().ok().map(|entries| !entries.is_empty()))
+                    .flatten();
                 let pending_new_folder = self
                     .pending_new_folder_rename
                     .as_ref()
@@ -159,10 +178,19 @@ impl BExplorerIced {
                 if pending_reveal.is_some() {
                     self.pending_reveal_in_new_tab = None;
                 }
+                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                if let Some(directory) = loaded_watch_directory {
+                    crate::fs::watcher::acknowledge_directories([directory]);
+                }
                 let mut tasks = vec![
                     self.queue_visible_images(pane),
                     scroll_pane_to_top_task(pane),
                 ];
+                if let Some(has_items) = loaded_trash_has_items {
+                    self.trash_icon_request_id = self.trash_icon_request_id.saturating_add(1);
+                    self.trash_has_items = Some(has_items);
+                    tasks.push(self.queue_sidebar_trash_icon(has_items));
+                }
                 if let Some(entries) = storage_entries {
                     let available_paths = entries
                         .iter()
@@ -232,6 +260,20 @@ impl BExplorerIced {
                     );
                 }
                 Task::batch(tasks)
+            }
+            Message::TrashIconStatusLoaded(request_id, result) => {
+                if request_id != self.trash_icon_request_id {
+                    return Task::none();
+                }
+                let Ok(has_items) = result else {
+                    return Task::none();
+                };
+                self.trash_has_items = Some(has_items);
+                self.queue_sidebar_trash_icon(has_items)
+            }
+            Message::DirectoryChanged(change) => self.refresh_watched_directories(change),
+            Message::WatchedDirectoryLoaded(directory, requests, result) => {
+                self.apply_watched_directory_load(directory, requests, result)
             }
             Message::SidebarStorageLoaded(result) => {
                 let entries = match result {
@@ -653,6 +695,7 @@ impl BExplorerIced {
                     }
                     self.preview_panel_target_pane = None;
                     self.save_session();
+                    self.sync_visible_directory_watches();
                     return Task::none();
                 }
 
@@ -3584,6 +3627,8 @@ impl BExplorerIced {
                     self.save_session();
                     save_config(&self.config);
                     self.main_window_id = None;
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
+                    crate::fs::watcher::set_visible_directories(Vec::new());
                     if self.pending_main_window_reactivation {
                         return self.reactivate_main_window_task(None);
                     }

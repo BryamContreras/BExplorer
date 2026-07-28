@@ -81,6 +81,7 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn start_load(&mut self, pane: PaneId) -> Task<Message> {
+        self.sync_visible_directory_watches();
         self.cancel_recursive_search(pane);
         self.sync_pane_view_mode_from_tab(pane);
         let path = self.tab_for_pane(pane).path.clone();
@@ -208,6 +209,113 @@ impl BExplorerIced {
         )
     }
 
+    pub(in crate::iced_ui) fn sync_visible_directory_watches(&self) {
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        {
+            let mut directories = Vec::with_capacity(2);
+            for pane in [PaneId::Primary, PaneId::Secondary] {
+                if pane == PaneId::Secondary && self.split.is_none() {
+                    continue;
+                }
+                let Some(path) = self.tab_for_pane(pane).path.as_ref() else {
+                    continue;
+                };
+                if explorer::is_virtual_path(path)
+                    || explorer::is_unc_path(path)
+                    || crate::fs::archive_listing::is_archive_navigation_path(path)
+                    || !path.is_dir()
+                {
+                    continue;
+                }
+                if !directories.contains(path) {
+                    directories.push(path.clone());
+                }
+            }
+            crate::fs::watcher::set_visible_directories(directories);
+        }
+    }
+
+    pub(in crate::iced_ui) fn refresh_watched_directories(
+        &mut self,
+        change: crate::fs::watcher::DirectoryChange,
+    ) -> Task<Message> {
+        for path in &change.paths {
+            self.thumbnail_cache.remove(path);
+            self.small_thumbnail_cache.remove(path);
+            self.preview_cache.remove(path);
+        }
+
+        let show_hidden = self.config.show_hidden;
+        let mut tasks = Vec::new();
+        for directory in change.directories {
+            let mut requests = Vec::with_capacity(2);
+            for pane in [PaneId::Primary, PaneId::Secondary] {
+                if pane == PaneId::Secondary && self.split.is_none() {
+                    continue;
+                }
+                if self.tab_for_pane(pane).path.as_ref() != Some(&directory) {
+                    continue;
+                }
+                let state = self.pane_mut(pane);
+                if state.loading || state.recursive_search_active {
+                    continue;
+                }
+                state.request_id = state.request_id.saturating_add(1);
+                requests.push((pane, state.request_id));
+            }
+            if requests.is_empty() {
+                continue;
+            }
+
+            let worker_directory = directory.clone();
+            tasks.push(Task::perform(
+                run_blocking_file_operation(move || {
+                    explorer::list_entries(Some(&worker_directory), show_hidden)
+                }),
+                move |result| Message::WatchedDirectoryLoaded(directory, requests, result),
+            ));
+        }
+        Task::batch(tasks)
+    }
+
+    pub(in crate::iced_ui) fn apply_watched_directory_load(
+        &mut self,
+        directory: PathBuf,
+        requests: Vec<(PaneId, u64)>,
+        result: Result<Vec<FileEntry>, String>,
+    ) -> Task<Message> {
+        let Ok(entries) = result else {
+            return Task::none();
+        };
+        let available_paths = entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect::<HashSet<_>>();
+        let item_label = self.localized("elementos", "items").to_owned();
+        let mut tasks = Vec::new();
+
+        for (pane, request_id) in requests {
+            if pane == PaneId::Secondary && self.split.is_none() {
+                continue;
+            }
+            if self.tab_for_pane(pane).path.as_ref() != Some(&directory)
+                || self.pane(pane).request_id != request_id
+            {
+                continue;
+            }
+            let state = self.pane_mut(pane);
+            state.status = format!("{} {item_label}", entries.len());
+            state.folder_entries = None;
+            state.entries = entries.clone();
+            state.selected.retain(|path| available_paths.contains(path));
+            state.selection_anchor = None;
+            state.has_vertical_overflow = false;
+            state.mark_entries_changed();
+            tasks.push(self.queue_visible_images(pane));
+        }
+        Task::batch(tasks)
+    }
+
     pub(in crate::iced_ui) fn refresh_panes_for_directories(
         &mut self,
         fallback: PaneId,
@@ -258,7 +366,12 @@ impl BExplorerIced {
                 panes.push(pane);
             }
         }
-        Task::batch(panes.into_iter().map(|pane| self.start_load(pane)))
+        let mut tasks = panes
+            .into_iter()
+            .map(|pane| self.start_load(pane))
+            .collect::<Vec<_>>();
+        tasks.push(self.refresh_sidebar_trash_icon_status());
+        Task::batch(tasks)
     }
 
     pub(in crate::iced_ui) fn queue_visible_images(&mut self, pane: PaneId) -> Task<Message> {
@@ -487,12 +600,44 @@ impl BExplorerIced {
         icon_paths.push(filesystem_root_path());
 
         let mut seen = HashSet::new();
-        let tasks = icon_paths
+        let mut tasks = icon_paths
             .into_iter()
             .filter(|path| seen.insert(path.clone()))
             .map(|path| self.queue_sidebar_path_icon(&path))
             .collect::<Vec<_>>();
+        tasks.push(self.refresh_sidebar_trash_icon_status());
         Task::batch(tasks)
+    }
+
+    pub(in crate::iced_ui) fn refresh_sidebar_trash_icon_status(&mut self) -> Task<Message> {
+        self.trash_icon_request_id = self.trash_icon_request_id.saturating_add(1);
+        let request_id = self.trash_icon_request_id;
+        Task::perform(
+            run_blocking_file_operation(|| trash_fs::native_items().map(|items| !items.is_empty())),
+            move |result| Message::TrashIconStatusLoaded(request_id, result),
+        )
+    }
+
+    pub(in crate::iced_ui) fn queue_sidebar_trash_icon(
+        &mut self,
+        has_items: bool,
+    ) -> Task<Message> {
+        let (cache_key, path, is_directory) = thumbnail_data::trash_native_icon_request(
+            has_items,
+            thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+        );
+        if self.small_native_icon_cache.contains_key(&cache_key) {
+            return Task::none();
+        }
+        self.small_native_icon_cache
+            .insert(cache_key.clone(), IcedImageState::Loading);
+        load_iced_image_task(IcedImageJob::NativeIcon {
+            cache_key,
+            path,
+            is_directory,
+            size: thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+            variant: IcedImageVariant::Small,
+        })
     }
 
     pub(in crate::iced_ui) fn queue_sidebar_path_icon(&mut self, path: &Path) -> Task<Message> {

@@ -13,6 +13,8 @@ use crate::platform::NativeIconImage;
 
 pub const NATIVE_ICON_SIZE: u32 = 256;
 pub const SMALL_ENTRY_IMAGE_SIZE: u32 = 48;
+pub const TRASH_EMPTY_ICON_LOOKUP_PATH: &str = "bexplorer-trash-empty";
+pub const TRASH_FULL_ICON_LOOKUP_PATH: &str = "bexplorer-trash-full";
 const PREVIEW_MAX_EDGE: u32 = 1200;
 const MAX_PDF_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
@@ -161,6 +163,20 @@ pub fn virtual_native_icon_request(
         }
         EntryKind::Drive => None,
     }
+}
+
+pub fn trash_native_icon_request(has_items: bool, size: u32) -> (PathBuf, PathBuf, bool) {
+    let state = if has_items { "full" } else { "empty" };
+    let lookup_path = if has_items {
+        TRASH_FULL_ICON_LOOKUP_PATH
+    } else {
+        TRASH_EMPTY_ICON_LOOKUP_PATH
+    };
+    (
+        PathBuf::from(format!("__bexplorer_trash_{state}_icon_size_{size}")),
+        PathBuf::from(lookup_path),
+        false,
+    )
 }
 
 pub fn portable_device_native_icon_request(
@@ -668,6 +684,20 @@ mod tests {
         assert!(cache_key.to_string_lossy().contains("trash_ext_mp4"));
         assert_eq!(lookup_path, PathBuf::from("bexplorer.mp4"));
         assert!(!is_directory);
+    }
+
+    #[test]
+    fn trash_sidebar_icon_requests_preserve_empty_and_full_states() {
+        let (empty_key, empty_path, empty_is_directory) =
+            trash_native_icon_request(false, SMALL_ENTRY_IMAGE_SIZE);
+        let (full_key, full_path, full_is_directory) =
+            trash_native_icon_request(true, SMALL_ENTRY_IMAGE_SIZE);
+
+        assert_ne!(empty_key, full_key);
+        assert_eq!(empty_path, Path::new(TRASH_EMPTY_ICON_LOOKUP_PATH));
+        assert_eq!(full_path, Path::new(TRASH_FULL_ICON_LOOKUP_PATH));
+        assert!(!empty_is_directory);
+        assert!(!full_is_directory);
     }
 
     #[cfg(target_os = "linux")]

@@ -136,6 +136,13 @@ enum Message {
     NetworkDiscoveryEntries(PaneId, u64, Vec<FileEntry>),
     NetworkDiscoveryAddresses(PaneId, u64, Vec<String>),
     SidebarStorageLoaded(Result<Vec<FileEntry>, String>),
+    TrashIconStatusLoaded(u64, Result<bool, String>),
+    DirectoryChanged(crate::fs::watcher::DirectoryChange),
+    WatchedDirectoryLoaded(
+        PathBuf,
+        Vec<(PaneId, u64)>,
+        Result<Vec<FileEntry>, String>,
+    ),
     StorageDevicesChanged,
     RefreshStorageAfterDeviceChange,
     CloseTab(PaneId, usize),

@@ -508,6 +508,8 @@ struct BExplorerIced {
     secondary: PaneState,
     sidebar_storage_entries: Vec<FileEntry>,
     storage_refresh_scheduled: bool,
+    trash_has_items: Option<bool>,
+    trash_icon_request_id: u64,
     search_mode_menu_open: Option<PaneId>,
     new_menu_open: Option<PaneId>,
     title_menu_open: bool,
@@ -1080,6 +1082,8 @@ impl BExplorerIced {
             secondary: PaneState::default(),
             sidebar_storage_entries: Vec::new(),
             storage_refresh_scheduled: false,
+            trash_has_items: None,
+            trash_icon_request_id: 0,
             search_mode_menu_open: None,
             new_menu_open: None,
             title_menu_open: false,
@@ -1888,6 +1892,11 @@ impl BExplorerIced {
         } else {
             Subscription::none()
         };
+        let directory_changes = if cfg!(any(target_os = "windows", target_os = "linux")) {
+            Subscription::run(directory_change_stream)
+        } else {
+            Subscription::none()
+        };
 
         Subscription::batch([
             window::resize_events().map(|(id, size)| Message::WindowResized(id, size)),
@@ -1905,6 +1914,7 @@ impl BExplorerIced {
             search_tick,
             system_theme_changes,
             storage_changes,
+            directory_changes,
         ])
     }
 }
