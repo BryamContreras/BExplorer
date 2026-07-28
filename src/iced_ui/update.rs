@@ -1729,6 +1729,19 @@ impl BExplorerIced {
                 }
                 Task::none()
             }
+            Message::TextPreviewCopy(pane, path) => {
+                let selection = self
+                    .pane(pane)
+                    .text_preview
+                    .as_ref()
+                    .filter(|preview| preview.path == path)
+                    .and_then(|preview| preview.content.selection());
+                let Some(selection) = selection.filter(|selection| !selection.is_empty()) else {
+                    return Task::none();
+                };
+                self.file_clipboard = None;
+                iced::clipboard::write(selection)
+            }
             Message::PanePointerMoved(pane, point) => {
                 self.pane_pointer = Some((pane, point));
                 self.update_file_drag_pane_position(pane, point);
@@ -2383,6 +2396,12 @@ impl BExplorerIced {
                 if self.about_open && is_escape {
                     return self.update(Message::CloseAbout);
                 }
+                if self.rename_dialog.is_some()
+                    && let Some(shortcut) =
+                        rename_clipboard_shortcut_from_key(&key, physical_key, modifiers)
+                {
+                    return self.update(Message::RenameClipboard(shortcut));
+                }
                 if self.shortcut_capture.is_some() {
                     return shortcut_binding_from_key(&key, physical_key, modifiers)
                         .map(|binding| self.update(Message::ShortcutBindingCaptured(binding)))
@@ -2407,19 +2426,38 @@ impl BExplorerIced {
 
                 Task::none()
             }
-            Message::RenameChanged(value) => {
-                if let Some(dialog) = &mut self.rename_dialog {
-                    dialog.value = value.clone();
-                    dialog.editor = text_editor::Content::with_text(&value);
-                }
-                Task::none()
-            }
             Message::RenameEdited(action) => {
                 if let Some(dialog) = &mut self.rename_dialog {
+                    let action = match action {
+                        text_editor::Action::Edit(text_editor::Edit::Paste(value)) => {
+                            text_editor::Action::Edit(text_editor::Edit::Paste(Arc::new(
+                                sanitize_rename_clipboard_text(value.as_str()),
+                            )))
+                        }
+                        action => action,
+                    };
                     dialog.editor.perform(action);
                     dialog.value = dialog.editor.text();
                 }
                 Task::none()
+            }
+            Message::RenameClipboard(shortcut) => self.handle_rename_clipboard_shortcut(shortcut),
+            Message::RenameClipboardPaste(value) => {
+                let Some(value) = value else {
+                    return Task::none();
+                };
+                let value = sanitize_rename_clipboard_text(&value);
+                let Some(dialog) = &mut self.rename_dialog else {
+                    return Task::none();
+                };
+                dialog
+                    .editor
+                    .perform(text_editor::Action::Edit(text_editor::Edit::Paste(
+                        Arc::new(value),
+                    )));
+                dialog.value = dialog.editor.text();
+                self.file_clipboard = None;
+                iced::widget::operation::focus(inline_rename_input_id())
             }
             Message::RenameSelected(pane) => self.rename_selected(pane),
             Message::ConfirmRename => self.commit_pending_rename(),

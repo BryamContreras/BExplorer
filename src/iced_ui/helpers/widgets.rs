@@ -653,14 +653,15 @@ pub(in crate::iced_ui) fn scroll_pane_to_top_task(pane: PaneId) -> Task<Message>
 }
 
 pub(in crate::iced_ui) fn inline_rename_editor<'a>(
-    value: &'a str,
+    content: &'a text_editor::Content,
     width: f32,
     font_size: f32,
     palette: Palette,
 ) -> Element<'a, Message> {
     let light_surface = palette.table_bg.r + palette.table_bg.g + palette.table_bg.b > 2.1;
     let maximum_input_width = width.max(28.0);
-    let desired_input_width = (value.chars().count() as f32 * font_size * 0.58 + 14.0).ceil();
+    let desired_input_width =
+        (content.text().chars().count() as f32 * font_size * 0.58 + 14.0).ceil();
     let input_width =
         desired_input_width.clamp(44.0_f32.min(maximum_input_width), maximum_input_width);
     let rename_border = if light_surface {
@@ -678,17 +679,18 @@ pub(in crate::iced_ui) fn inline_rename_editor<'a>(
     } else {
         palette.accent_text
     };
-    let input = text_input("", value)
+    let input = text_editor::TextEditor::new(content)
         .id(inline_rename_input_id())
-        .on_input(Message::RenameChanged)
-        .on_submit(Message::ConfirmRename)
+        .on_action(Message::RenameEdited)
+        .key_binding(rename_editor_key_binding)
         .size(font_size)
         .padding([2, 6])
-        .width(Length::Fixed(input_width))
-        .style(move |_, _status| iced::widget::text_input::Style {
+        .wrapping(iced::widget::text::Wrapping::None)
+        .width(input_width)
+        .height(Length::Fill)
+        .style(move |_, _status| text_editor::Style {
             background: rename_background.into(),
             border: border::rounded(3).color(rename_border).width(1),
-            icon: palette.muted_text,
             placeholder: rename_value,
             value: rename_value,
             selection: hover_tint(palette),
@@ -733,16 +735,7 @@ pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
     let input = text_editor::TextEditor::new(content)
         .id(inline_rename_input_id())
         .on_action(Message::RenameEdited)
-        .key_binding(|key_press| {
-            if matches!(
-                key_press.modified_key.as_ref(),
-                keyboard::Key::Named(keyboard::key::Named::Enter)
-            ) {
-                Some(text_editor::Binding::Custom(Message::ConfirmRename))
-            } else {
-                text_editor::Binding::from_key_press(key_press)
-            }
-        })
+        .key_binding(rename_editor_key_binding)
         .size(font_size)
         .padding([2, 6])
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
@@ -765,6 +758,34 @@ pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
         .width(Length::Fixed(width.max(64.0)))
         .height(Length::Fixed(height.max((font_size * 2.35).ceil())))
         .into()
+}
+
+fn rename_editor_key_binding(
+    key_press: text_editor::KeyPress,
+) -> Option<text_editor::Binding<Message>> {
+    if let Some(shortcut) = rename_clipboard_shortcut_from_key(
+        &key_press.key,
+        key_press.physical_key,
+        key_press.modifiers,
+    ) {
+        Some(text_editor::Binding::Custom(Message::RenameClipboard(
+            shortcut,
+        )))
+    } else if matches!(
+        key_press.modified_key.as_ref(),
+        keyboard::Key::Named(keyboard::key::Named::Enter)
+    ) {
+        Some(text_editor::Binding::Custom(Message::ConfirmRename))
+    } else {
+        text_editor::Binding::from_key_press(key_press)
+    }
+}
+
+pub(in crate::iced_ui) fn sanitize_rename_clipboard_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .collect()
 }
 
 pub(in crate::iced_ui) fn rename_edit_value(entry: &FileEntry) -> String {
@@ -811,17 +832,23 @@ pub(in crate::iced_ui) fn rename_target_name(value: &str) -> String {
     value.trim().to_string()
 }
 
-pub(in crate::iced_ui) fn focus_inline_rename_task(select_end: usize) -> Task<Message> {
-    let id = inline_rename_input_id();
-    // TextInput uses grapheme indices. Wrapped TextEditor instances already
-    // carry the same prefix selection in their Content before being mounted.
-    iced::widget::operation::focus(id.clone())
-        .chain(iced::widget::operation::select_range(id, select_end, 0))
+pub(in crate::iced_ui) fn focus_inline_rename_task(_select_end: usize) -> Task<Message> {
+    // Every rename view now uses the stateful TextEditor. Its Content already
+    // carries the exact cursor and prefix selection before the widget mounts.
+    iced::widget::operation::focus(inline_rename_input_id())
 }
 
 #[cfg(test)]
 mod search_highlight_tests {
-    use super::{search_highlight_token, search_match_ranges};
+    use super::{sanitize_rename_clipboard_text, search_highlight_token, search_match_ranges};
+
+    #[test]
+    fn rename_paste_remains_a_single_filename_line() {
+        assert_eq!(
+            sanitize_rename_clipboard_text("Informe\r\nfinal\t.txt"),
+            "Informefinal.txt"
+        );
+    }
 
     #[test]
     fn search_highlight_strips_extension_wildcards_case_insensitively() {

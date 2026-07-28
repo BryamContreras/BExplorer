@@ -4,6 +4,11 @@ All notable user-facing changes to BExplorer are documented here.
 
 ## Unreleased
 
+- Rename editors now prioritize text clipboard commands over file commands in
+  every view. Copy, cut, paste, and select-all share one stateful editor,
+  pasted text remains on one filename-safe line, and copying from rename or
+  read-only text previews clears stale internal file-clipboard state.
+
 ## 1.0.4 - 2026-07-27
 
 - Fixed KDE and GNOME launchers continuing to display the previous application

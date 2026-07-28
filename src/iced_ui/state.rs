@@ -252,6 +252,7 @@ enum Message {
     PdfPreviewPageLoaded(PdfPreviewLoadResult),
     PdfPreviewScrolled(PaneId, PathBuf, f32),
     TextPreviewAction(PaneId, PathBuf, text_editor::Action),
+    TextPreviewCopy(PaneId, PathBuf),
     PanePointerMoved(PaneId, Point),
     PanePointerExited(PaneId),
     StartRubberBand(PaneId),
@@ -306,8 +307,9 @@ enum Message {
         keyboard::Modifiers,
     ),
     KeyboardModifiersChanged(keyboard::Modifiers),
-    RenameChanged(String),
     RenameEdited(text_editor::Action),
+    RenameClipboard(RenameClipboardShortcut),
+    RenameClipboardPaste(Option<String>),
     RenameSelected(PaneId),
     ConfirmRename,
     RenameFinished(RenameState, Result<PathBuf, String>),
@@ -827,6 +829,14 @@ struct RenameState {
     value: String,
     editor: text_editor::Content,
     select_end: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RenameClipboardShortcut {
+    Copy,
+    Cut,
+    Paste,
+    SelectAll,
 }
 
 #[derive(Clone, Debug)]

@@ -679,15 +679,35 @@ impl BExplorerIced {
                         .as_ref()
                         .filter(|preview| preview.path == entry.path);
                     if let Some(text_preview) = text_preview {
-                        let path = entry.path.clone();
+                        let action_path = entry.path.clone();
+                        let copy_path = entry.path.clone();
                         text_editor::TextEditor::new(&text_preview.content)
                             .on_action(move |action| {
-                                Message::TextPreviewAction(pane, path.clone(), action)
+                                Message::TextPreviewAction(pane, action_path.clone(), action)
                             })
                             // Preserve the editor's complete key map so it
                             // captures Enter/Delete too; mutations themselves
                             // are discarded in `TextPreviewAction`.
-                            .key_binding(text_editor::Binding::from_key_press)
+                            .key_binding(move |key_press| {
+                                if matches!(
+                                    rename_clipboard_shortcut_from_key(
+                                        &key_press.key,
+                                        key_press.physical_key,
+                                        key_press.modifiers,
+                                    ),
+                                    Some(
+                                        RenameClipboardShortcut::Copy
+                                            | RenameClipboardShortcut::Cut
+                                    )
+                                ) {
+                                    Some(text_editor::Binding::Custom(Message::TextPreviewCopy(
+                                        pane,
+                                        copy_path.clone(),
+                                    )))
+                                } else {
+                                    text_editor::Binding::from_key_press(key_press)
+                                }
+                            })
                             .size(self.font_size())
                             .padding(self.ui_vertical_padding(8.0))
                             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)

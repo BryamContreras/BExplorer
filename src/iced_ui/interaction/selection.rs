@@ -210,6 +210,54 @@ impl BExplorerIced {
         }
     }
 
+    pub(in crate::iced_ui) fn handle_rename_clipboard_shortcut(
+        &mut self,
+        shortcut: RenameClipboardShortcut,
+    ) -> Task<Message> {
+        let Some(dialog) = &mut self.rename_dialog else {
+            return Task::none();
+        };
+
+        match shortcut {
+            RenameClipboardShortcut::Copy => {
+                let Some(selection) = dialog
+                    .editor
+                    .selection()
+                    .filter(|selection| !selection.is_empty())
+                else {
+                    return Task::none();
+                };
+                self.file_clipboard = None;
+                iced::clipboard::write(selection)
+            }
+            RenameClipboardShortcut::Cut => {
+                let Some(selection) = dialog
+                    .editor
+                    .selection()
+                    .filter(|selection| !selection.is_empty())
+                else {
+                    return Task::none();
+                };
+                dialog
+                    .editor
+                    .perform(text_editor::Action::Edit(text_editor::Edit::Delete));
+                dialog.value = dialog.editor.text();
+                self.file_clipboard = None;
+                Task::batch([
+                    iced::clipboard::write(selection),
+                    iced::widget::operation::focus(inline_rename_input_id()),
+                ])
+            }
+            RenameClipboardShortcut::Paste => {
+                iced::clipboard::read().map(Message::RenameClipboardPaste)
+            }
+            RenameClipboardShortcut::SelectAll => {
+                dialog.editor.perform(text_editor::Action::SelectAll);
+                iced::widget::operation::focus(inline_rename_input_id())
+            }
+        }
+    }
+
     pub(in crate::iced_ui) fn open_selected(&mut self, pane: PaneId) -> Task<Message> {
         self.focus_pane(pane);
         let selected_index = self
