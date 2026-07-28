@@ -391,12 +391,7 @@ impl BExplorerIced {
         let name_content: Element<'_, Message> = if let Some(dialog) = editing {
             row![
                 self.detail_file_entry_icon(entry, palette, selected, detail_icon_size),
-                inline_rename_editor(
-                    dialog.value.as_str(),
-                    name_text_width,
-                    table_font_size,
-                    palette,
-                ),
+                inline_rename_editor(&dialog.editor, name_text_width, table_font_size, palette,),
             ]
             .spacing(name_spacing)
             .align_y(Alignment::Center)

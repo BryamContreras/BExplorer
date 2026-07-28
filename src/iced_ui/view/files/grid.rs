@@ -180,7 +180,7 @@ impl BExplorerIced {
             };
             let name_editor: Element<'_, Message> = if let Some(dialog) = editing {
                 if is_this_pc_drive {
-                    inline_rename_editor(dialog.value.as_str(), text_width, font_size, palette)
+                    inline_rename_editor(&dialog.editor, text_width, font_size, palette)
                 } else {
                     wrapped_inline_rename_editor(
                         &dialog.editor,

@@ -427,6 +427,22 @@ pub(in crate::iced_ui) fn keyboard_shortcut_from_key(
     .find_map(|(action, shortcut)| (shortcuts.binding(action) == &binding).then_some(shortcut))
 }
 
+pub(in crate::iced_ui) fn rename_clipboard_shortcut_from_key(
+    key: &keyboard::Key,
+    physical_key: keyboard::key::Physical,
+    modifiers: keyboard::Modifiers,
+) -> Option<RenameClipboardShortcut> {
+    match key.to_latin(physical_key) {
+        Some('c') if modifiers.command() => Some(RenameClipboardShortcut::Copy),
+        Some('x') if modifiers.command() => Some(RenameClipboardShortcut::Cut),
+        Some('v') if modifiers.command() && !modifiers.alt() => {
+            Some(RenameClipboardShortcut::Paste)
+        }
+        Some('a') if modifiers.command() => Some(RenameClipboardShortcut::SelectAll),
+        _ => None,
+    }
+}
+
 pub(in crate::iced_ui) fn shortcut_binding_from_key(
     key: &keyboard::Key,
     physical_key: keyboard::key::Physical,
@@ -457,5 +473,40 @@ pub(in crate::iced_ui) fn shortcut_binding_from_key(
 pub(in crate::iced_ui) fn save_config(config: &AppConfig) {
     if let Err(error) = config.save() {
         crate::utils::log::error(format!("Config save failed: {error}"));
+    }
+}
+
+#[cfg(test)]
+mod rename_clipboard_shortcut_tests {
+    use super::*;
+    use iced::keyboard::key::{Code, Physical};
+
+    fn shortcut(character: &str, code: Code) -> Option<RenameClipboardShortcut> {
+        rename_clipboard_shortcut_from_key(
+            &keyboard::Key::Character(character.into()),
+            Physical::Code(code),
+            keyboard::Modifiers::CTRL,
+        )
+    }
+
+    #[test]
+    fn standard_text_shortcuts_take_priority_while_renaming() {
+        assert_eq!(
+            shortcut("c", Code::KeyC),
+            Some(RenameClipboardShortcut::Copy)
+        );
+        assert_eq!(
+            shortcut("x", Code::KeyX),
+            Some(RenameClipboardShortcut::Cut)
+        );
+        assert_eq!(
+            shortcut("v", Code::KeyV),
+            Some(RenameClipboardShortcut::Paste)
+        );
+        assert_eq!(
+            shortcut("a", Code::KeyA),
+            Some(RenameClipboardShortcut::SelectAll)
+        );
+        assert_eq!(shortcut("z", Code::KeyZ), None);
     }
 }
