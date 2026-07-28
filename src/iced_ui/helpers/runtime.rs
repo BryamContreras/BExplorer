@@ -45,23 +45,55 @@ pub(in crate::iced_ui) fn main_window_settings(size: Size, maximized: bool) -> w
     }
 }
 
-pub(in crate::iced_ui) fn progress_card_list_height(item_count: usize) -> f32 {
+pub(in crate::iced_ui) fn progress_card_height(font_size: f32) -> f32 {
+    let content_height = ui_text_line_height(font_size) * 2.0
+        + 3.0
+        + TRANSFER_PROGRESS_BAR_HEIGHT
+        + ui_text_line_height(font_size - 1.0)
+        + 14.0
+        + 14.0;
+    scaled_ui_metric(TRANSFER_CARD_HEIGHT, font_size).max(content_height)
+}
+
+pub(in crate::iced_ui) fn progress_card_gap(font_size: f32) -> f32 {
+    scaled_ui_metric(TRANSFER_CARD_GAP, font_size)
+}
+
+pub(in crate::iced_ui) fn transfer_window_title_height(font_size: f32) -> f32 {
+    scaled_ui_metric(TRANSFER_WINDOW_TITLE_HEIGHT, font_size)
+        .max(ui_text_line_height(font_size) + 8.0)
+}
+
+pub(in crate::iced_ui) fn transfer_window_width(font_size: f32) -> f32 {
+    adaptive_text_surface_width(TRANSFER_WINDOW_WIDTH, font_size)
+}
+
+pub(in crate::iced_ui) fn progress_card_list_height(item_count: usize, font_size: f32) -> f32 {
     let count = item_count.max(1) as f32;
-    count * TRANSFER_CARD_HEIGHT + (count - 1.0) * TRANSFER_CARD_GAP
+    count * progress_card_height(font_size) + (count - 1.0) * progress_card_gap(font_size)
 }
 
-pub(in crate::iced_ui) fn progress_visible_card_list_height(item_count: usize) -> f32 {
-    progress_card_list_height(item_count.min(TRANSFER_WINDOW_VISIBLE_CARD_LIMIT as usize))
+pub(in crate::iced_ui) fn progress_visible_card_list_height(
+    item_count: usize,
+    font_size: f32,
+) -> f32 {
+    progress_card_list_height(
+        item_count.min(TRANSFER_WINDOW_VISIBLE_CARD_LIMIT),
+        font_size,
+    )
 }
 
-pub(in crate::iced_ui) fn transfer_window_size_for_item_count(item_count: usize) -> Size {
+pub(in crate::iced_ui) fn transfer_window_size_for_item_count(
+    item_count: usize,
+    font_size: f32,
+) -> Size {
+    let chrome_height = WINDOW_BORDER_WIDTH * 2.0
+        + transfer_window_title_height(font_size)
+        + TRANSFER_WINDOW_CARD_TOP_GAP
+        + TRANSFER_WINDOW_CARD_BOTTOM_PADDING;
     Size::new(
-        TRANSFER_WINDOW_WIDTH,
-        (TRANSFER_WINDOW_CARD_ONLY_CHROME_HEIGHT + progress_visible_card_list_height(item_count))
-            .clamp(
-                TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT,
-                TRANSFER_WINDOW_CARD_ONLY_MAX_HEIGHT,
-            ),
+        transfer_window_width(font_size),
+        chrome_height + progress_visible_card_list_height(item_count, font_size),
     )
 }
 
@@ -164,14 +196,59 @@ pub(in crate::iced_ui) fn defender_threats_window_settings(
     fixed_progress_window_settings(defender_threats_window_size(threat_count), None)
 }
 
-#[cfg(target_os = "linux")]
-pub(in crate::iced_ui) fn properties_window_size() -> Size {
-    Size::new(PROPERTIES_WINDOW_WIDTH, PROPERTIES_WINDOW_HEIGHT)
+pub(in crate::iced_ui) fn duplicate_cleanup_window_size(font_size: f32) -> Size {
+    Size::new(
+        adaptive_text_surface_width(DUPLICATE_WINDOW_WIDTH, font_size),
+        scaled_ui_metric(DUPLICATE_WINDOW_HEIGHT, font_size),
+    )
+}
+
+pub(in crate::iced_ui) fn duplicate_cleanup_window_settings(font_size: f32) -> window::Settings {
+    window::Settings {
+        size: duplicate_cleanup_window_size(font_size),
+        min_size: Some(duplicate_cleanup_window_min_size(font_size)),
+        closeable: false,
+        decorations: false,
+        resizable: true,
+        transparent: true,
+        exit_on_close_request: false,
+        icon: app_window_icon(),
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: crate::platform::LINUX_APPLICATION_ID.into(),
+            ..window::settings::PlatformSpecific::default()
+        },
+        ..window::Settings::default()
+    }
+}
+
+pub(in crate::iced_ui) fn duplicate_cleanup_window_min_size(font_size: f32) -> Size {
+    Size::new(
+        adaptive_text_surface_width(920.0, font_size),
+        scaled_ui_metric(520.0, font_size),
+    )
+}
+
+pub(in crate::iced_ui) fn sync_duplicate_cleanup_window_constraints_task(
+    id: window::Id,
+    font_size: f32,
+) -> Task<Message> {
+    window::set_min_size(id, Some(duplicate_cleanup_window_min_size(font_size)))
+        .chain(window::set_max_size(id, None))
+        .chain(window::set_resizable(id, true))
 }
 
 #[cfg(target_os = "linux")]
-pub(in crate::iced_ui) fn properties_window_settings() -> window::Settings {
-    fixed_progress_window_settings(properties_window_size(), None)
+pub(in crate::iced_ui) fn properties_window_size(font_size: f32) -> Size {
+    Size::new(
+        adaptive_text_surface_width(PROPERTIES_WINDOW_WIDTH, font_size),
+        scaled_ui_metric(PROPERTIES_WINDOW_HEIGHT, font_size),
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(in crate::iced_ui) fn properties_window_settings(font_size: f32) -> window::Settings {
+    fixed_progress_window_settings(properties_window_size(font_size), None)
 }
 
 pub(in crate::iced_ui) fn sync_fixed_progress_window_size_task(

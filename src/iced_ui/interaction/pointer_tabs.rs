@@ -65,7 +65,11 @@ impl BExplorerIced {
                     });
                     return;
                 }
-                let width = clamp_detail_column_width(column, start_width + position.x - start_x);
+                let width = clamp_detail_column_width(
+                    column,
+                    start_width + position.x - start_x,
+                    self.font_size(),
+                );
                 self.pane_mut(pane).column_widths.set(column, width);
             }
             ResizeDrag::Preview {
@@ -100,7 +104,8 @@ impl BExplorerIced {
 
         let delta_x = position.x - drag.start_cursor_x;
         let delta_y = position.y - drag.start_cursor_y;
-        drag.offset_x = delta_x.clamp(-TAB_DRAG_MAX_OFFSET, TAB_DRAG_MAX_OFFSET);
+        let drag_max_offset = self.tab_drag_stride(drag.pane);
+        drag.offset_x = delta_x.clamp(-drag_max_offset, drag_max_offset);
         if delta_x.abs().max(delta_y.abs()) >= TAB_DRAG_START_THRESHOLD {
             drag.dragging = true;
         }
@@ -194,6 +199,7 @@ impl BExplorerIced {
         };
         let old_slot = drag.slot;
         let split_none = self.split.is_none();
+        let tab_drag_stride = self.tab_drag_stride(drag.pane);
         if let Some(new_slot) = self.reorder_dragged_tab(drag.pane, drag.tab_index, insertion_slot)
         {
             let slot_delta = new_slot as f32 - old_slot as f32;
@@ -203,9 +209,9 @@ impl BExplorerIced {
                     tab_drag.tab_index = new_slot;
                 }
                 if slot_delta != 0.0 {
-                    tab_drag.start_cursor_x += slot_delta * TAB_DRAG_STRIDE;
+                    tab_drag.start_cursor_x += slot_delta * tab_drag_stride;
                     tab_drag.offset_x = (self.cursor_position.x - tab_drag.start_cursor_x)
-                        .clamp(-TAB_DRAG_MAX_OFFSET, TAB_DRAG_MAX_OFFSET);
+                        .clamp(-tab_drag_stride, tab_drag_stride);
                     tab_drag.dirty = true;
                 }
             }
@@ -215,14 +221,16 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn tab_insertion_slot_at(&self, pane: PaneId, x: f32) -> Option<usize> {
         let (start, width) = self.title_pane_bounds(pane);
         let count = self.tab_indices_for_pane(pane).len();
-        if count <= 1 || width <= 0.0 || x < start - TAB_WIDTH || x > start + width + TAB_WIDTH {
+        let tab_width = self.tab_width_for_pane(pane);
+        let tab_drag_stride = self.tab_drag_stride(pane);
+        if count <= 1 || width <= 0.0 || x < start - tab_width || x > start + width + tab_width {
             return None;
         }
 
         let local_x = (x - start).max(0.0);
-        let slot = (local_x / TAB_DRAG_STRIDE).floor().max(0.0) as usize;
-        let within_slot = local_x - slot as f32 * TAB_DRAG_STRIDE;
-        let insertion_slot = slot + usize::from(within_slot > TAB_WIDTH * 0.5);
+        let slot = (local_x / tab_drag_stride).floor().max(0.0) as usize;
+        let within_slot = local_x - slot as f32 * tab_drag_stride;
+        let insertion_slot = slot + usize::from(within_slot > tab_width * 0.5);
         Some(insertion_slot.min(count))
     }
 
@@ -236,20 +244,21 @@ impl BExplorerIced {
                 PaneId::Primary => (start, primary_width),
                 PaneId::Secondary => (
                     start + primary_width + SPLIT_DIVIDER_WIDTH,
-                    available - primary_width,
+                    (available - primary_width - self.title_controls_width()).max(1.0),
                 ),
             }
         } else {
-            (start, area_width)
+            (start, (area_width - self.title_controls_width()).max(1.0))
         }
     }
 
     pub(in crate::iced_ui) fn title_tabs_start_x(&self) -> f32 {
-        let left_buttons = TITLE_BUTTON_WIDTH * 2.0 + TITLE_BUTTON_GAP;
+        let left_buttons =
+            self.ui_metric(TITLE_BUTTON_WIDTH) * 2.0 + self.ui_metric(TITLE_BUTTON_GAP);
         if self.sidebar_is_rendered() {
             self.current_sidebar_width().max(left_buttons)
         } else {
-            left_buttons + TITLE_TAB_START_PADDING
+            left_buttons + self.ui_metric(TITLE_TAB_START_PADDING)
         }
     }
 

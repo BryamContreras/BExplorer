@@ -1,8 +1,9 @@
-//! Optional KWin blur support for existing Iced/Wayland surfaces.
+//! Optional Wayland blur support for existing Iced surfaces on KWin.
 //!
 //! `iced::window::run` intentionally exposes only raw window/display handles.
-//! The small client context here attaches KWin's optional protocol to that
-//! existing surface and leaves all non-KWin compositors untouched.
+//! The small client context here attaches either the standardized
+//! `ext-background-effect-v1` protocol used by KWin 6.7+ or KWin's legacy blur
+//! protocol to that existing surface and leaves other compositors untouched.
 
 use std::cell::RefCell;
 
@@ -14,7 +15,13 @@ use wayland_client::protocol::{
     wl_registry::{self, WlRegistry},
     wl_surface::WlSurface,
 };
-use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
+use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum};
+use wayland_protocols::ext::background_effect::v1::client::{
+    ext_background_effect_manager_v1::{
+        self, Capability as BackgroundEffectCapability, ExtBackgroundEffectManagerV1,
+    },
+    ext_background_effect_surface_v1::ExtBackgroundEffectSurfaceV1,
+};
 use wayland_protocols_plasma::blur::client::{
     org_kde_kwin_blur::OrgKdeKwinBlur, org_kde_kwin_blur_manager::OrgKdeKwinBlurManager,
 };
@@ -30,7 +37,9 @@ thread_local! {
 struct KWinBlurState {
     _registry: Option<WlRegistry>,
     compositor: Option<WlCompositor>,
-    manager: Option<OrgKdeKwinBlurManager>,
+    standard_manager: Option<ExtBackgroundEffectManagerV1>,
+    standard_blur_supported: bool,
+    legacy_manager: Option<OrgKdeKwinBlurManager>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -55,16 +64,21 @@ struct KWinBlurContext {
     queue: EventQueue<KWinBlurState>,
     state: KWinBlurState,
     surface: WlSurface,
-    blur: Option<OrgKdeKwinBlur>,
+    blur: Option<BlurObject>,
     blur_region: Option<WlRegion>,
     blur_geometry: Option<BlurGeometry>,
 }
 
-/// Applies or removes KWin's blur request for a live Wayland surface.
+enum BlurObject {
+    Standard(ExtBackgroundEffectSurfaceV1),
+    Legacy(OrgKdeKwinBlur),
+}
+
+/// Applies or removes the compositor's blur request for a live Wayland surface.
 ///
-/// When the current compositor does not advertise the KDE protocol this is an
-/// ordinary fallback condition, surfaced to the caller so it can keep the
-/// transparent appearance without treating it as an application failure.
+/// When the current compositor advertises neither supported protocol this is
+/// an ordinary fallback condition, surfaced to the caller so it can retain a
+/// readable appearance without treating it as an application failure.
 pub(super) fn set_window_blur(
     raw_display_handle: RawDisplayHandle,
     raw_window_handle: RawWindowHandle,
@@ -215,9 +229,29 @@ impl KWinBlurContext {
             BExplorerError::Operation(format!("Wayland blur setup failed: {error}"))
         })?;
 
-        if state.manager.is_none() {
+        // The standardized manager reports its supported effects in an event
+        // sent after it is bound. That bind occurs while processing the first
+        // registry roundtrip, so a second one is needed to receive the
+        // capabilities before choosing between the standard and legacy paths.
+        if state.standard_manager.is_some() {
+            queue.roundtrip(&mut state).map_err(|error| {
+                BExplorerError::Operation(format!(
+                    "Wayland background-effect capability check failed: {error}"
+                ))
+            })?;
+        }
+
+        if state.standard_manager.is_none() && state.legacy_manager.is_none() {
             return Err(BExplorerError::Operation(
-                "KWin blur protocol is not advertised by this compositor".into(),
+                "Neither ext-background-effect-v1 nor KWin's legacy blur protocol is advertised by this compositor".into(),
+            ));
+        }
+        if state.standard_manager.is_some()
+            && !state.standard_blur_supported
+            && state.legacy_manager.is_none()
+        {
+            return Err(BExplorerError::Operation(
+                "The compositor advertises background effects without blur support".into(),
             ));
         }
         if state.compositor.is_none() {
@@ -225,7 +259,12 @@ impl KWinBlurContext {
                 "Wayland compositor could not create the rounded blur region".into(),
             ));
         }
-        crate::utils::log::info("KWin blur protocol bound for a BExplorer window");
+        let protocol = if state.standard_blur_supported {
+            "ext-background-effect-v1"
+        } else {
+            "KWin legacy blur"
+        };
+        crate::utils::log::info(format!("{protocol} protocol bound for a BExplorer window"));
 
         Ok(Self {
             display_ptr,
@@ -250,23 +289,53 @@ impl KWinBlurContext {
         if enabled {
             let created = self.blur.is_none();
             if created {
-                let manager = self.state.manager.as_ref().ok_or_else(|| {
-                    BExplorerError::Operation("KWin blur manager became unavailable".into())
-                })?;
-                self.blur = Some(manager.create(&self.surface, &self.queue.handle(), ()));
+                self.blur = if self.state.standard_blur_supported {
+                    let manager = self.state.standard_manager.as_ref().ok_or_else(|| {
+                        BExplorerError::Operation(
+                            "Wayland background-effect manager became unavailable".into(),
+                        )
+                    })?;
+                    Some(BlurObject::Standard(manager.get_background_effect(
+                        &self.surface,
+                        &self.queue.handle(),
+                        (),
+                    )))
+                } else {
+                    let manager = self.state.legacy_manager.as_ref().ok_or_else(|| {
+                        BExplorerError::Operation("KWin blur manager became unavailable".into())
+                    })?;
+                    Some(BlurObject::Legacy(manager.create(
+                        &self.surface,
+                        &self.queue.handle(),
+                        (),
+                    )))
+                };
             }
             self.apply_rounded_region(geometry)?;
             if created {
-                crate::utils::log::info(
-                    "KWin native blur request applied with rounded corners to a BExplorer window",
-                );
+                let protocol = match self.blur {
+                    Some(BlurObject::Standard(_)) => "standard Wayland",
+                    Some(BlurObject::Legacy(_)) => "legacy KWin",
+                    None => "unknown",
+                };
+                crate::utils::log::info(format!(
+                    "{protocol} blur request applied with rounded corners to a BExplorer window"
+                ));
             }
         } else if self.blur.is_some() {
-            if let Some(manager) = self.state.manager.as_ref() {
-                manager.unset(&self.surface);
-            }
-            if let Some(blur) = self.blur.take() {
-                blur.release();
+            match self.blur.take() {
+                Some(BlurObject::Standard(blur)) => {
+                    blur.set_blur_region(None);
+                    self.surface.commit();
+                    blur.destroy();
+                }
+                Some(BlurObject::Legacy(blur)) => {
+                    if let Some(manager) = self.state.legacy_manager.as_ref() {
+                        manager.unset(&self.surface);
+                    }
+                    blur.release();
+                }
+                None => {}
             }
             if let Some(region) = self.blur_region.take() {
                 region.destroy();
@@ -309,8 +378,18 @@ impl KWinBlurContext {
         for rectangle in rounded_region_rectangles(geometry) {
             region.add(rectangle.x, rectangle.y, rectangle.width, rectangle.height);
         }
-        blur.set_region(Some(&region));
-        blur.commit();
+        match blur {
+            BlurObject::Standard(blur) => {
+                blur.set_blur_region(Some(&region));
+                // ext-background-effect-v1 state is double-buffered with the
+                // wl_surface, unlike the legacy protocol's own commit request.
+                self.surface.commit();
+            }
+            BlurObject::Legacy(blur) => {
+                blur.set_region(Some(&region));
+                blur.commit();
+            }
+        }
         if let Some(previous) = self.blur_region.replace(region) {
             previous.destroy();
         }
@@ -341,8 +420,16 @@ impl Dispatch<WlRegistry, ()> for KWinBlurState {
                 state.compositor =
                     Some(registry.bind::<WlCompositor, _, _>(name, version.min(1), qh, ()));
             }
+            "ext_background_effect_manager_v1" => {
+                state.standard_manager = Some(registry.bind::<ExtBackgroundEffectManagerV1, _, _>(
+                    name,
+                    version.min(1),
+                    qh,
+                    (),
+                ));
+            }
             "org_kde_kwin_blur_manager" => {
-                state.manager = Some(registry.bind::<OrgKdeKwinBlurManager, _, _>(
+                state.legacy_manager = Some(registry.bind::<OrgKdeKwinBlurManager, _, _>(
                     name,
                     version.min(1),
                     qh,
@@ -395,6 +482,39 @@ impl Dispatch<OrgKdeKwinBlur, ()> for KWinBlurState {
         _state: &mut Self,
         _blur: &OrgKdeKwinBlur,
         _event: <OrgKdeKwinBlur as Proxy>::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ExtBackgroundEffectManagerV1, ()> for KWinBlurState {
+    fn event(
+        state: &mut Self,
+        _manager: &ExtBackgroundEffectManagerV1,
+        event: <ExtBackgroundEffectManagerV1 as Proxy>::Event,
+        _data: &(),
+        _connection: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let ext_background_effect_manager_v1::Event::Capabilities { flags } = event else {
+            return;
+        };
+        state.standard_blur_supported = match flags {
+            WEnum::Value(capabilities) => capabilities.contains(BackgroundEffectCapability::Blur),
+            WEnum::Unknown(capabilities) => {
+                capabilities & BackgroundEffectCapability::Blur.bits() != 0
+            }
+        };
+    }
+}
+
+impl Dispatch<ExtBackgroundEffectSurfaceV1, ()> for KWinBlurState {
+    fn event(
+        _state: &mut Self,
+        _blur: &ExtBackgroundEffectSurfaceV1,
+        _event: <ExtBackgroundEffectSurfaceV1 as Proxy>::Event,
         _data: &(),
         _connection: &Connection,
         _qh: &QueueHandle<Self>,

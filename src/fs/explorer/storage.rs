@@ -1,6 +1,6 @@
 #[allow(dead_code)]
 pub fn storage_roots() -> Vec<PathBuf> {
-    let roots = storage_devices()
+    let roots = storage_devices(false)
         .into_iter()
         .map(|device| device.path)
         .collect::<Vec<_>>();
@@ -13,7 +13,7 @@ pub fn storage_roots() -> Vec<PathBuf> {
 }
 
 #[cfg(target_os = "windows")]
-fn storage_devices() -> Vec<StorageDevice> {
+fn storage_devices(_show_hidden_system_drives: bool) -> Vec<StorageDevice> {
     ('A'..='Z')
         .map(|letter| PathBuf::from(format!("{letter}:\\")))
         .filter(|path| path.exists())
@@ -50,7 +50,7 @@ fn windows_storage_device(path: PathBuf) -> StorageDevice {
 }
 
 #[cfg(target_os = "macos")]
-fn storage_devices() -> Vec<StorageDevice> {
+fn storage_devices(_show_hidden_system_drives: bool) -> Vec<StorageDevice> {
     let mut roots = vec![storage_device_from_path(PathBuf::from("/"))];
     if let Ok(volumes) = fs::read_dir("/Volumes") {
         for volume in volumes.flatten() {
@@ -70,14 +70,14 @@ fn storage_devices() -> Vec<StorageDevice> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn storage_devices() -> Vec<StorageDevice> {
+fn storage_devices(show_hidden_system_drives: bool) -> Vec<StorageDevice> {
     let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
     let mounts = linux_mounts_from_mountinfo(&mountinfo);
     let mut devices = Vec::new();
     let mut seen = BTreeSet::new();
 
     for mount in mounts {
-        if !linux_mount_is_storage_candidate(&mount) {
+        if !linux_mount_is_storage_candidate(&mount, show_hidden_system_drives) {
             continue;
         }
         if !mount.mount_point.exists() || !seen.insert(mount.mount_point.clone()) {
@@ -100,7 +100,7 @@ fn storage_devices() -> Vec<StorageDevice> {
 }
 
 #[cfg(not(any(target_os = "windows", unix)))]
-fn storage_devices() -> Vec<StorageDevice> {
+fn storage_devices(_show_hidden_system_drives: bool) -> Vec<StorageDevice> {
     vec![storage_device_from_path(PathBuf::from("/"))]
 }
 
@@ -152,18 +152,30 @@ fn decode_linux_mount_field(value: &str) -> String {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn linux_mount_is_storage_candidate(mount: &LinuxMount) -> bool {
+fn linux_mount_is_storage_candidate(
+    mount: &LinuxMount,
+    show_hidden_system_drives: bool,
+) -> bool {
     let partition_type = linux_udev_partition_type(&mount.major_minor);
-    linux_mount_is_storage_candidate_with_partition_type(mount, partition_type.as_deref())
+    linux_mount_is_storage_candidate_with_partition_type(
+        mount,
+        partition_type.as_deref(),
+        show_hidden_system_drives,
+    )
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn linux_mount_is_storage_candidate_with_partition_type(
     mount: &LinuxMount,
     partition_type: Option<&str>,
+    show_hidden_system_drives: bool,
 ) -> bool {
     if mount.mount_point == Path::new("/") {
         return true;
+    }
+
+    if !show_hidden_system_drives && linux_mount_point_is_system(&mount.mount_point) {
+        return false;
     }
 
     if linux_mount_point_is_runtime_noise(&mount.mount_point) {
@@ -174,7 +186,9 @@ fn linux_mount_is_storage_candidate_with_partition_type(
     if linux_fs_type_is_virtual(&fs_type) {
         return false;
     }
-    if linux_mount_is_firmware_partition(mount, partition_type) {
+    if !show_hidden_system_drives
+        && partition_type.is_some_and(linux_partition_type_is_firmware)
+    {
         return false;
     }
 
@@ -184,31 +198,6 @@ fn linux_mount_is_storage_candidate_with_partition_type(
         || mount.mount_point.starts_with("/media")
         || mount.mount_point.starts_with("/mnt")
         || mount.mount_point.starts_with("/run/media")
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn linux_mount_is_firmware_partition(
-    mount: &LinuxMount,
-    partition_type: Option<&str>,
-) -> bool {
-    linux_path_is_firmware_mount(&mount.mount_point, &mount.fs_type)
-        || partition_type.is_some_and(linux_partition_type_is_firmware)
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn linux_path_is_firmware_mount(path: &Path, fs_type: &str) -> bool {
-    path == Path::new("/boot/efi")
-        || path == Path::new("/boot/firmware")
-        || path == Path::new("/efi")
-        || (path == Path::new("/boot") && linux_fs_type_is_fat(fs_type))
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn linux_fs_type_is_fat(fs_type: &str) -> bool {
-    matches!(
-        fs_type.trim().to_ascii_lowercase().as_str(),
-        "fat" | "fat12" | "fat16" | "fat32" | "msdos" | "vfat"
-    )
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -318,12 +307,18 @@ fn linux_fs_type_is_network(fs_type: &str) -> bool {
 #[cfg(all(unix, not(target_os = "macos")))]
 fn linux_storage_device_from_mount(mount: &LinuxMount) -> StorageDevice {
     let drive_kind = linux_drive_kind(mount);
-    let name = linux_mount_label(&mount.mount_point);
+    let name = linux_mount_display_name(mount, drive_kind);
+    let file_system = if mount.fs_type.eq_ignore_ascii_case("fuseblk") {
+        linux_udev_property(&mount.major_minor, "ID_FS_TYPE")
+            .unwrap_or_else(|| mount.fs_type.clone())
+    } else {
+        mount.fs_type.clone()
+    };
 
     StorageDevice {
         path: mount.mount_point.clone(),
         name,
-        file_system: mount.fs_type.clone(),
+        file_system,
         drive_kind,
     }
 }
@@ -411,16 +406,111 @@ fn percent_decode_utf8(value: &str) -> Option<String> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn linux_mount_label(path: &Path) -> String {
-    if path == Path::new("/") {
+fn linux_mount_display_name(mount: &LinuxMount, drive_kind: DriveKind) -> String {
+    if mount.mount_point == Path::new("/") {
         return "Filesystem".into();
     }
 
-    path.file_name()
+    let preferred_name = [
+        "UDISKS_NAME",
+        "ID_FS_LABEL_ENC",
+        "ID_FS_LABEL",
+        "ID_PART_ENTRY_NAME",
+    ]
+    .into_iter()
+    .find_map(|property| {
+        linux_udev_property(&mount.major_minor, property)
+            .as_deref()
+            .and_then(clean_linux_device_name)
+    });
+    let file_system_uuid = linux_udev_property(&mount.major_minor, "ID_FS_UUID");
+    let model = linux_udev_property(&mount.major_minor, "ID_MODEL_ENC")
+        .as_deref()
+        .and_then(clean_linux_device_name)
+        .or_else(|| {
+            linux_udev_property(&mount.major_minor, "ID_MODEL").and_then(|value| {
+                clean_linux_device_name(&value.replace('_', " "))
+            })
+        });
+
+    linux_storage_display_name(
+        &mount.mount_point,
+        preferred_name.as_deref(),
+        file_system_uuid.as_deref(),
+        model.as_deref(),
+        drive_kind,
+    )
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_storage_display_name(
+    path: &Path,
+    preferred_name: Option<&str>,
+    file_system_uuid: Option<&str>,
+    model: Option<&str>,
+    drive_kind: DriveKind,
+) -> String {
+    if let Some(name) = preferred_name.and_then(clean_linux_device_name) {
+        return name;
+    }
+
+    let mount_name = path
+        .file_name()
         .and_then(|value| value.to_str())
         .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| path.display().to_string())
+        .and_then(clean_linux_device_name);
+    let mount_name_is_identifier = mount_name.as_deref().is_some_and(|name| {
+        file_system_uuid.is_some_and(|uuid| name.eq_ignore_ascii_case(uuid))
+            || linux_name_looks_like_volume_identifier(name)
+    });
+    if let Some(name) = mount_name.filter(|_| !mount_name_is_identifier) {
+        return name;
+    }
+    if let Some(model) = model.and_then(clean_linux_device_name) {
+        return model;
+    }
+    drive_kind.label().to_owned()
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn clean_linux_device_name(value: &str) -> Option<String> {
+    let input = value.trim().as_bytes();
+    let mut decoded = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'\\'
+            && input.get(index + 1) == Some(&b'x')
+            && let (Some(high), Some(low)) = (input.get(index + 2), input.get(index + 3))
+            && let (Some(high), Some(low)) = (hex_value(*high), hex_value(*low))
+        {
+            decoded.push((high << 4) | low);
+            index += 4;
+            continue;
+        }
+        decoded.push(input[index]);
+        index += 1;
+    }
+
+    let name = String::from_utf8_lossy(&decoded)
+        .replace('\0', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn linux_name_looks_like_volume_identifier(value: &str) -> bool {
+    let compact = value
+        .bytes()
+        .filter(|byte| *byte != b'-')
+        .collect::<Vec<_>>();
+    let recognized_length = matches!(compact.len(), 8 | 16 | 32)
+        || (compact.len() == 32 && value.len() == 36);
+    recognized_length
+        && compact
+            .iter()
+            .all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]

@@ -10,6 +10,8 @@ impl BExplorerIced {
             return Space::new().into();
         };
         let font_size = self.font_size();
+        let surface_width = self.modal_text_surface_width(470.0);
+        let password_check_size = self.ui_metric(18.0).max(ui_text_line_height(font_size));
         let extension = dialog.format.extension();
         let password_mismatch = dialog.use_password
             && (!dialog.password.is_empty() || !dialog.password_confirmation.is_empty())
@@ -51,12 +53,12 @@ impl BExplorerIced {
                 container(inline_icon(
                     if shown { "eye-off" } else { "eye" },
                     palette.muted_text,
-                    17.0,
+                    self.ui_metric(17.0),
                 ))
-                .width(34)
-                .height(30)
-                .center_x(34)
-                .center_y(30),
+                .width(self.ui_metric(34.0))
+                .height(self.ui_metric(30.0))
+                .center_x(self.ui_metric(34.0))
+                .center_y(self.ui_metric(30.0)),
             )
             .on_press(message_down)
             .on_release(message_up)
@@ -118,9 +120,9 @@ impl BExplorerIced {
                         .size(font_size)
                         .color(palette.accent_text)
                 )
-                .width(18)
-                .height(18)
-                .center(18)
+                .width(password_check_size)
+                .height(password_check_size)
+                .center(password_check_size)
                 .style(move |_| {
                     let style = container::Style::default()
                         .border(border::rounded(3).color(palette.strong_border).width(1));
@@ -147,7 +149,13 @@ impl BExplorerIced {
                     .size(font_size + 2.0)
                     .color(palette.text)
                     .width(Length::Fill),
-                icon_button("x", Message::CancelArchiveDialog, palette, false),
+                icon_button(
+                    "x",
+                    Message::CancelArchiveDialog,
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
             text(if self.is_spanish() {
@@ -237,7 +245,7 @@ impl BExplorerIced {
         .spacing(14)
         .padding(18);
 
-        let surface = container(panel).width(470).style(move |_| {
+        let surface = container(panel).width(surface_width).style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
                 .border(border::rounded(8).color(palette.strong_border).width(1))
@@ -247,8 +255,12 @@ impl BExplorerIced {
                     blur_radius: 24.0,
                 })
         });
-        let surface =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), surface.into(), 470.0, 382.0);
+        let surface = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            surface.into(),
+            surface_width,
+            382.0,
+        );
         container(surface)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -339,7 +351,8 @@ impl BExplorerIced {
         } else {
             Space::new().into()
         };
-        let card_width = TRANSFER_WINDOW_WIDTH
+        let card_height = progress_card_height(self.font_size());
+        let card_width = transfer_window_width(self.font_size())
             - WINDOW_BORDER_WIDTH * 2.0
             - TRANSFER_WINDOW_CARD_PADDING_X * 2.0;
         let current_name = ellipsize_to_width(&current_name, card_width - 230.0, self.font_size());
@@ -385,7 +398,7 @@ impl BExplorerIced {
 
         container(body)
             .width(Length::Fill)
-            .center_y(Length::Fixed(TRANSFER_CARD_HEIGHT))
+            .center_y(Length::Fixed(card_height))
             .clip(true)
             .style(move |_| {
                 container::Style::default()
@@ -398,9 +411,11 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn archive_window_view(&self, palette: Palette) -> Element<'_, Message> {
         let (window_bg, window_title_bg) = palette.native_utility_backgrounds();
         let items = self.archive_items();
-        let panel_height = transfer_window_size_for_item_count(items.len()).height;
+        let font_size = self.font_size();
+        let title_height = transfer_window_title_height(font_size);
+        let panel_height = transfer_window_size_for_item_count(items.len(), font_size).height;
         let inner_height = (panel_height - WINDOW_BORDER_WIDTH * 2.0).max(0.0);
-        let body_height = (inner_height - TRANSFER_WINDOW_TITLE_HEIGHT).max(0.0);
+        let body_height = (inner_height - title_height).max(0.0);
         let title_drag_area = mouse_area(
             container(
                 text(self.localized("Compresiones", "Compressions"))
@@ -409,7 +424,7 @@ impl BExplorerIced {
                     .align_x(Horizontal::Center)
                     .width(Length::Fill),
             )
-            .height(TRANSFER_WINDOW_TITLE_HEIGHT)
+            .height(title_height)
             .width(Length::Fill)
             .center_y(Length::Fill),
         )
@@ -417,11 +432,16 @@ impl BExplorerIced {
         let title_bar = container(
             row![
                 title_drag_area,
-                native_window_minimize_button(Message::ArchiveWindowMinimize, palette),
+                native_window_minimize_button(
+                    Message::ArchiveWindowMinimize,
+                    palette,
+                    title_height,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
         )
-        .height(TRANSFER_WINDOW_TITLE_HEIGHT)
+        .height(title_height)
         .width(Length::Fill)
         .style(move |_| {
             container::Style::default()
@@ -440,9 +460,9 @@ impl BExplorerIced {
             .into()
         } else {
             let item_count = items.len();
-            let cards_height = progress_card_list_height(item_count);
-            let visible_height = progress_visible_card_list_height(item_count);
-            let mut list = column![].spacing(TRANSFER_CARD_GAP);
+            let cards_height = progress_card_list_height(item_count, font_size);
+            let visible_height = progress_visible_card_list_height(item_count, font_size);
+            let mut list = column![].spacing(progress_card_gap(font_size));
             for item in items {
                 list = list.push(self.archive_item_card(item, palette));
             }

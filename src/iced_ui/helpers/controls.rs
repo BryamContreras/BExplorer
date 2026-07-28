@@ -5,8 +5,9 @@ pub(in crate::iced_ui) fn icon_button<'a>(
     message: Message,
     palette: Palette,
     selected: bool,
+    font_size: f32,
 ) -> Button<'a, Message> {
-    title_icon_button(label, message, palette, selected)
+    title_icon_button(label, message, palette, selected, font_size)
 }
 
 pub(in crate::iced_ui) fn title_icon_button<'a>(
@@ -14,69 +15,111 @@ pub(in crate::iced_ui) fn title_icon_button<'a>(
     message: Message,
     palette: Palette,
     selected: bool,
+    font_size: f32,
 ) -> Button<'a, Message> {
-    Button::new(title_bar_icon(label, icon_color(label, palette, selected)))
-        .width(TITLE_BUTTON_WIDTH)
-        .height(TITLE_BUTTON_HEIGHT)
-        .padding(0)
-        .on_press(message)
-        .style(move |_, status| selected_button_style(palette, selected, status))
+    Button::new(title_bar_icon(
+        label,
+        icon_color(label, palette, selected),
+        scaled_ui_metric(TITLE_ICON_SIZE, font_size),
+    ))
+    .width(scaled_ui_metric(TITLE_BUTTON_WIDTH, font_size))
+    .height(scaled_ui_metric(TITLE_BUTTON_HEIGHT, font_size))
+    .padding(0)
+    .on_press(message)
+    .style(move |_, status| selected_button_style(palette, selected, status))
 }
 
-pub(in crate::iced_ui) fn window_close_button<'a>(palette: Palette) -> Button<'a, Message> {
-    Button::new(title_bar_icon("x", palette.text))
-        .width(TITLE_BUTTON_WIDTH)
-        .height(TITLE_BUTTON_HEIGHT)
-        .padding(0)
-        .on_press(Message::WindowClose)
-        .style(move |_, status| {
-            let danger = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            let background = danger.then(|| Color::from_rgb8(227, 107, 114).into());
-            button::Style {
-                background,
-                text_color: if danger { Color::WHITE } else { palette.text },
-                border: border::rounded(border::top_right(WINDOW_RADIUS - WINDOW_BORDER_WIDTH)),
-                ..button::Style::default()
-            }
-        })
+pub(in crate::iced_ui) fn window_close_button<'a>(
+    palette: Palette,
+    font_size: f32,
+) -> Button<'a, Message> {
+    Button::new(title_bar_icon(
+        "x",
+        palette.text,
+        scaled_ui_metric(TITLE_ICON_SIZE, font_size),
+    ))
+    .width(scaled_ui_metric(TITLE_BUTTON_WIDTH, font_size))
+    .height(scaled_ui_metric(TITLE_BUTTON_HEIGHT, font_size))
+    .padding(0)
+    .on_press(Message::WindowClose)
+    .style(move |_, status| {
+        let danger = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let background = danger.then(|| Color::from_rgb8(227, 107, 114).into());
+        button::Style {
+            background,
+            text_color: if danger { Color::WHITE } else { palette.text },
+            border: border::rounded(border::top_right(WINDOW_RADIUS - WINDOW_BORDER_WIDTH)),
+            ..button::Style::default()
+        }
+    })
 }
 
 pub(in crate::iced_ui) fn native_window_minimize_button<'a>(
     message: Message,
     palette: Palette,
+    height: f32,
+    font_size: f32,
 ) -> Button<'a, Message> {
-    Button::new(title_bar_icon("min", palette.text))
-        .width(34)
-        .height(TRANSFER_WINDOW_TITLE_HEIGHT)
-        .padding(0)
-        .on_press(message)
-        .style(move |_, status| button_style(palette, false, status))
+    Button::new(title_bar_icon(
+        "min",
+        palette.text,
+        scaled_ui_metric(TITLE_ICON_SIZE, font_size),
+    ))
+    .width(scaled_ui_metric(34.0, font_size))
+    .height(height)
+    .padding(0)
+    .on_press(message)
+    .style(move |_, status| button_style(palette, false, status))
 }
 
-#[cfg(target_os = "linux")]
+pub(in crate::iced_ui) fn native_window_maximize_button<'a>(
+    message: Message,
+    maximized: bool,
+    palette: Palette,
+    height: f32,
+    font_size: f32,
+) -> Button<'a, Message> {
+    Button::new(title_bar_icon(
+        if maximized { "restore" } else { "max" },
+        palette.text,
+        scaled_ui_metric(TITLE_ICON_SIZE, font_size),
+    ))
+    .width(scaled_ui_metric(34.0, font_size))
+    .height(height)
+    .padding(0)
+    .on_press(message)
+    .style(move |_, status| button_style(palette, false, status))
+}
+
 pub(in crate::iced_ui) fn native_window_close_button_maybe<'a>(
     message: Option<Message>,
     palette: Palette,
+    height: f32,
+    font_size: f32,
 ) -> Button<'a, Message> {
-    let button = Button::new(title_bar_icon("x", palette.text))
-        .width(34)
-        .height(TRANSFER_WINDOW_TITLE_HEIGHT)
-        .padding(0)
-        .style(move |_, status| {
-            let danger = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style {
-                background: danger.then(|| Color::from_rgb8(227, 107, 114).into()),
-                text_color: if danger {
-                    Color::WHITE
-                } else if status == button::Status::Disabled {
-                    palette.muted_text
-                } else {
-                    palette.text
-                },
-                border: border::rounded(border::top_right(WINDOW_RADIUS - WINDOW_BORDER_WIDTH)),
-                ..button::Style::default()
-            }
-        });
+    let button = Button::new(title_bar_icon(
+        "x",
+        palette.text,
+        scaled_ui_metric(TITLE_ICON_SIZE, font_size),
+    ))
+    .width(scaled_ui_metric(34.0, font_size))
+    .height(height)
+    .padding(0)
+    .style(move |_, status| {
+        let danger = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: danger.then(|| Color::from_rgb8(227, 107, 114).into()),
+            text_color: if danger {
+                Color::WHITE
+            } else if status == button::Status::Disabled {
+                palette.muted_text
+            } else {
+                palette.text
+            },
+            border: border::rounded(border::top_right(WINDOW_RADIUS - WINDOW_BORDER_WIDTH)),
+            ..button::Style::default()
+        }
+    });
     if let Some(message) = message {
         button.on_press(message)
     } else {
@@ -87,8 +130,9 @@ pub(in crate::iced_ui) fn native_window_close_button_maybe<'a>(
 pub(in crate::iced_ui) fn title_bar_icon<'a>(
     label: &'static str,
     color: Color,
+    icon_size: f32,
 ) -> Element<'a, Message> {
-    container(inline_icon(label, color, TITLE_ICON_SIZE))
+    container(inline_icon(label, color, icon_size))
         .width(Length::Fill)
         .height(Length::Fill)
         .center_x(Length::Fill)
@@ -102,32 +146,42 @@ pub(in crate::iced_ui) fn tool_button<'a>(
     palette: Palette,
     selected: bool,
     compact: bool,
+    font_size: f32,
 ) -> Button<'a, Message> {
     let color = if selected {
         palette.accent_text
     } else {
         palette.text
     };
+    let icon_size = scaled_ui_metric(TOOL_ICON_SIZE, font_size);
+    let button_height = action_button_height(font_size);
     let button = if compact {
         Button::new(
-            container(inline_icon(tool_icon(label), color, TOOL_ICON_SIZE))
-                .width(36)
-                .height(36)
+            container(inline_icon(tool_icon(label), color, icon_size))
+                .width(button_height)
+                .height(button_height)
                 .center(Length::Fill),
         )
-        .width(40)
-        .height(36)
+        .width(scaled_ui_metric(40.0, font_size))
+        .height(button_height)
         .padding(0)
     } else {
         Button::new(
-            row![
-                inline_icon(tool_icon(label), color, TOOL_ICON_SIZE),
-                text(label).size(13).color(color)
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
+            container(
+                row![
+                    inline_icon(tool_icon(label), color, icon_size),
+                    text(label)
+                        .size(font_size)
+                        .color(color)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                ]
+                .spacing(scaled_ui_metric(6.0, font_size))
+                .align_y(Alignment::Center),
+            )
+            .center_y(Length::Fill),
         )
-        .padding([8, 10])
+        .height(button_height)
+        .padding([0.0, scaled_ui_metric(10.0, font_size)])
     };
     button
         .on_press(message)
@@ -141,6 +195,7 @@ pub(in crate::iced_ui) fn context_quick_button<'a>(
     palette: Palette,
     enabled: bool,
     selected: bool,
+    font_size: f32,
 ) -> Element<'a, Message> {
     let selected = enabled && selected;
     let color = if selected {
@@ -151,13 +206,13 @@ pub(in crate::iced_ui) fn context_quick_button<'a>(
         translucent_color(palette.muted_text, 0.44)
     };
     let content = column![
-        inline_icon(icon, color, 20.0),
+        inline_icon(icon, color, scaled_ui_metric(20.0, font_size)),
         text(label)
-            .size(11.0)
+            .size((font_size - 2.0).max(10.0))
             .color(color)
             .align_x(Horizontal::Center)
     ]
-    .spacing(2)
+    .spacing(scaled_ui_metric(2.0, font_size))
     .align_x(Alignment::Center);
 
     let button = Button::new(
@@ -167,7 +222,7 @@ pub(in crate::iced_ui) fn context_quick_button<'a>(
             .center(Length::Fill),
     )
     .width(Length::Fill)
-    .height(48)
+    .height(context_quick_button_height(font_size))
     .padding(0);
     let button = if enabled {
         button.on_press(Message::RunContextCommand(command))
@@ -186,6 +241,7 @@ pub(in crate::iced_ui) fn context_menu_row<'a>(
     command: ContextCommand,
     palette: Palette,
     selected: bool,
+    font_size: f32,
 ) -> Element<'a, Message> {
     context_menu_dynamic_row(
         icon,
@@ -194,6 +250,7 @@ pub(in crate::iced_ui) fn context_menu_row<'a>(
         command,
         palette,
         selected,
+        font_size,
     )
 }
 
@@ -204,6 +261,7 @@ pub(in crate::iced_ui) fn context_menu_dynamic_row<'a>(
     command: ContextCommand,
     palette: Palette,
     selected: bool,
+    font_size: f32,
 ) -> Element<'a, Message> {
     let icon_color = if selected {
         palette.accent_text
@@ -216,20 +274,25 @@ pub(in crate::iced_ui) fn context_menu_dynamic_row<'a>(
         palette.text
     };
     let trailing: Element<'a, Message> = match trailing {
-        Some(ContextMenuTrailing::Text(label)) => text(label).size(12.0).color(icon_color).into(),
-        Some(ContextMenuTrailing::Icon(icon)) => inline_icon(icon, icon_color, 13.0),
+        Some(ContextMenuTrailing::Text(label)) => text(label)
+            .size((font_size - 1.0).max(10.0))
+            .color(icon_color)
+            .into(),
+        Some(ContextMenuTrailing::Icon(icon)) => {
+            inline_icon(icon, icon_color, scaled_ui_metric(13.0, font_size))
+        }
         None => Space::new().width(0).into(),
     };
     let content = row![
-        inline_icon(icon, icon_color, 18.0),
+        inline_icon(icon, icon_color, scaled_ui_metric(18.0, font_size)),
         text(label)
-            .size(13.0)
+            .size(font_size)
             .color(text_color)
             .wrapping(iced::widget::text::Wrapping::None)
             .width(Length::Fill),
         trailing,
     ]
-    .spacing(12)
+    .spacing(scaled_ui_metric(12.0, font_size))
     .align_y(Alignment::Center)
     .height(Length::Fill);
 
@@ -239,8 +302,8 @@ pub(in crate::iced_ui) fn context_menu_dynamic_row<'a>(
             .center_y(Length::Fill),
     )
     .width(Length::Fill)
-    .height(34)
-    .padding([0, 10])
+    .height(context_menu_row_height(font_size))
+    .padding([0.0, scaled_ui_metric(10.0, font_size)])
     .on_press(Message::RunContextCommand(command))
     .style(move |_, status| selected_button_style(palette, selected, status))
     .into()
@@ -252,38 +315,52 @@ pub(in crate::iced_ui) fn context_menu_application_row<'a>(
     command: ContextCommand,
     palette: Palette,
     selected: bool,
+    font_size: f32,
+) -> Element<'a, Message> {
+    context_menu_native_icon_row(label, icon, "open", command, palette, selected, font_size)
+}
+
+pub(in crate::iced_ui) fn context_menu_native_icon_row<'a>(
+    label: String,
+    icon: Option<iced_image::Handle>,
+    fallback_icon: &'static str,
+    command: ContextCommand,
+    palette: Palette,
+    selected: bool,
+    font_size: f32,
 ) -> Element<'a, Message> {
     let text_color = if selected {
         palette.accent_text
     } else {
         palette.text
     };
+    let icon_size = scaled_ui_metric(18.0, font_size);
     let icon: Element<'a, Message> = if let Some(handle) = icon {
         iced_image::Image::new(handle)
-            .width(Length::Fixed(18.0))
-            .height(Length::Fixed(18.0))
+            .width(Length::Fixed(icon_size))
+            .height(Length::Fixed(icon_size))
             .content_fit(ContentFit::Contain)
             .into()
     } else {
         inline_icon(
-            "open",
+            fallback_icon,
             if selected {
                 palette.accent_text
             } else {
                 palette.muted_text
             },
-            18.0,
+            icon_size,
         )
     };
     let content = row![
         icon,
         text(label)
-            .size(13.0)
+            .size(font_size)
             .color(text_color)
             .wrapping(iced::widget::text::Wrapping::None)
             .width(Length::Fill),
     ]
-    .spacing(12)
+    .spacing(scaled_ui_metric(12.0, font_size))
     .align_y(Alignment::Center)
     .height(Length::Fill);
     Button::new(
@@ -292,8 +369,8 @@ pub(in crate::iced_ui) fn context_menu_application_row<'a>(
             .center_y(Length::Fill),
     )
     .width(Length::Fill)
-    .height(34)
-    .padding([0, 10])
+    .height(context_menu_row_height(font_size))
+    .padding([0.0, scaled_ui_metric(10.0, font_size)])
     .on_press(Message::RunContextCommand(command))
     .style(move |_, status| selected_button_style(palette, selected, status))
     .into()
@@ -328,18 +405,22 @@ pub(in crate::iced_ui) fn menu_choice_button(
                 text(if active { "✓" } else { "" })
                     .size(font_size)
                     .color(color)
-                    .width(18),
+                    .width(scaled_ui_metric(18.0, font_size)),
                 text(label).size(font_size).color(color).width(Length::Fill),
             ]
-            .spacing(6)
+            .spacing(scaled_ui_metric(6.0, font_size))
             .align_y(Alignment::Center),
         )
         .height(Length::Fill)
         .center_y(Length::Fill),
     )
     .width(Length::Fill)
-    .height(32)
-    .padding([0, 8])
+    .height(adaptive_menu_item_height(
+        label,
+        font_size,
+        scaled_ui_metric(220.0, font_size),
+    ))
+    .padding([0.0, scaled_ui_metric(8.0, font_size)])
     .on_press(message)
     .style(move |_, status| selected_button_style(palette, selected, status))
     .into()
@@ -354,6 +435,8 @@ pub(in crate::iced_ui) fn tool_icon(label: &str) -> &'static str {
         "Deshacer" | "Undo" => "undo",
         "Renombrar" | "Rename" => "rename",
         "Eliminar" | "Delete" => "trash",
+        "Restaurar" | "Restore" => "undo",
+        "Vaciar papelera" | "Empty Recycle Bin" => "delete-forever",
         "Comprimir" | "Compress" => "archive",
         "Agrupar" | "Group" => "group",
         "Vista previa" | "Preview" => "preview",
@@ -371,9 +454,11 @@ pub(in crate::iced_ui) fn inline_icon<'a>(
     // integral, slightly larger pixel grid: this avoids fractional sampling
     // (the source of the soft-looking strokes) while keeping the original
     // lightweight line weight intact.
-    const ICON_OPTICAL_SCALE: f32 = 1.12;
-    let size = (size * ICON_OPTICAL_SCALE).round().max(1.0);
-    let preserves_native_colors = matches!(label, "pc" | "printer" | "portable");
+    let size = rendered_inline_icon_size(size);
+    let preserves_native_colors = matches!(
+        label,
+        "pc" | "printer" | "portable" | "usb" | "external-drive"
+    );
     let icon = svg::Svg::new(svg::Handle::from_memory(icon_svg(label)))
         .width(Length::Fixed(size))
         .height(Length::Fixed(size))
@@ -527,6 +612,11 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
     entry: &FileEntry,
     size: u32,
 ) -> Option<(PathBuf, PathBuf, bool)> {
+    if entry.kind == EntryKind::Drive && entry.drive_kind == Some(DriveKind::Portable) {
+        return Some(thumbnail_data::portable_device_native_icon_request(
+            entry, size,
+        ));
+    }
     if explorer::is_virtual_path(&entry.path) {
         return thumbnail_data::virtual_native_icon_request(entry, size);
     }
@@ -601,6 +691,8 @@ pub(in crate::iced_ui) fn icon_svg(label: &'static str) -> &'static [u8] {
         "places" => ICON_PLACES,
         "bookmark" => ICON_BOOKMARK,
         "storage" => ICON_STORAGE,
+        "usb" => ICON_USB,
+        "external-drive" => ICON_EXTERNAL_DRIVE,
         "portable" => ICON_PORTABLE,
         "portable-sidebar" => ICON_PORTABLE_SIDEBAR,
         "file" => ICON_FILE,
@@ -621,8 +713,12 @@ pub(in crate::iced_ui) fn icon_svg(label: &'static str) -> &'static [u8] {
         "format" => ICON_FORMAT,
         "group" => ICON_GROUP,
         "preview" => ICON_PREVIEW,
+        "play" => ICON_PLAY,
         "open" => ICON_OPEN,
         "open-with" => ICON_OPEN_WITH,
+        "send" => ICON_SEND,
+        "mail" => ICON_MAIL,
+        "bluetooth" => ICON_BLUETOOTH,
         "terminal" => ICON_TERMINAL,
         "properties" => ICON_PROPERTIES,
         "settings" => ICON_SETTINGS,
@@ -661,11 +757,14 @@ const ICON_FOLDER_STACK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www
 const ICON_PLACES: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M3.5 8.2c0-1.1.9-2 2-2h4.7l1.7 1.8h6.6c1.1 0 2 .9 2 2v6.8c0 1.1-.9 2-2 2h-13c-1.1 0-2-.9-2-2z" fill="#000"/></svg>"##;
 const ICON_BOOKMARK: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 4.5h10v15l-5-3-5 3z" fill="none" stroke="#000" stroke-width="1.8" stroke-linejoin="round"/></svg>"##;
 const ICON_STORAGE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><ellipse cx="12" cy="6" rx="7" ry="2.8" fill="none" stroke="#000" stroke-width="1.7"/><path d="M5 6v9.5c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8V6M5 11c0 1.5 3.1 2.8 7 2.8s7-1.3 7-2.8" fill="none" stroke="#000" stroke-width="1.7"/></svg>"##;
+const ICON_USB: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="usb-body" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#37b9d8"/><stop offset=".55" stop-color="#1488b3"/><stop offset="1" stop-color="#08658d"/></linearGradient><linearGradient id="usb-plug" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#eef4f6"/><stop offset="1" stop-color="#9eabb1"/></linearGradient></defs><path d="M8.35 2.2h7.3v5.1h-7.3z" fill="url(#usb-plug)" stroke="#5f6f76" stroke-width=".65"/><path d="M10.05 3.25v2.2M13.95 3.25v2.2" fill="none" stroke="#708087" stroke-width="1.05" stroke-linecap="round"/><rect x="5.7" y="6.55" width="12.6" height="15.15" rx="2.35" fill="url(#usb-body)" stroke="#075676" stroke-width=".75"/><path d="M7.1 8.1h9.8" fill="none" stroke="#a8f2ff" stroke-opacity=".45" stroke-width=".65" stroke-linecap="round"/><circle cx="12" cy="17.75" r="1.55" fill="#c5f7ff" opacity=".92"/><circle cx="12" cy="17.75" r=".72" fill="#08759c"/></svg>"##;
+const ICON_EXTERNAL_DRIVE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="external-case" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#748d90"/><stop offset=".5" stop-color="#526c70"/><stop offset="1" stop-color="#354e53"/></linearGradient><linearGradient id="external-face" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2da9cd"/><stop offset="1" stop-color="#08759d"/></linearGradient></defs><rect x="3.5" y="2.4" width="17" height="19.2" rx="2.45" fill="url(#external-case)" stroke="#243b40" stroke-width=".72"/><rect x="5.15" y="4.05" width="13.7" height="12.7" rx="1.25" fill="url(#external-face)"/><circle cx="12" cy="10.4" r="3.65" fill="none" stroke="#b9f1fb" stroke-opacity=".74" stroke-width="1.05"/><circle cx="12" cy="10.4" r="1.05" fill="#d8f9ff"/><path d="M6.25 18.75h8.3" fill="none" stroke="#d6e2e4" stroke-opacity=".8" stroke-width=".9" stroke-linecap="round"/><circle cx="17.05" cy="18.75" r=".8" fill="#68e4e7"/></svg>"##;
 const ICON_PORTABLE_SIDEBAR: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="7.15" y="2.35" width="9.7" height="19.3" rx="2.1" fill="none" stroke="#000" stroke-width="1.65"/><path d="M10.15 4.65h3.7" fill="none" stroke="#000" stroke-width="1.4" stroke-linecap="round"/><circle cx="12" cy="18.9" r=".8" fill="#000"/></svg>"##;
 const ICON_PORTABLE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="portable-case" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#748d90"/><stop offset=".2" stop-color="#617b7e"/><stop offset=".48" stop-color="#6b8588"/><stop offset=".8" stop-color="#526c70"/><stop offset="1" stop-color="#647d80"/></linearGradient></defs><path d="M4.1 2.05c0-.58.47-1.05 1.05-1.05h13.7c.58 0 1.05.47 1.05 1.05v19.9c0 .58-.47 1.05-1.05 1.05H5.15c-.58 0-1.05-.47-1.05-1.05z" fill="url(#portable-case)" stroke="#788f92" stroke-width=".16"/><path d="M4.55 3.35h14.9V21.6H4.55z" fill="#2488ad"/><path d="M4.55 3.35h14.9V21.6z" fill="#075779" opacity=".42"/><path d="M5.4 4.15h13.2V5.2H5.4z" fill="#8be6fa" opacity=".22"/><rect x="9.25" y="2.35" width="5.5" height=".55" rx=".16" fill="#91a5a7" opacity=".72"/><path d="M4.38 3.5v18.05" fill="none" stroke="#d2dedf" stroke-opacity=".12" stroke-width=".22" stroke-linecap="round"/></svg>"##;
 const ICON_EJECT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="m12 5 6 8H6z" fill="none" stroke="#000" stroke-width="1.7" stroke-linejoin="round"/><path d="M6 18.2h12" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
 const ICON_FORMAT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="4.1" y="7.4" width="15.8" height="10.2" rx="1.7" fill="none" stroke="#000" stroke-width="1.65"/><path d="M7.2 14.3h4.3M7.2 11.1h2.2" fill="none" stroke="#000" stroke-width="1.55" stroke-linecap="round"/><path d="M15.7 5.1a4.4 4.4 0 0 1 2.9 4.15M19 9.25l-.4-2.65-2.45 1.1" fill="none" stroke="#000" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_FILE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/></svg>"##;
+const ICON_PLAY: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 4.8 20 12 7 19.2z" fill="#000" stroke="#000" stroke-width=".55" stroke-linejoin="round"/></svg>"##;
 const ICON_PC: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="1.1" y="2.15" width="21.8" height="15.35" rx="1.55" fill="#294b55" stroke="#f7fcff" stroke-width=".42" stroke-opacity=".72"/><rect x="1.5" y="2.55" width="21" height="14.55" rx="1.2" fill="none" stroke="#132f38" stroke-width=".72"/><rect x="2.85" y="3.65" width="18.3" height="11.75" rx=".38" fill="#08bfe8"/><path d="M2.85 3.65h18.3V15.4z" fill="#087fa7" opacity=".2"/><path d="M10.45 17.4h3.1v2.3h3.4c.6 0 1.1.48 1.1 1.08v.47H5.95v-.47c0-.6.5-1.08 1.1-1.08h3.4z" fill="#294b55" stroke="#f7fcff" stroke-width=".35" stroke-opacity=".6"/><path d="M5.95 21.25h12.1" fill="none" stroke="#132f38" stroke-width=".75" stroke-linecap="round"/></svg>"##;
 const ICON_PRINTER: &[u8] = br##"
 <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -736,9 +835,12 @@ const ICON_GROUP: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org
 const ICON_PREVIEW: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="6" width="16" height="12" rx="2" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 6v12" fill="none" stroke="#000" stroke-width="1.5"/><path d="M7 10h2M7 13h2" fill="none" stroke="#000" stroke-width="1.5" stroke-linecap="round"/></svg>"##;
 const ICON_OPEN: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M5 7.5h5l2 2h7v7.5a2 2 0 0 1-2 2H6.5a2 2 0 0 1-2-2V8.5a1 1 0 0 1 1-1z" fill="none" stroke="#000" stroke-width="1.7" stroke-linejoin="round"/><path d="m10 14 3-3 3 3M13 11v6" fill="none" stroke="#000" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_OPEN_WITH: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="5" width="5" height="5" rx="1" fill="none" stroke="#000" stroke-width="1.6"/><rect x="14" y="5" width="5" height="5" rx="1" fill="none" stroke="#000" stroke-width="1.6"/><rect x="5" y="14" width="5" height="5" rx="1" fill="none" stroke="#000" stroke-width="1.6"/><path d="M15 15h4M17 13v4" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round"/></svg>"##;
+const ICON_SEND: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="m3.5 11.2 16-7-5.9 15.6-2.8-6.4z" fill="none" stroke="#000" stroke-width="1.65" stroke-linejoin="round"/><path d="m10.8 13.4 4.5-4.5" fill="none" stroke="#000" stroke-width="1.65" stroke-linecap="round"/></svg>"##;
+const ICON_MAIL: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="5.5" width="17" height="13" rx="2" fill="none" stroke="#000" stroke-width="1.65"/><path d="m5 7 7 5.5L19 7" fill="none" stroke="#000" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
+const ICON_BLUETOOTH: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 3v18l6-5.5L7 7.5m5-4.5 6 5.5L7 16.5" fill="none" stroke="#000" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_TERMINAL: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="4" y="6" width="16" height="12" rx="2" fill="none" stroke="#000" stroke-width="1.7"/><path d="m7 10 3 2-3 2M12 15h5" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
 const ICON_PROPERTIES: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="8" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 10.5v5M12 7.7h.1" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round"/></svg>"##;
-const ICON_SETTINGS: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="3" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 4.5v2M12 17.5v2M19.5 12h-2M6.5 12h-2M17.3 6.7l-1.4 1.4M8.1 15.9l-1.4 1.4M17.3 17.3l-1.4-1.4M8.1 8.1 6.7 6.7" fill="none" stroke="#000" stroke-width="1.7" stroke-linecap="round"/></svg>"##;
+const ICON_SETTINGS: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.09a2 2 0 0 1 1 1.74v.5a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.38a2 2 0 0 0-.73-2.73l-.15-.09a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2Z" fill="none" stroke="#000" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12" cy="12" r="3" fill="none" stroke="#000" stroke-width="1.65"/></svg>"##;
 const ICON_GITHUB: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M12 2C6.48 2 2 6.58 2 12.23c0 4.52 2.87 8.35 6.84 9.71.5.1.68-.22.68-.49 0-.24-.01-.89-.01-1.74-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.05 1.53 1.05.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.64-1.37-2.22-.26-4.56-1.14-4.56-5.06 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05A9.37 9.37 0 0 1 12 7.1c.85 0 1.71.12 2.5.35 1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.93-2.34 4.8-4.57 5.05.36.32.68.94.68 1.9 0 1.37-.01 2.47-.01 2.81 0 .27.18.59.69.49A10.23 10.23 0 0 0 22 12.23C22 6.58 17.52 2 12 2Z" fill="#000"/></svg>"##;
 const ICON_KEYBOARD: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="3.5" y="6" width="17" height="12" rx="2" fill="none" stroke="#000" stroke-width="1.55"/><path d="M6.5 9.5h.1M9.5 9.5h.1M12.5 9.5h.1M15.5 9.5h.1M6.5 12.5h.1M9.5 12.5h.1M12.5 12.5h.1M15.5 12.5h.1M8 15.5h8" fill="none" stroke="#000" stroke-width="1.8" stroke-linecap="round"/></svg>"##;
 const ICON_THEME: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="7" fill="none" stroke="#000" stroke-width="1.7"/><path d="M12 5a7 7 0 0 1 0 14z" fill="#000"/></svg>"##;
@@ -1046,13 +1148,13 @@ pub(in crate::iced_ui) fn vibrancy_surface_alpha(
     if intensity <= f32::EPSILON {
         return 1.0;
     }
-    // KWin surfaces are layered inside the main window, so the old 0.32 floor
-    // made large empty areas look almost transparent. A 0.50 floor keeps the
-    // composed window near 75% opacity at the strongest setting while the
-    // blur remains clearly visible. Other platforms retain their native
-    // tuning, including Windows Acrylic below.
+
+    // On KWin, nested window backgrounds are reduced below so the compositor
+    // blur remains visible across the whole explorer. Keep the primary pane
+    // at a 0.65 floor, then rebuild the intended visual density with light
+    // proportional tints instead of duplicate full-strength fills.
     let transparency_span = if cfg!(target_os = "linux") && mode == VibrancyMode::Blur {
-        0.50
+        0.35
     } else {
         0.68
     };
@@ -1064,4 +1166,12 @@ pub(in crate::iced_ui) fn vibrancy_surface_alpha(
     } else {
         base_alpha
     }
+}
+
+pub(in crate::iced_ui) fn layered_blur_tint_alpha(primary_alpha: f32) -> f32 {
+    ((1.0 - primary_alpha.clamp(0.0, 1.0)) * 0.35).clamp(0.0, 1.0)
+}
+
+pub(in crate::iced_ui) fn blur_frame_tint_alpha(primary_alpha: f32) -> f32 {
+    ((1.0 - primary_alpha.clamp(0.0, 1.0)) * 0.50).clamp(0.0, 1.0)
 }

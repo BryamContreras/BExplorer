@@ -93,6 +93,8 @@ Requires:       xdg-desktop-portal
 Requires:       xdg-utils
 Recommends:     desktop-file-utils
 Recommends:     gvfs-fuse
+Recommends:     gvfs-mtp
+Suggests:       kio-extras
 
 %description
 BExplorer is a native Rust desktop file explorer with tabs, split-pane
@@ -234,7 +236,9 @@ Recommends: libx11-xcb1,
 Suggests: libfile-mimeinfo-perl,
  kde-cli-tools,
  kio-extras,
- kio-fuse
+ kio-fuse,
+ tumbler,
+ ffmpegthumbnailer | ffmpeg
 Description: Native Rust file explorer
  BExplorer is a native Rust desktop file explorer with tabs, split-pane
  workflows, archive handling, previews, and Linux desktop integration.

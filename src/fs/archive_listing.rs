@@ -7,14 +7,14 @@ use super::archive::{list_7z_entries, list_zip_entries};
 use super::explorer::{EntryKind, FileCategory, FileEntry};
 
 const BROWSABLE_ARCHIVE_EXTENSIONS: &[&str] = &[
-    "7z", "apk", "apm", "ar", "arj", "bz2", "bzip2", "cab", "chm", "cpio", "cramfs", "gz", "gzip",
-    "ihex", "lha", "lzh", "lzma", "msi", "nsis", "rar", "squashfs", "swm", "tar", "taz", "tbz",
-    "tbz2", "tgz", "txz", "wim", "xar", "xz", "z", "zip", "zipx", "zst",
+    "7z", "apm", "ar", "arj", "bz2", "bzip2", "cab", "chm", "cpio", "cramfs", "gz", "gzip", "ihex",
+    "lha", "lzh", "lzma", "msi", "nsis", "rar", "squashfs", "swm", "tar", "taz", "tbz", "tbz2",
+    "tgz", "txz", "wim", "xar", "xz", "z", "zip", "zipx", "zst",
 ];
 
 const EXTRACTABLE_7Z_EXTENSIONS: &[&str] = &[
-    "001", "apfs", "deb", "dmg", "esd", "fat", "hfs", "hfsx", "img", "iso", "mbr", "ntfs", "qcow",
-    "qcow2", "rpm", "udf", "vdi", "vhd", "vhdx", "vmdk",
+    "001", "apk", "apfs", "deb", "dmg", "esd", "fat", "hfs", "hfsx", "img", "iso", "mbr", "ntfs",
+    "qcow", "qcow2", "rpm", "udf", "vdi", "vhd", "vhdx", "vmdk",
 ];
 
 /// Check if a path is inside a browsable archive (virtual path).
@@ -126,7 +126,11 @@ pub fn list_archive_contents(path: &Path) -> Result<Vec<FileEntry>> {
     let mut seen_names: BTreeSet<String> = BTreeSet::new();
 
     for entry in &all_entries {
-        let relative = strip_prefix(&entry.name, &prefix);
+        let normalized_name = super::archive::normalize_archive_item_name(&entry.name);
+        if normalized_name.is_empty() {
+            continue;
+        }
+        let relative = strip_prefix(&normalized_name, &prefix);
         if relative.is_none() {
             continue;
         }
@@ -295,6 +299,13 @@ mod tests {
                 "{name} should still offer extraction through 7z"
             );
         }
+    }
+
+    #[test]
+    fn apk_files_are_extractable_but_not_browsable() {
+        let apk = Path::new("application.apk");
+        assert!(!has_browsable_archive_extension(apk));
+        assert!(has_extractable_archive_extension(apk));
     }
 
     #[test]

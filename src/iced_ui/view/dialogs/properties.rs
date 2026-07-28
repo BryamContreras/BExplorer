@@ -9,10 +9,11 @@ use iced::alignment::Vertical;
 use iced::widget::{column, pin, row};
 
 const PROPERTIES_ICON_SIZE: f32 = 44.0;
-const PROPERTIES_TAB_HEIGHT: f32 = 34.0;
+const PROPERTIES_TAB_HEIGHT: f32 = 42.0;
 const PROPERTIES_TAB_TOP_MARGIN: f32 = 7.0;
-const PROPERTIES_TAB_REGION_HEIGHT: f32 = PROPERTIES_TAB_HEIGHT + PROPERTIES_TAB_TOP_MARGIN;
-const PROPERTIES_FOOTER_HEIGHT: f32 = 56.0;
+const PROPERTIES_FOOTER_HEIGHT: f32 = 58.0;
+const PROPERTIES_ACTION_BUTTON_HEIGHT: f32 = 38.0;
+const PROPERTIES_ACTION_BUTTON_MIN_WIDTH: f32 = 92.0;
 const PROPERTY_LABEL_WIDTH: f32 = 112.0;
 const PROPERTY_TEXT_SPACING: f32 = 12.0;
 const PERMISSION_COLUMN_WIDTH: f32 = 100.0;
@@ -29,25 +30,55 @@ const PROPERTIES_ITEM_SPACING: f32 = 10.0;
 const GENERAL_TYPE_ROW_HEIGHT: f32 = 18.0;
 const APPLICATION_MENU_GAP: f32 = 2.0;
 const IDENTITY_MENU_X: f32 = APPLICATION_MENU_X;
-const OWNER_MENU_Y: f32 = PROPERTIES_OUTER_VERTICAL_PADDING
-    + PROPERTIES_CARD_VERTICAL_PADDING
-    + IDENTITY_SELECTOR_HEIGHT
-    + APPLICATION_MENU_GAP;
-const GROUP_MENU_Y: f32 = OWNER_MENU_Y + IDENTITY_SELECTOR_HEIGHT + PROPERTIES_ITEM_SPACING;
 const APPLICATION_MENU_X: f32 = PROPERTIES_OUTER_HORIZONTAL_PADDING
     + PROPERTIES_CARD_HORIZONTAL_PADDING
     + PROPERTY_LABEL_WIDTH
     + PROPERTY_TEXT_SPACING;
-const APPLICATION_MENU_Y: f32 = PROPERTIES_OUTER_VERTICAL_PADDING
-    + PROPERTIES_CARD_VERTICAL_PADDING
-    + PROPERTIES_ICON_SIZE
-    + PROPERTIES_SECTION_SPACING
-    + 1.0
-    + PROPERTIES_SECTION_SPACING
-    + GENERAL_TYPE_ROW_HEIGHT
-    + PROPERTIES_ITEM_SPACING
-    + APPLICATION_SELECTOR_HEIGHT
-    + APPLICATION_MENU_GAP;
+
+fn properties_control_height(base: f32, font_size: f32) -> f32 {
+    scaled_ui_metric(base, font_size).max(ui_text_line_height(font_size) + 6.0)
+}
+
+fn properties_action_button_width(labels: &[&str], font_size: f32) -> f32 {
+    let widest_label = labels
+        .iter()
+        .map(|label| estimated_ui_text_width(label, font_size))
+        .fold(0.0_f32, f32::max);
+    scaled_ui_metric(PROPERTIES_ACTION_BUTTON_MIN_WIDTH, font_size)
+        .max((widest_label + 28.0).ceil())
+}
+
+fn properties_type_row_height(font_size: f32) -> f32 {
+    scaled_ui_metric(GENERAL_TYPE_ROW_HEIGHT, font_size).max(ui_text_line_height(font_size) + 2.0)
+}
+
+fn properties_application_menu_y(font_size: f32) -> f32 {
+    PROPERTIES_OUTER_VERTICAL_PADDING
+        + PROPERTIES_CARD_VERTICAL_PADDING
+        + scaled_ui_metric(PROPERTIES_ICON_SIZE, font_size)
+        + PROPERTIES_SECTION_SPACING
+        + 1.0
+        + PROPERTIES_SECTION_SPACING
+        + properties_type_row_height(font_size)
+        + PROPERTIES_ITEM_SPACING
+        + properties_control_height(APPLICATION_SELECTOR_HEIGHT, font_size)
+        + APPLICATION_MENU_GAP
+}
+
+fn properties_identity_menu_y(menu: PropertiesIdentityMenu, font_size: f32) -> f32 {
+    let owner_y = PROPERTIES_OUTER_VERTICAL_PADDING
+        + PROPERTIES_CARD_VERTICAL_PADDING
+        + properties_control_height(IDENTITY_SELECTOR_HEIGHT, font_size)
+        + APPLICATION_MENU_GAP;
+    match menu {
+        PropertiesIdentityMenu::Owner => owner_y,
+        PropertiesIdentityMenu::Group => {
+            owner_y
+                + properties_control_height(IDENTITY_SELECTOR_HEIGHT, font_size)
+                + PROPERTIES_ITEM_SPACING
+        }
+    }
+}
 
 impl BExplorerIced {
     pub(in crate::iced_ui) fn properties_window_view(
@@ -55,8 +86,12 @@ impl BExplorerIced {
         palette: Palette,
     ) -> Element<'_, Message> {
         let (window_bg, window_title_bg) = palette.native_utility_backgrounds();
-        let card_bg = palette.native_utility_card_background(self.config.vibrancy_active);
         let font_size = self.font_size();
+        let window_size = properties_window_size(font_size);
+        let title_height = transfer_window_title_height(font_size);
+        let tab_height = properties_control_height(PROPERTIES_TAB_HEIGHT, font_size);
+        let tab_region_height = tab_height + PROPERTIES_TAB_TOP_MARGIN;
+        let footer_height = properties_control_height(PROPERTIES_FOOTER_HEIGHT, font_size);
         let Some(state) = &self.properties_window else {
             return container(Space::new())
                 .width(Length::Fill)
@@ -65,31 +100,40 @@ impl BExplorerIced {
                 .into();
         };
 
-        let title = self.properties_window_title();
+        let title_control_width = scaled_ui_metric(34.0, font_size);
+        let title_width =
+            (window_size.width - title_control_width * 2.0 - scaled_ui_metric(16.0, font_size))
+                .max(48.0);
+        let title =
+            ellipsize_ui_text_to_width(&self.properties_window_title(), title_width, font_size);
         let title_drag_area = mouse_area(
             container(
                 text(title)
                     .size(font_size)
                     .color(palette.text)
                     .align_x(Horizontal::Center)
-                    .width(Length::Fill),
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::None),
             )
-            .height(TRANSFER_WINDOW_TITLE_HEIGHT)
+            .height(title_height)
             .width(Length::Fill)
             .center_y(Length::Fill),
         )
         .on_press(Message::Properties(PropertiesMessage::Drag));
         let title_bar = container(
             row![
+                Space::new().width(title_control_width),
                 title_drag_area,
                 native_window_close_button_maybe(
                     (!state.applying).then_some(Message::Properties(PropertiesMessage::Close)),
                     palette,
+                    title_height,
+                    font_size,
                 ),
             ]
             .align_y(Alignment::Center),
         )
-        .height(TRANSFER_WINDOW_TITLE_HEIGHT)
+        .height(title_height)
         .width(Length::Fill)
         .style(move |_| {
             container::Style::default()
@@ -125,7 +169,7 @@ impl BExplorerIced {
             .height(Length::Fill)
             .align_y(Alignment::Center),
         )
-        .height(PROPERTIES_TAB_HEIGHT)
+        .height(tab_height)
         .width(Length::Fill)
         .padding([3, 6])
         .style(move |_| {
@@ -134,7 +178,7 @@ impl BExplorerIced {
                 .border(border::color(palette.border).width(1))
         });
         let tabs = container(tab_card)
-            .height(PROPERTIES_TAB_REGION_HEIGHT)
+            .height(tab_region_height)
             .width(Length::Fill)
             .padding(Padding {
                 top: PROPERTIES_TAB_TOP_MARGIN,
@@ -147,7 +191,7 @@ impl BExplorerIced {
         let content: Element<'_, Message> = if state.loading {
             container(
                 column![
-                    inline_icon("refresh", palette.accent, 28.0),
+                    inline_icon("refresh", palette.accent, self.ui_metric(28.0)),
                     text(self.localized("Cargando propiedades...", "Loading properties..."))
                         .size(font_size)
                         .color(palette.muted_text),
@@ -178,65 +222,99 @@ impl BExplorerIced {
             .into()
         } else {
             match state.tab {
-                PropertiesTab::General => self.properties_general_tab(state, palette, card_bg),
-                PropertiesTab::Permissions => {
-                    self.properties_permissions_tab(state, palette, card_bg)
-                }
-                PropertiesTab::Details => self.properties_details_tab(state, palette, card_bg),
+                PropertiesTab::General => self.properties_general_tab(state, palette),
+                PropertiesTab::Permissions => self.properties_permissions_tab(state, palette),
+                PropertiesTab::Details => self.properties_details_tab(state, palette),
             }
         };
 
         let dirty = state.is_dirty();
         let apply_enabled = dirty && !state.applying && !state.loading;
-        let notice = state
-            .notice
-            .as_ref()
-            .map(|(message, is_error)| {
-                text(ellipsize_text(message, 42))
+        let content: Element<'_, Message> = if let (Some(_), Some((message, is_error))) =
+            (state.snapshot.as_ref(), state.notice.as_ref())
+        {
+            let notice = container(
+                text(message)
                     .size(font_size - 1.0)
                     .color(if *is_error {
                         Color::from_rgb8(227, 107, 114)
                     } else {
                         palette.muted_text
                     })
-                    .wrapping(iced::widget::text::Wrapping::None)
-            })
-            .unwrap_or_else(|| text("").size(font_size - 1.0));
+                    .width(Length::Fill),
+            )
+            .padding([6, 12])
+            .width(Length::Fill)
+            .style(move |_| {
+                container::Style::default()
+                    .background(window_title_bg)
+                    .border(border::color(palette.border).width(1))
+            });
+            column![content, notice]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        } else {
+            content
+        };
+        let cancel_label = self.localized("Cancelar", "Cancel");
+        let apply_label = self.localized("Aplicar", "Apply");
+        let accept_label = self.localized("Aceptar", "OK");
+        let action_button_width =
+            properties_action_button_width(&[cancel_label, apply_label, accept_label], font_size);
+        let action_button_height =
+            properties_control_height(PROPERTIES_ACTION_BUTTON_HEIGHT, font_size);
         let footer = container(
             row![
-                notice.width(Length::Fill),
-                Button::new(text(self.localized("Cancelar", "Cancel")).size(font_size))
-                    .padding([7, 13])
-                    .on_press_maybe(
-                        (!state.applying).then_some(Message::Properties(PropertiesMessage::Close)),
-                    )
-                    .style(move |_, status| dialog_button_style(palette, false, status)),
+                Space::new().width(Length::Fill),
                 Button::new(
-                    text(self.localized("Aplicar", "Apply"))
-                        .size(font_size)
-                        .color(if apply_enabled {
-                            palette.text
-                        } else {
-                            palette.muted_text
-                        }),
+                    container(text(cancel_label).size(font_size))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .center(Length::Fill),
                 )
-                .padding([7, 13])
+                .width(action_button_width)
+                .height(action_button_height)
+                .padding(0)
+                .on_press_maybe(
+                    (!state.applying).then_some(Message::Properties(PropertiesMessage::Close)),
+                )
+                .style(move |_, status| dialog_button_style(palette, false, status)),
+                Button::new(
+                    container(text(apply_label).size(font_size).color(if apply_enabled {
+                        palette.text
+                    } else {
+                        palette.muted_text
+                    }),)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center(Length::Fill),
+                )
+                .width(action_button_width)
+                .height(action_button_height)
+                .padding(0)
                 .on_press_maybe(
                     apply_enabled.then_some(Message::Properties(PropertiesMessage::Apply)),
                 )
                 .style(move |_, status| dialog_button_style(palette, false, status)),
-                Button::new(text(self.localized("Aceptar", "OK")).size(font_size))
-                    .padding([7, 15])
-                    .on_press_maybe(
-                        (!state.applying)
-                            .then_some(Message::Properties(PropertiesMessage::Accept,))
-                    )
-                    .style(move |_, status| dialog_button_style(palette, true, status)),
+                Button::new(
+                    container(text(accept_label).size(font_size))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .center(Length::Fill),
+                )
+                .width(action_button_width)
+                .height(action_button_height)
+                .padding(0)
+                .on_press_maybe(
+                    (!state.applying).then_some(Message::Properties(PropertiesMessage::Accept,))
+                )
+                .style(move |_, status| dialog_button_style(palette, true, status)),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
         )
-        .height(PROPERTIES_FOOTER_HEIGHT)
+        .height(footer_height)
         .padding([8, 10])
         .align_y(Vertical::Center)
         .width(Length::Fill)
@@ -246,7 +324,7 @@ impl BExplorerIced {
                 .border(border::color(palette.border).width(1))
         });
 
-        let inner_height = PROPERTIES_WINDOW_HEIGHT - WINDOW_BORDER_WIDTH * 2.0;
+        let inner_height = window_size.height - WINDOW_BORDER_WIDTH * 2.0;
         let body = container(content)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -266,7 +344,7 @@ impl BExplorerIced {
         });
         let panel = container(inner)
             .width(Length::Fill)
-            .height(Length::Fixed(PROPERTIES_WINDOW_HEIGHT))
+            .height(Length::Fixed(window_size.height))
             .padding(WINDOW_BORDER_WIDTH)
             .clip(true)
             .style(move |_| {
@@ -290,14 +368,14 @@ impl BExplorerIced {
         &'a self,
         state: &'a PropertiesWindowState,
         palette: Palette,
-        card_bg: Color,
     ) -> Element<'a, Message> {
         let snapshot = state.snapshot.as_ref().expect("properties snapshot");
         let font_size = self.font_size();
+        let properties_icon_size = self.ui_metric(PROPERTIES_ICON_SIZE);
         let icon: Element<'_, Message> = if let Some(handle) = &state.icon {
             iced_image::Image::new(handle.clone())
-                .width(PROPERTIES_ICON_SIZE)
-                .height(PROPERTIES_ICON_SIZE)
+                .width(properties_icon_size)
+                .height(properties_icon_size)
                 .content_fit(ContentFit::Contain)
                 .into()
         } else {
@@ -309,11 +387,15 @@ impl BExplorerIced {
                 PropertyKind::Multiple => "copy",
                 PropertyKind::File | PropertyKind::Other => "file",
             };
-            container(inline_icon(label, palette.accent, 34.0))
-                .width(PROPERTIES_ICON_SIZE)
-                .height(PROPERTIES_ICON_SIZE)
-                .center(Length::Fill)
-                .into()
+            container(inline_icon(
+                label,
+                palette.accent,
+                scaled_ui_metric(34.0, font_size),
+            ))
+            .width(properties_icon_size)
+            .height(properties_icon_size)
+            .center(Length::Fill)
+            .into()
         };
         let name: Element<'_, Message> = if state.can_rename() {
             text_input("", &state.name)
@@ -348,7 +430,7 @@ impl BExplorerIced {
             palette,
             font_size,
         ))
-        .height(GENERAL_TYPE_ROW_HEIGHT)
+        .height(properties_type_row_height(font_size))
         .align_y(Vertical::Center);
         let mut basic = column![type_row].spacing(PROPERTIES_ITEM_SPACING);
         if !snapshot.applications.is_empty() {
@@ -360,7 +442,10 @@ impl BExplorerIced {
                             .color(palette.muted_text),
                     )
                     .width(PROPERTY_LABEL_WIDTH)
-                    .height(APPLICATION_SELECTOR_HEIGHT)
+                    .height(properties_control_height(
+                        APPLICATION_SELECTOR_HEIGHT,
+                        font_size,
+                    ))
                     .center_y(Length::Fill),
                     application_selector(
                         state,
@@ -401,7 +486,7 @@ impl BExplorerIced {
         let logical_size = size.map_or(snapshot.logical_size, |size| size.bytes);
         let allocated_size = size.map_or(snapshot.allocated_size, |size| size.allocated);
         let item_summary = size.map(|size| {
-            let mut summary = if self.is_spanish() {
+            if self.is_spanish() {
                 format!(
                     "{} archivos, {} carpetas, {} enlaces",
                     size.files, size.directories, size.links
@@ -411,15 +496,7 @@ impl BExplorerIced {
                     "{} files, {} folders, {} links",
                     size.files, size.directories, size.links
                 )
-            };
-            if size.unreadable > 0 {
-                summary.push_str(&if self.is_spanish() {
-                    format!(", {} sin acceso", size.unreadable)
-                } else {
-                    format!(", {} inaccessible", size.unreadable)
-                });
             }
-            summary
         });
         let size_buttons: Element<'_, Message> = if snapshot.contains_directory {
             if state.size_loading {
@@ -488,6 +565,20 @@ impl BExplorerIced {
                 );
             }
             (None, false) => {}
+        }
+        if let Some(size) = size
+            && size.unreadable > 0
+        {
+            size_column = size_column.push(
+                text(if self.is_spanish() {
+                    format!("Tamaño parcial: {} elementos sin acceso", size.unreadable)
+                } else {
+                    format!("Partial size: {} inaccessible items", size.unreadable)
+                })
+                .size(font_size - 1.0)
+                .color(Color::from_rgb8(221, 154, 87))
+                .width(Length::Fill),
+            );
         }
         let dates = column![
             property_value_row(
@@ -588,8 +679,7 @@ impl BExplorerIced {
                 PROPERTIES_CARD_VERTICAL_PADDING,
                 PROPERTIES_CARD_HORIZONTAL_PADDING,
             ])
-            .width(Length::Fill)
-            .style(move |_| properties_card_style(palette, card_bg));
+            .width(Length::Fill);
         let body: Element<'a, Message> = scrollable(container(card).padding([
             PROPERTIES_OUTER_VERTICAL_PADDING,
             PROPERTIES_OUTER_HORIZONTAL_PADDING,
@@ -613,7 +703,7 @@ impl BExplorerIced {
                 font_size,
             )))
             .x(APPLICATION_MENU_X)
-            .y(APPLICATION_MENU_Y);
+            .y(properties_application_menu_y(font_size));
             stack(vec![body, backdrop, menu.into()])
                 .width(Length::Fill)
                 .height(Length::Fill)
@@ -627,7 +717,6 @@ impl BExplorerIced {
         &'a self,
         state: &'a PropertiesWindowState,
         palette: Palette,
-        card_bg: Color,
     ) -> Element<'a, Message> {
         let snapshot = state.snapshot.as_ref().expect("properties snapshot");
         let font_size = self.font_size();
@@ -792,10 +881,12 @@ impl BExplorerIced {
                             "Aplicar los cambios también al contenido",
                             "Also apply changes to enclosed items",
                         ))
+                        .size(self.ui_metric(16.0))
                         .on_toggle(|value| {
                             Message::Properties(PropertiesMessage::RecursiveChanged(value))
                         })
                         .text_size(font_size - 1.0)
+                        .spacing(self.ui_metric(5.0))
                         .style(move |_, status| properties_checkbox_style(palette, status))
                         .into(),
                 )
@@ -853,8 +944,7 @@ impl BExplorerIced {
                 PROPERTIES_CARD_VERTICAL_PADDING,
                 PROPERTIES_CARD_HORIZONTAL_PADDING,
             ])
-            .width(Length::Fill)
-            .style(move |_| properties_card_style(palette, card_bg));
+            .width(Length::Fill);
         let body: Element<'a, Message> = scrollable(container(card).padding([
             PROPERTIES_OUTER_VERTICAL_PADDING,
             PROPERTIES_OUTER_HORIZONTAL_PADDING,
@@ -864,10 +954,11 @@ impl BExplorerIced {
         .height(Length::Fill)
         .into();
         if let Some(menu) = state.identity_menu_open {
-            let (identities, y) = match menu {
-                PropertiesIdentityMenu::Owner => (&state.users, OWNER_MENU_Y),
-                PropertiesIdentityMenu::Group => (&state.groups, GROUP_MENU_Y),
+            let identities = match menu {
+                PropertiesIdentityMenu::Owner => &state.users,
+                PropertiesIdentityMenu::Group => &state.groups,
             };
+            let y = properties_identity_menu_y(menu, font_size);
             let backdrop: Element<'a, Message> = mouse_area(
                 container(Space::new())
                     .width(Length::Fill)
@@ -893,7 +984,6 @@ impl BExplorerIced {
         &'a self,
         state: &'a PropertiesWindowState,
         palette: Palette,
-        card_bg: Color,
     ) -> Element<'a, Message> {
         let snapshot = state.snapshot.as_ref().expect("properties snapshot");
         let font_size = self.font_size();
@@ -1030,8 +1120,7 @@ impl BExplorerIced {
                 PROPERTIES_CARD_VERTICAL_PADDING,
                 PROPERTIES_CARD_HORIZONTAL_PADDING,
             ])
-            .width(Length::Fill)
-            .style(move |_| properties_card_style(palette, card_bg));
+            .width(Length::Fill);
         scrollable(container(card).padding([
             PROPERTIES_OUTER_VERTICAL_PADDING,
             PROPERTIES_OUTER_HORIZONTAL_PADDING,
@@ -1078,6 +1167,7 @@ fn identity_selector<'a>(
     font_size: f32,
 ) -> Element<'a, Message> {
     let open = state.identity_menu_open == Some(menu);
+    let selector_height = properties_control_height(IDENTITY_SELECTOR_HEIGHT, font_size);
     Button::new(
         container(
             row![
@@ -1090,7 +1180,11 @@ fn identity_selector<'a>(
                 .color(palette.text)
                 .wrapping(iced::widget::text::Wrapping::None)
                 .width(Length::Fill),
-                inline_icon("chev-down", palette.muted_text, 11.0),
+                inline_icon(
+                    "chev-down",
+                    palette.muted_text,
+                    scaled_ui_metric(11.0, font_size),
+                ),
             ]
             .spacing(7)
             .align_y(Alignment::Center),
@@ -1099,7 +1193,7 @@ fn identity_selector<'a>(
         .center_y(Length::Fill),
     )
     .width(Length::Fill)
-    .height(IDENTITY_SELECTOR_HEIGHT)
+    .height(selector_height)
     .padding([0, 8])
     .on_press_maybe((!identities.is_empty()).then_some(Message::Properties(
         PropertiesMessage::ToggleIdentityMenu(menu),
@@ -1115,6 +1209,7 @@ fn identity_selector_menu<'a>(
     palette: Palette,
     font_size: f32,
 ) -> Element<'a, Message> {
+    let selector_height = properties_control_height(IDENTITY_SELECTOR_HEIGHT, font_size);
     let options = identities
         .iter()
         .enumerate()
@@ -1136,7 +1231,7 @@ fn identity_selector_menu<'a>(
                 .center_y(Length::Fill),
             )
             .width(Length::Fill)
-            .height(IDENTITY_SELECTOR_HEIGHT)
+            .height(selector_height)
             .padding([0, 8])
             .on_press(Message::Properties(PropertiesMessage::IdentitySelected(
                 menu,
@@ -1150,7 +1245,8 @@ fn identity_selector_menu<'a>(
         PropertiesIdentityMenu::Owner => PropertiesSelectorMenu::Owner,
         PropertiesIdentityMenu::Group => PropertiesSelectorMenu::Group,
     };
-    let menu_height = (identities.len().min(7) as f32 * 32.0 + 8.0).max(40.0);
+    let menu_height = (identities.len().min(7) as f32 * (selector_height + 2.0) + 8.0)
+        .max(selector_height + 10.0);
     container(
         scrollable(column(options).spacing(2).padding(4))
             .id(properties_selector_scroll_id(menu_kind))
@@ -1169,6 +1265,7 @@ fn application_selector<'a>(
     palette: Palette,
     font_size: f32,
 ) -> Element<'a, Message> {
+    let selector_height = properties_control_height(APPLICATION_SELECTOR_HEIGHT, font_size);
     let current = state.application.as_ref();
     let current_icon = current
         .and_then(|application| state.application_icons.get(application.desktop_id.as_str()));
@@ -1178,13 +1275,17 @@ fn application_selector<'a>(
     let button = Button::new(
         container(
             row![
-                application_icon(current_icon, palette),
+                application_icon(current_icon, palette, font_size),
                 text(ellipsize_text(current_name, 24))
                     .size(font_size)
                     .color(palette.text)
                     .wrapping(iced::widget::text::Wrapping::None)
                     .width(Length::Fill),
-                inline_icon("chev-down", palette.muted_text, 11.0),
+                inline_icon(
+                    "chev-down",
+                    palette.muted_text,
+                    scaled_ui_metric(11.0, font_size),
+                ),
             ]
             .spacing(7)
             .align_y(Alignment::Center),
@@ -1193,7 +1294,7 @@ fn application_selector<'a>(
         .center_y(Length::Fill),
     )
     .width(APPLICATION_SELECTOR_WIDTH)
-    .height(APPLICATION_SELECTOR_HEIGHT)
+    .height(selector_height)
     .padding([0, 8])
     .on_press(Message::Properties(
         PropertiesMessage::ToggleApplicationMenu,
@@ -1210,6 +1311,7 @@ fn application_selector_menu<'a>(
     palette: Palette,
     font_size: f32,
 ) -> Element<'a, Message> {
+    let selector_height = properties_control_height(APPLICATION_SELECTOR_HEIGHT, font_size);
     let options = applications
         .iter()
         .enumerate()
@@ -1224,7 +1326,7 @@ fn application_selector_menu<'a>(
             Button::new(
                 container(
                     row![
-                        application_icon(icon, palette),
+                        application_icon(icon, palette, font_size),
                         text(ellipsize_text(&application.name, 25))
                             .size(font_size)
                             .color(color)
@@ -1238,7 +1340,7 @@ fn application_selector_menu<'a>(
                 .center_y(Length::Fill),
             )
             .width(Length::Fill)
-            .height(APPLICATION_SELECTOR_HEIGHT)
+            .height(selector_height)
             .padding([0, 7])
             .on_press(Message::Properties(PropertiesMessage::ApplicationSelected(
                 application.clone(),
@@ -1247,7 +1349,8 @@ fn application_selector_menu<'a>(
             .into()
         })
         .collect::<Vec<Element<'a, Message>>>();
-    let menu_height = (applications.len().min(5) as f32 * 30.0 + 8.0).max(38.0);
+    let menu_height = (applications.len().min(5) as f32 * (selector_height + 2.0) + 8.0)
+        .max(selector_height + 10.0);
     let menu = container(
         scrollable(column(options).spacing(2).padding(4))
             .id(properties_selector_scroll_id(
@@ -1265,13 +1368,21 @@ fn application_selector_menu<'a>(
 fn application_icon<'a>(
     handle: Option<&iced_image::Handle>,
     palette: Palette,
+    font_size: f32,
 ) -> Element<'a, Message> {
+    let icon_size = scaled_ui_metric(18.0, font_size);
     handle.map_or_else(
-        || inline_icon("open", palette.muted_text, 17.0),
+        || {
+            inline_icon(
+                "open",
+                palette.muted_text,
+                scaled_ui_metric(17.0, font_size),
+            )
+        },
         |handle| {
             iced_image::Image::new(handle.clone())
-                .width(18)
-                .height(18)
+                .width(icon_size)
+                .height(icon_size)
                 .content_fit(ContentFit::Contain)
                 .into()
         },
@@ -1343,12 +1454,6 @@ fn property_value_row<'a>(
     .spacing(PROPERTY_TEXT_SPACING)
     .align_y(Alignment::Start)
     .into()
-}
-
-fn properties_card_style(palette: Palette, background: Color) -> container::Style {
-    container::Style::default()
-        .background(background)
-        .border(border::rounded(6).color(palette.border).width(1))
 }
 
 fn localized_property_kind(kind: PropertyKind, spanish: bool) -> &'static str {
@@ -1461,7 +1566,7 @@ fn permission_checkbox<'a>(
     palette: Palette,
     font_size: f32,
 ) -> iced::widget::Checkbox<'a, Message> {
-    let checkbox = iced::widget::checkbox(mode & bit != 0).size(16);
+    let checkbox = iced::widget::checkbox(mode & bit != 0).size(scaled_ui_metric(16.0, font_size));
     let checkbox = if label.is_empty() {
         checkbox
     } else {
@@ -1469,7 +1574,7 @@ fn permission_checkbox<'a>(
     };
     let checkbox = checkbox
         .text_size(font_size - 1.0)
-        .spacing(5)
+        .spacing(scaled_ui_metric(5.0, font_size))
         .style(move |_, status| properties_checkbox_style(palette, status));
     if editable {
         checkbox.on_toggle(move |_| Message::Properties(PropertiesMessage::PermissionToggled(bit)))
@@ -1539,4 +1644,22 @@ fn format_property_time(time: Option<std::time::SystemTime>, spanish: bool) -> S
 
 fn optional_number(value: Option<u64>) -> String {
     value.map_or_else(|| "—".into(), |value| value.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn property_action_buttons_use_one_text_based_size() {
+        let font_size = 16.0;
+        let labels = ["Cancelar", "Aplicar", "Aceptar"];
+        let width = properties_action_button_width(&labels, font_size);
+
+        assert!(width >= estimated_ui_text_width("Cancelar", font_size) + 28.0);
+        assert!(
+            properties_control_height(PROPERTIES_TAB_HEIGHT, font_size)
+                > properties_control_height(34.0, font_size)
+        );
+    }
 }

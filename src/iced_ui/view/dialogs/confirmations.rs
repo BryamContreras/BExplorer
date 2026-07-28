@@ -9,6 +9,7 @@ impl BExplorerIced {
         let Some(pending) = &self.elevated_file_action_dialog else {
             return Space::new().into();
         };
+        let surface_width = self.modal_text_surface_width(470.0);
         let permission = if cfg!(target_os = "linux") {
             self.localized("permisos de root", "root permission")
         } else {
@@ -70,7 +71,7 @@ impl BExplorerIced {
         .spacing(16)
         .padding(18);
         let surface = container(panel)
-            .width(470)
+            .width(surface_width)
             .style(move |_| elevated_panel_style(palette));
         container(surface)
             .width(Length::Fill)
@@ -94,6 +95,7 @@ impl BExplorerIced {
         let Some(pending) = &self.elevated_delete_dialog else {
             return Space::new().into();
         };
+        let surface_width = self.modal_text_surface_width(470.0);
         let permission = if cfg!(target_os = "linux") {
             self.localized("permisos de root", "root permission")
         } else {
@@ -149,7 +151,7 @@ impl BExplorerIced {
         .spacing(16)
         .padding(18);
         let surface = container(panel)
-            .width(470)
+            .width(surface_width)
             .style(move |_| elevated_panel_style(palette));
         container(surface)
             .width(Length::Fill)
@@ -173,6 +175,7 @@ impl BExplorerIced {
         let Some(pending) = &self.elevated_transfer_dialog else {
             return Space::new().into();
         };
+        let surface_width = self.modal_text_surface_width(480.0);
         let action = match pending.job.kind {
             TransferKind::Copy => self.localized("copiar", "copy"),
             TransferKind::Move => self.localized("mover", "move"),
@@ -229,7 +232,7 @@ impl BExplorerIced {
         .padding(18);
 
         let surface = container(panel)
-            .width(480)
+            .width(surface_width)
             .style(move |_| elevated_panel_style(palette));
         container(surface)
             .width(Length::Fill)
@@ -250,28 +253,58 @@ impl BExplorerIced {
         &self,
         palette: Palette,
     ) -> Element<'_, Message> {
-        let count = self
+        let surface_width = self.modal_text_surface_width(420.0);
+        let (count, target) = self
             .permanent_delete_dialog
             .as_ref()
-            .map(|pending| pending.paths.len())
-            .unwrap_or(0);
+            .map(|pending| (pending.paths.len(), pending.target))
+            .unwrap_or((0, PermanentDeleteTarget::Filesystem));
+        let title = match target {
+            PermanentDeleteTarget::EmptyTrash => {
+                self.localized("Vaciar papelera", "Empty Recycle Bin")
+            }
+            PermanentDeleteTarget::Filesystem | PermanentDeleteTarget::TrashItems => {
+                self.localized("Eliminar permanentemente", "Delete permanently")
+            }
+        };
+        let question = match target {
+            PermanentDeleteTarget::EmptyTrash => self
+                .localized(
+                    "¿Quieres eliminar permanentemente todos los elementos de la papelera?",
+                    "Do you want to permanently delete every item in the Recycle Bin?",
+                )
+                .to_owned(),
+            PermanentDeleteTarget::Filesystem | PermanentDeleteTarget::TrashItems => {
+                if self.is_spanish() {
+                    format!("¿Quieres eliminar permanentemente {count} elemento(s)?")
+                } else {
+                    format!("Do you want to permanently delete {count} item(s)?")
+                }
+            }
+        };
+        let confirm_label = match target {
+            PermanentDeleteTarget::EmptyTrash => self.localized("Vaciar", "Empty"),
+            PermanentDeleteTarget::Filesystem | PermanentDeleteTarget::TrashItems => {
+                self.localized("Eliminar", "Delete")
+            }
+        };
 
         let panel = column![
             row![
-                text(self.localized("Eliminar permanentemente", "Delete permanently"))
+                text(title)
                     .size(self.font_size() + 2.0)
                     .color(palette.text)
                     .width(Length::Fill),
-                icon_button("x", Message::CancelPermanentDelete, palette, false),
+                icon_button(
+                    "x",
+                    Message::CancelPermanentDelete,
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
-            text(if self.is_spanish() {
-                format!("¿Quieres eliminar permanentemente {count} elemento(s)?")
-            } else {
-                format!("Do you want to permanently delete {count} item(s)?")
-            })
-            .size(self.font_size())
-            .color(palette.text),
+            text(question).size(self.font_size()).color(palette.text),
             text(self.localized(
                 "Esta acción no se puede deshacer.",
                 "This action cannot be undone.",
@@ -289,7 +322,7 @@ impl BExplorerIced {
                 .on_press(Message::CancelPermanentDelete)
                 .style(move |_, status| dialog_button_style(palette, false, status)),
                 Button::new(
-                    text(self.localized("Eliminar", "Delete"))
+                    text(confirm_label)
                         .size(self.font_size())
                         .color(palette.accent_text)
                 )
@@ -303,7 +336,7 @@ impl BExplorerIced {
         .spacing(16)
         .padding(18);
 
-        let surface = container(panel).width(420).style(move |_| {
+        let surface = container(panel).width(surface_width).style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
                 .border(border::rounded(8).color(palette.strong_border).width(1))
@@ -313,8 +346,12 @@ impl BExplorerIced {
                     blur_radius: 24.0,
                 })
         });
-        let surface =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), surface.into(), 420.0, 176.0);
+        let surface = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            surface.into(),
+            surface_width,
+            176.0,
+        );
         container(surface)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -337,6 +374,7 @@ impl BExplorerIced {
         let Some(dialog) = &self.transfer_conflict_dialog else {
             return Space::new().into();
         };
+        let surface_width = self.modal_text_surface_width(460.0);
         let count = dialog.conflicts.len();
         let first_name = dialog
             .conflicts
@@ -363,7 +401,13 @@ impl BExplorerIced {
                     .size(self.font_size() + 2.0)
                     .color(palette.text)
                     .width(Length::Fill),
-                icon_button("x", Message::CancelTransferConflict, palette, false),
+                icon_button(
+                    "x",
+                    Message::CancelTransferConflict,
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
             text(conflict_message)
@@ -416,7 +460,7 @@ impl BExplorerIced {
         .spacing(16)
         .padding(18);
 
-        let surface = container(panel).width(460).style(move |_| {
+        let surface = container(panel).width(surface_width).style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
                 .border(border::rounded(8).color(palette.strong_border).width(1))
@@ -426,8 +470,12 @@ impl BExplorerIced {
                     blur_radius: 24.0,
                 })
         });
-        let surface =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), surface.into(), 460.0, 238.0);
+        let surface = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            surface.into(),
+            surface_width,
+            238.0,
+        );
         container(surface)
             .width(Length::Fill)
             .height(Length::Fill)

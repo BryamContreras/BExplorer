@@ -1,4 +1,36 @@
 fn icon_names_for_path(path: &Path, is_directory: bool) -> Vec<String> {
+    if let Some(encoded) = path
+        .to_str()
+        .and_then(|path| path.strip_prefix(PORTABLE_DEVICE_ICON_LOOKUP_PREFIX))
+    {
+        let candidates = encoded
+            .split(',')
+            .filter(|name| valid_synthetic_icon_name(name))
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if !candidates.is_empty() {
+            return dedupe(candidates);
+        }
+    }
+    if path == Path::new("bexplorer-portable-device") {
+        return portable::portable_device_icon_names(None, Path::new(""));
+    }
+    if path == Path::new("bexplorer-bluetooth") {
+        return names([
+            "preferences-system-bluetooth",
+            "bluetooth",
+            "network-bluetooth",
+        ]);
+    }
+    if path == Path::new("bexplorer-mail") {
+        return names([
+            "mail-send",
+            "internet-mail",
+            "mail-message-new",
+            "emblem-mail",
+        ]);
+    }
+
     if is_directory {
         if path == Path::new("/") {
             return names([
@@ -8,7 +40,7 @@ fn icon_names_for_path(path: &Path, is_directory: bool) -> Vec<String> {
                 "folder",
             ]);
         }
-        if path.starts_with("/media") || path.starts_with("/run/media") {
+        if standard_removable_mount_root(path) {
             return names([
                 "drive-removable-media",
                 "drive-removable-media-usb",
@@ -39,6 +71,22 @@ fn icon_names_for_path(path: &Path, is_directory: bool) -> Vec<String> {
     candidates.push("text-x-generic".into());
     candidates.push("unknown".into());
     dedupe(candidates)
+}
+
+fn valid_synthetic_icon_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 128
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'+'))
+}
+
+fn standard_removable_mount_root(path: &Path) -> bool {
+    path.strip_prefix("/run/media")
+        .is_ok_and(|relative| relative.components().count() == 2)
+        || path.strip_prefix("/media").is_ok_and(|relative| {
+            matches!(relative.components().count(), 1 | 2)
+        })
 }
 
 fn user_directory_icon_names(path: &Path) -> Option<Vec<String>> {
@@ -636,6 +684,749 @@ fn first_existing_theme(base_dirs: &[PathBuf], names: &[&str]) -> Option<String>
     })
 }
 
+const THUMBNAILER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+const TUMBLER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+const MAX_CONCURRENT_THUMBNAILERS: usize = 2;
+
+struct ThumbnailerPermit {
+    state: &'static (std::sync::Mutex<usize>, std::sync::Condvar),
+}
+
+impl Drop for ThumbnailerPermit {
+    fn drop(&mut self) {
+        let (active, available) = self.state;
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        available.notify_one();
+    }
+}
+
+struct TemporaryThumbnail {
+    path: PathBuf,
+}
+
+impl TemporaryThumbnail {
+    fn new() -> Self {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+        let stamp = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or_default();
+        let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "bexplorer-thumbnail-{}-{stamp}-{id}.png",
+                std::process::id()
+            )),
+        }
+    }
+}
+
+impl Drop for TemporaryThumbnail {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_file(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            crate::utils::log::error(format!(
+                "Could not clean temporary thumbnail {}: {error}",
+                self.path.display()
+            ));
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ExternalThumbnailKind {
+    Image,
+    Video,
+}
+
+pub fn image_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    external_thumbnail_in(
+        path,
+        size,
+        &xdg_cache_home(),
+        ExternalThumbnailKind::Image,
+    )
+}
+
+pub fn video_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    video_thumbnail_in(path, size, &xdg_cache_home())
+}
+
+fn video_thumbnail_in(
+    path: &Path,
+    size: u32,
+    cache_home: &Path,
+) -> Option<NativeIconImage> {
+    external_thumbnail_in(path, size, cache_home, ExternalThumbnailKind::Video)
+}
+
+fn external_thumbnail_in(
+    path: &Path,
+    size: u32,
+    cache_home: &Path,
+    kind: ExternalThumbnailKind,
+) -> Option<NativeIconImage> {
+    if !path.is_file() {
+        return None;
+    }
+
+    if let Some(thumbnail) = cached_desktop_thumbnail_in(cache_home, path, size) {
+        return Some(thumbnail);
+    }
+
+    let mime = mime_info()
+        .mime_for_path(path)
+        .unwrap_or_else(|| match kind {
+            ExternalThumbnailKind::Image => "image/*".into(),
+            ExternalThumbnailKind::Video => "video/*".into(),
+        });
+    let ffmpegthumbnailer = matches!(kind, ExternalThumbnailKind::Video)
+        .then(|| command_path("ffmpegthumbnailer"))
+        .flatten();
+    let ffmpeg = command_path("ffmpeg");
+    let has_registered_thumbnailer = desktop_thumbnailers()
+        .iter()
+        .any(|thumbnailer| thumbnailer.supports(&mime) && thumbnailer.is_available());
+    let has_tumbler = tumbler_thumbnailer_available();
+    if !has_registered_thumbnailer
+        && !has_tumbler
+        && ffmpegthumbnailer.is_none()
+        && ffmpeg.is_none()
+    {
+        return None;
+    }
+
+    let _permit = acquire_thumbnailer_permit();
+    let output = TemporaryThumbnail::new();
+    let edge = size.clamp(64, 512);
+
+    if has_registered_thumbnailer
+        && run_registered_desktop_thumbnailer(path, &output.path, edge, &mime)
+        && let Some(image) = load_generated_thumbnail(&output.path, size)
+    {
+        let _ = save_desktop_thumbnail_in(cache_home, path, size, &mime, &image);
+        return Some(image);
+    }
+
+    if has_tumbler
+        && let Some(image) = request_tumbler_thumbnail(path, size, cache_home, &mime)
+    {
+        return Some(image);
+    }
+
+    let generated = match kind {
+        ExternalThumbnailKind::Image => ffmpeg
+            .as_deref()
+            .is_some_and(|program| run_ffmpeg(program, path, &output.path, edge, &["0"])),
+        ExternalThumbnailKind::Video => {
+            ffmpegthumbnailer
+                .as_deref()
+                .is_some_and(|program| run_ffmpegthumbnailer(program, path, &output.path, edge))
+                || ffmpeg.as_deref().is_some_and(|program| {
+                    run_ffmpeg(program, path, &output.path, edge, &["3", "0"])
+                })
+        }
+    };
+    generated
+        .then(|| load_generated_thumbnail(&output.path, size))
+        .flatten()
+        .inspect(|image| {
+            let _ = save_desktop_thumbnail_in(cache_home, path, size, &mime, image);
+        })
+}
+
+fn load_generated_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    fs::read(path)
+        .ok()
+        .as_deref()
+        .and_then(|bytes| load_png_icon(bytes, size))
+}
+
+pub fn cache_desktop_thumbnail(
+    path: &Path,
+    size: u32,
+    image: &NativeIconImage,
+) -> bool {
+    let mime = mime_info()
+        .mime_for_path(path)
+        .unwrap_or_else(|| "application/octet-stream".into());
+    save_desktop_thumbnail_in(&xdg_cache_home(), path, size, &mime, image)
+}
+
+fn tumbler_thumbnailer_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        xdg_data_dirs_for_mime().into_iter().any(|base| {
+            let Ok(entries) = fs::read_dir(base.join("dbus-1/services")) else {
+                return false;
+            };
+            entries
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| {
+                    entry
+                        .path()
+                        .extension()
+                        .is_some_and(|extension| extension == "service")
+                })
+                .any(|entry| {
+                    fs::read_to_string(entry.path())
+                        .is_ok_and(|content| dbus_service_claims_tumbler(&content))
+                })
+        })
+    })
+}
+
+fn dbus_service_claims_tumbler(content: &str) -> bool {
+    content.lines().any(|line| {
+        line.trim()
+            .eq("Name=org.freedesktop.thumbnails.Thumbnailer1")
+    })
+}
+
+fn tumbler_connection() -> Option<&'static zbus::blocking::Connection> {
+    static CONNECTION: OnceLock<Option<zbus::blocking::Connection>> = OnceLock::new();
+    CONNECTION
+        .get_or_init(|| {
+            zbus::blocking::connection::Builder::session()
+                .ok()?
+                .method_timeout(std::time::Duration::from_secs(2))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
+fn request_tumbler_thumbnail(
+    path: &Path,
+    size: u32,
+    cache_home: &Path,
+    mime: &str,
+) -> Option<NativeIconImage> {
+    let uri = canonical_file_uri(path)?;
+    let connection = tumbler_connection()?;
+    let proxy = zbus::blocking::Proxy::new(
+        connection,
+        "org.freedesktop.thumbnails.Thumbnailer1",
+        "/org/freedesktop/thumbnails/Thumbnailer1",
+        "org.freedesktop.thumbnails.Thumbnailer1",
+    )
+    .ok()?;
+    let (schemes, mime_types): (Vec<String>, Vec<String>) =
+        proxy.call("GetSupported", &()).ok()?;
+    if !tumbler_supports_file(&schemes, &mime_types, mime) {
+        return None;
+    }
+    let flavors: Vec<String> = proxy.call("GetFlavors", &()).ok()?;
+    let flavor = best_tumbler_flavor(&flavors, size)?;
+    let uris = vec![uri.as_str()];
+    let mime_hints = vec![mime];
+    let handle: u32 = proxy
+        .call(
+            "Queue",
+            &(uris, mime_hints, flavor, "default", 0_u32),
+        )
+        .ok()?;
+
+    let deadline = std::time::Instant::now() + TUMBLER_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        if let Some(image) = cached_desktop_thumbnail_in(cache_home, path, size) {
+            return Some(image);
+        }
+        if tumbler_failure_is_current(cache_home, path) {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let _: zbus::Result<()> = proxy.call("Dequeue", &(handle,));
+    None
+}
+
+fn tumbler_failure_is_current(cache_home: &Path, path: &Path) -> bool {
+    let Some(uri) = canonical_file_uri(path) else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let hash = thumbnail_hash_for_uri(&uri);
+    let Ok(entries) = fs::read_dir(cache_home.join("thumbnails/fail")) else {
+        return false;
+    };
+    entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .starts_with("tumbler")
+        })
+        .any(|entry| {
+            fs::read(entry.path().join(format!("{hash}.png")))
+                .is_ok_and(|bytes| thumbnail_metadata_is_current(&bytes, &metadata, &uri))
+        })
+}
+
+fn tumbler_supports_file(schemes: &[String], mime_types: &[String], mime: &str) -> bool {
+    if mime_types.is_empty() {
+        return schemes.iter().any(|scheme| scheme == "file");
+    }
+    if schemes.len() == mime_types.len() {
+        return schemes
+            .iter()
+            .zip(mime_types)
+            .any(|(scheme, supported)| {
+                scheme == "file" && mime_pattern_matches(supported, mime)
+            });
+    }
+    schemes.iter().any(|scheme| scheme == "file")
+        && mime_types
+            .iter()
+            .any(|supported| mime_pattern_matches(supported, mime))
+}
+
+fn best_tumbler_flavor(flavors: &[String], size: u32) -> Option<&str> {
+    let preferred = match size {
+        0..=128 => ["normal", "large", "x-large", "xx-large"],
+        129..=256 => ["large", "x-large", "xx-large", "normal"],
+        257..=512 => ["x-large", "xx-large", "large", "normal"],
+        _ => ["xx-large", "x-large", "large", "normal"],
+    };
+    preferred
+        .into_iter()
+        .find(|candidate| flavors.iter().any(|flavor| flavor == candidate))
+}
+
+fn mime_pattern_matches(pattern: &str, mime: &str) -> bool {
+    pattern == mime
+        || pattern == "*/*"
+        || pattern
+            .strip_suffix("/*")
+            .is_some_and(|top| mime.starts_with(top) && mime.as_bytes().get(top.len()) == Some(&b'/'))
+}
+
+impl DesktopThumbnailer {
+    fn supports(&self, mime: &str) -> bool {
+        self.mime_types
+            .iter()
+            .any(|pattern| mime_pattern_matches(pattern, mime))
+    }
+
+    fn is_available(&self) -> bool {
+        self.try_exec
+            .as_deref()
+            .is_none_or(|program| resolve_executable(program).is_some())
+            && self
+                .exec
+                .first()
+                .is_some_and(|program| resolve_executable(program).is_some())
+    }
+}
+
+fn desktop_thumbnailers() -> &'static [DesktopThumbnailer] {
+    static THUMBNAILERS: OnceLock<Vec<DesktopThumbnailer>> = OnceLock::new();
+    THUMBNAILERS.get_or_init(load_desktop_thumbnailers)
+}
+
+fn load_desktop_thumbnailers() -> Vec<DesktopThumbnailer> {
+    let mut thumbnailers = Vec::new();
+    let mut seen_files = HashSet::new();
+    for base in xdg_data_dirs_for_mime() {
+        let Ok(entries) = fs::read_dir(base.join("thumbnailers")) else {
+            continue;
+        };
+        let mut paths = entries
+            .filter_map(std::result::Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "thumbnailer")
+            })
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            let Some(file_name) = path.file_name().map(ToOwned::to_owned) else {
+                continue;
+            };
+            if !seen_files.insert(file_name) {
+                continue;
+            }
+            let Some(thumbnailer) = fs::read_to_string(path)
+                .ok()
+                .as_deref()
+                .and_then(parse_desktop_thumbnailer)
+            else {
+                continue;
+            };
+            thumbnailers.push(thumbnailer);
+        }
+    }
+    thumbnailers
+}
+
+fn parse_desktop_thumbnailer(content: &str) -> Option<DesktopThumbnailer> {
+    let sections = parse_ini_sections(content);
+    let entry = sections.get("Thumbnailer Entry")?;
+    let exec = shlex::split(entry.get("Exec")?)?;
+    if exec.is_empty() {
+        return None;
+    }
+    let mime_types = entry
+        .get("MimeType")?
+        .split(';')
+        .map(str::trim)
+        .filter(|mime| mime.contains('/') && !mime.contains(char::is_whitespace))
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    if mime_types.is_empty() {
+        return None;
+    }
+    Some(DesktopThumbnailer {
+        exec,
+        try_exec: entry
+            .get("TryExec")
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty()),
+        mime_types,
+    })
+}
+
+fn resolve_executable(program: &str) -> Option<PathBuf> {
+    let path = Path::new(program);
+    if program.as_bytes().contains(&b'/') {
+        path.is_file().then(|| path.to_path_buf())
+    } else {
+        command_path(program)
+    }
+}
+
+fn run_registered_desktop_thumbnailer(
+    input: &Path,
+    output: &Path,
+    edge: u32,
+    mime: &str,
+) -> bool {
+    run_registered_desktop_thumbnailer_from(
+        desktop_thumbnailers(),
+        input,
+        output,
+        edge,
+        mime,
+    )
+}
+
+fn run_registered_desktop_thumbnailer_from(
+    thumbnailers: &[DesktopThumbnailer],
+    input: &Path,
+    output: &Path,
+    edge: u32,
+    mime: &str,
+) -> bool {
+    let Some(uri) = canonical_file_uri(input) else {
+        return false;
+    };
+    for thumbnailer in thumbnailers
+        .iter()
+        .filter(|thumbnailer| thumbnailer.supports(mime) && thumbnailer.is_available())
+    {
+        let Some(program) = thumbnailer
+            .exec
+            .first()
+            .and_then(|program| resolve_executable(program))
+        else {
+            continue;
+        };
+        let Some(arguments) = thumbnailer
+            .exec
+            .iter()
+            .skip(1)
+            .map(|argument| expand_thumbnailer_argument(argument, input, output, edge, &uri))
+            .collect::<Option<Vec<_>>>()
+        else {
+            continue;
+        };
+        let _ = fs::remove_file(output);
+        let mut command = Command::new(program);
+        command.args(arguments);
+        if run_bounded_thumbnailer(command) && thumbnail_output_ready(output) {
+            return true;
+        }
+    }
+    false
+}
+
+fn expand_thumbnailer_argument(
+    template: &str,
+    input: &Path,
+    output: &Path,
+    edge: u32,
+    uri: &str,
+) -> Option<OsString> {
+    let template = template.as_bytes();
+    let mut expanded = Vec::with_capacity(template.len());
+    let mut index = 0;
+    while index < template.len() {
+        if template[index] != b'%' {
+            expanded.push(template[index]);
+            index += 1;
+            continue;
+        }
+        let code = *template.get(index + 1)?;
+        match code {
+            b'%' => expanded.push(b'%'),
+            b'u' => expanded.extend_from_slice(uri.as_bytes()),
+            b'i' => expanded.extend_from_slice(input.as_os_str().as_bytes()),
+            b'o' => expanded.extend_from_slice(output.as_os_str().as_bytes()),
+            b's' => expanded.extend_from_slice(edge.to_string().as_bytes()),
+            _ => return None,
+        }
+        index += 2;
+    }
+    Some(OsString::from_vec(expanded))
+}
+
+fn acquire_thumbnailer_permit() -> ThumbnailerPermit {
+    static STATE: OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> = OnceLock::new();
+    let state = STATE
+        .get_or_init(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+    let (active, available) = state;
+    let mut active = active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *active >= MAX_CONCURRENT_THUMBNAILERS {
+        active = available
+            .wait(active)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    *active += 1;
+    drop(active);
+    ThumbnailerPermit { state }
+}
+
+fn run_ffmpegthumbnailer(program: &Path, input: &Path, output: &Path, edge: u32) -> bool {
+    let _ = fs::remove_file(output);
+    let edge = edge.to_string();
+    let mut command = Command::new(program);
+    command
+        .arg("-i")
+        .arg(input)
+        .arg("-o")
+        .arg(output)
+        .args(["-s", edge.as_str(), "-t", "10", "-q", "8"]);
+    run_bounded_thumbnailer(command) && thumbnail_output_ready(output)
+}
+
+fn run_ffmpeg(
+    program: &Path,
+    input: &Path,
+    output: &Path,
+    edge: u32,
+    seek_seconds: &[&str],
+) -> bool {
+    let scale = format!("scale={edge}:{edge}:force_original_aspect_ratio=decrease");
+    for seek_seconds in seek_seconds {
+        let _ = fs::remove_file(output);
+        let mut command = Command::new(program);
+        command
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-ss"])
+            .arg(seek_seconds)
+            .arg("-i")
+            .arg(input)
+            .args([
+                "-map",
+                "0:v:0",
+                "-frames:v",
+                "1",
+                "-an",
+                "-sn",
+                "-dn",
+                "-vf",
+                &scale,
+                "-threads",
+                "1",
+                "-y",
+            ])
+            .arg(output);
+        if run_bounded_thumbnailer(command) && thumbnail_output_ready(output) {
+            return true;
+        }
+    }
+    false
+}
+
+fn run_bounded_thumbnailer(mut command: Command) -> bool {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let Ok(mut child) = command.spawn() else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + THUMBNAILER_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn thumbnail_output_ready(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+}
+
+fn save_desktop_thumbnail_in(
+    cache_home: &Path,
+    original: &Path,
+    size: u32,
+    mime: &str,
+    image: &NativeIconImage,
+) -> bool {
+    let Some(uri) = canonical_file_uri(original) else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(original) else {
+        return false;
+    };
+    let Some(mtime) = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs().to_string())
+    else {
+        return false;
+    };
+    let file_size = metadata.len().to_string();
+    let attributes = [
+        ("Thumb::URI", uri.as_str()),
+        ("Thumb::MTime", mtime.as_str()),
+        ("Thumb::Size", file_size.as_str()),
+        ("Thumb::Mimetype", mime),
+        ("Software", concat!("BExplorer ", env!("CARGO_PKG_VERSION"))),
+    ];
+    let Some(png) = encode_xdg_thumbnail_png(image, &attributes) else {
+        return false;
+    };
+
+    let directory = cache_home
+        .join("thumbnails")
+        .join(thumbnail_cache_directory(size));
+    if fs::create_dir_all(&directory).is_err() {
+        return false;
+    }
+    let _ = fs::set_permissions(
+        cache_home.join("thumbnails"),
+        fs::Permissions::from_mode(0o700),
+    );
+    let _ = fs::set_permissions(&directory, fs::Permissions::from_mode(0o700));
+
+    let hash = thumbnail_hash_for_uri(&uri);
+    let destination = directory.join(format!("{hash}.png"));
+    let temporary = directory.join(format!(
+        ".bexplorer-{}-{hash}-{}.tmp",
+        std::process::id(),
+        next_thumbnail_cache_id()
+    ));
+    let Ok(mut file) = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .mode(0o600)
+        .open(&temporary)
+    else {
+        return false;
+    };
+    if file.write_all(&png).is_err() || file.flush().is_err() {
+        drop(file);
+        let _ = fs::remove_file(temporary);
+        return false;
+    }
+    drop(file);
+    if fs::rename(&temporary, &destination).is_err() {
+        let _ = fs::remove_file(temporary);
+        return false;
+    }
+    let _ = fs::set_permissions(destination, fs::Permissions::from_mode(0o600));
+    true
+}
+
+fn thumbnail_cache_directory(size: u32) -> &'static str {
+    match size {
+        0..=128 => "normal",
+        129..=256 => "large",
+        257..=512 => "x-large",
+        _ => "xx-large",
+    }
+}
+
+fn next_thumbnail_cache_id() -> u64 {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn encode_xdg_thumbnail_png(
+    image: &NativeIconImage,
+    attributes: &[(&str, &str)],
+) -> Option<Vec<u8>> {
+    let width = u32::try_from(image.width).ok()?;
+    let height = u32::try_from(image.height).ok()?;
+    let expected = image.width.checked_mul(image.height)?.checked_mul(4)?;
+    if width == 0 || height == 0 || image.rgba.len() != expected {
+        return None;
+    }
+
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(
+            &image.rgba,
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .ok()?;
+    if png.len() < 12 || &png[png.len() - 8..png.len() - 4] != b"IEND" {
+        return None;
+    }
+    let iend = png.split_off(png.len() - 12);
+    for (key, value) in attributes {
+        if key.is_empty()
+            || key.len() > 79
+            || key.as_bytes().contains(&0)
+            || value.as_bytes().contains(&0)
+        {
+            return None;
+        }
+        let mut text = Vec::with_capacity(key.len() + value.len() + 1);
+        text.extend_from_slice(key.as_bytes());
+        text.push(0);
+        text.extend_from_slice(value.as_bytes());
+        push_png_chunk(&mut png, b"tEXt", &text);
+    }
+    png.extend_from_slice(&iend);
+    Some(png)
+}
+
+fn push_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+    png.extend_from_slice(kind);
+    png.extend_from_slice(data);
+    let mut checksum = crc32fast::Hasher::new();
+    checksum.update(kind);
+    checksum.update(data);
+    png.extend_from_slice(&checksum.finalize().to_be_bytes());
+}
+
 fn xdg_config_home() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -671,9 +1462,26 @@ fn canonical_file_uri(path: &Path) -> Option<String> {
     for byte in path.as_os_str().as_bytes() {
         match *byte {
             b'/' => uri.push('/'),
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
-                uri.push(*byte as char)
-            }
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'-'
+            | b'.'
+            | b'_'
+            | b'~'
+            | b'!'
+            | b'$'
+            | b'&'
+            | b'\''
+            | b'('
+            | b')'
+            | b'*'
+            | b'+'
+            | b','
+            | b';'
+            | b'='
+            | b':'
+            | b'@' => uri.push(*byte as char),
             value => uri.push_str(&format!("%{value:02X}")),
         }
     }

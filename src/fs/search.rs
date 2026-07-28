@@ -207,7 +207,10 @@ where
             return false;
         }
 
-        let internal_name = entry.name.replace('\\', "/");
+        let internal_name = crate::fs::archive::normalize_archive_item_name(&entry.name);
+        if internal_name.is_empty() {
+            continue;
+        }
         let Some(name) = archive_entry_display_name(&internal_name) else {
             continue;
         };

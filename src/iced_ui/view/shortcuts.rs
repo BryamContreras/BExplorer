@@ -22,6 +22,9 @@ impl BExplorerIced {
         ];
 
         let font_size = self.font_size();
+        let density = self.ui_density();
+        let panel_width = self.modal_text_surface_width(740.0);
+        let panel_height = shortcuts_panel_height(font_size);
         let split_at = ACTIONS.len().div_ceil(2);
         let mut left = column![].spacing(4).width(Length::Fill);
         let mut right = column![].spacing(4).width(Length::Fill);
@@ -53,7 +56,7 @@ impl BExplorerIced {
                 ]
                 .spacing(3)
                 .width(Length::Fill),
-                icon_button("x", Message::CloseShortcuts, palette, false),
+                icon_button("x", Message::CloseShortcuts, palette, false, font_size,),
             ]
             .align_y(Alignment::Center),
             shortcuts,
@@ -64,10 +67,10 @@ impl BExplorerIced {
             .size(font_size - 1.0)
             .color(palette.muted_text),
         ]
-        .spacing(14)
-        .padding(18);
+        .spacing(self.ui_metric(14.0))
+        .padding(18.0 + density);
 
-        let surface = container(panel).width(740).style(move |_| {
+        let surface = container(panel).width(panel_width).style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
                 .border(border::rounded(8).color(palette.strong_border).width(1))
@@ -77,8 +80,12 @@ impl BExplorerIced {
                     blur_radius: 24.0,
                 })
         });
-        let surface =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), surface.into(), 740.0, 470.0);
+        let surface = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            surface.into(),
+            panel_width,
+            panel_height,
+        );
         container(surface)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -112,14 +119,19 @@ impl BExplorerIced {
         } else {
             palette.text
         };
+        let binding_inner_height = self.ui_metric(28.0);
+        let control_height = self.ui_metric(30.0);
+        let binding_width = self.ui_metric(130.0);
+        let reset_width = self.ui_metric(30.0);
+        let row_height = self.ui_metric(40.0);
         let binding_button = Button::new(
             container(text(binding).size(font_size - 0.5).color(binding_color))
                 .width(Length::Fill)
-                .height(28)
+                .height(binding_inner_height)
                 .center(Length::Fill),
         )
-        .width(130)
-        .height(30)
+        .width(binding_width)
+        .height(control_height)
         .padding([0, 8])
         .on_press(Message::BeginShortcutCapture(action))
         .style(move |_, status| {
@@ -144,13 +156,17 @@ impl BExplorerIced {
             }
         });
         let reset = Button::new(
-            container(inline_icon("undo", palette.muted_text, 14.0))
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center(Length::Fill),
+            container(inline_icon(
+                "undo",
+                palette.muted_text,
+                self.ui_metric(14.0),
+            ))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .center(Length::Fill),
         )
-        .width(30)
-        .height(30)
+        .width(reset_width)
+        .height(control_height)
         .padding(0)
         .on_press(Message::ResetShortcut(action))
         .style(move |_, status| button_style(palette, false, status));
@@ -163,22 +179,22 @@ impl BExplorerIced {
                         .wrapping(iced::widget::text::Wrapping::None),
                 )
                 .width(Length::Fill)
-                .height(30)
-                .center_y(30),
+                .height(control_height)
+                .center_y(control_height),
                 container(binding_button)
-                    .width(130)
+                    .width(binding_width)
                     .height(Length::Fill)
                     .center_y(Length::Fill),
                 container(reset)
-                    .width(30)
+                    .width(reset_width)
                     .height(Length::Fill)
                     .center_y(Length::Fill),
             ]
             .spacing(7)
             .align_y(Alignment::Center),
         )
-        .height(40)
-        .padding([0, 9])
+        .height(row_height)
+        .padding([0.0, 9.0 + self.ui_density()])
         .clip(true)
         .style(move |_| {
             container::Style::default()

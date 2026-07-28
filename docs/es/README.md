@@ -1,6 +1,6 @@
 # BExplorer
 
-BExplorer 1.0.3 es un explorador de archivos estable y liviano para Windows y
+BExplorer 1.0.4 es un explorador de archivos estable y liviano para Windows y
 Linux, escrito en Rust. Su objetivo es mejorar la gestion diaria de archivos
 sin intentar reemplazar todo el shell del sistema.
 
@@ -10,7 +10,7 @@ integraciones nativas propias; macOS sigue siendo un objetivo experimental.
 
 ## Estado
 
-BExplorer 1.0.3 es la version estable actual para Windows y Linux. La interfaz,
+BExplorer 1.0.4 es la version estable actual para Windows y Linux. La interfaz,
 el motor de operaciones, los formatos de configuracion y sesion, los flujos de
 comprimidos y las integraciones de plataforma forman la base compatible de la
 serie 1.x.
@@ -18,8 +18,9 @@ serie 1.x.
 Windows incluye integracion con WPD/MTP, Microsoft Defender, recursos nativos,
 red, portapapeles, montaje de imagenes y UAC. Linux incluye navegacion y
 operaciones completas, montajes desde `/proc/self/mountinfo`, unidades USB,
-red, dispositivos GVfs/FUSE, UDisks2, Polkit, iconos y miniaturas XDG,
-portapapeles nativo y soporte Wayland/X11 mediante `iced`/`winit`.
+red, dispositivos MTP mediante KDE KIO o GVfs/FUSE, UDisks2, Polkit, iconos y
+miniaturas XDG, portapapeles nativo y soporte Wayland/X11 mediante
+`iced`/`winit`.
 
 La interfaz ya se ha migrado de `egui` a `iced` y se ha eliminado la
 implementacion visual sustituida. Cubre navegacion local, pestanas, panel
@@ -47,14 +48,21 @@ dialogos, tablas y cuadriculas; `file_actions.rs` gestiona operaciones y
 transferencias; `advanced.rs` conecta Defender, MTP y unidades; y `helpers/`
 agrupa componentes compartidos.
 
-En KDE Plasma/Wayland el difuminado usa el protocolo nativo opcional de KWin.
-GNOME/Mutter no publica el efecto interno de GNOME Shell como protocolo para
-clientes Wayland, por lo que BExplorer se integra con la extension opcional
-Blur My Shell. Al activar Difuminado se registra el identificador `bexplorer`
-en la lista de aplicaciones de la extension y al desactivarlo se retira. Si la
-extension no esta instalada o habilitada, se conserva un fondo opaco legible.
-BExplorer tambien desactiva automaticamente la opacidad dinamica de la
-extension para que la ventana enfocada siga realmente difuminada.
+En KDE Plasma/Wayland el difuminado usa el protocolo estandar
+`ext-background-effect-v1` en KWin 6.7 o posterior y conserva el protocolo
+nativo anterior de KWin para versiones previas de Plasma. Ambas rutas usan el
+mismo control lineal de transparencia por pixel. El renderizador prefiere una
+superficie con alfa de 8 bits y composicion premultiplicada, evitando los
+cuatro niveles de opacidad que producia el formato alternativo de KWin con
+color de 10 bits pero alfa de solo 2 bits. Los tintes proporcionales mantienen
+legible el contenido sin tapar el difuminado de toda la ventana. GNOME/Mutter no publica
+el efecto interno de GNOME Shell como protocolo para clientes Wayland, por lo
+que BExplorer se integra con la extension opcional Blur My Shell. Al activar
+Difuminado se registra el identificador `bexplorer` en la lista de aplicaciones
+de la extension y al desactivarlo se retira. Si la integracion necesaria no
+esta disponible, se conserva un fondo opaco legible. BExplorer tambien
+desactiva automaticamente la opacidad dinamica de la extension para que la
+ventana enfocada siga realmente difuminada.
 
 La compatibilidad continua se valida especialmente en:
 
@@ -73,12 +81,22 @@ La compatibilidad continua se valida especialmente en:
 - Pantalla dividida con vistas independientes.
 - Barra lateral redimensionable y reordenable.
 - Barra de acciones y barra de marcadores opcionales.
+- Papelera nativa en Windows y Linux con restauracion, eliminacion permanente y
+  vaciado.
+- Limpieza recursiva de duplicados en carpetas y unidades extraibles, con
+  resultados agrupados y seleccionables.
+- Las transferencias, eliminaciones, compresiones, extracciones, busquedas de
+  duplicados y analisis de seguridad continúan en ventanas propias aunque se
+  cierre el explorador principal.
 - Integracion Freedesktop para iniciar `bexplorer %f`: abre la carpeta recibida
   o, si otra aplicacion entrega un archivo, navega a su carpeta contenedora.
 - Vistas de detalles, lista, iconos, iconos grandes, iconos extra grandes y
   mosaicos.
 - Soporte para unidades locales, extraibles, ISO montadas, rutas UNC, red,
-  montajes Linux, WPD/MTP en Windows y dispositivos GVfs/FUSE en Linux.
+  montajes Linux y dispositivos MTP mediante WPD en Windows o KIO/GVfs en
+  Linux.
+- Menu **Enviar a** para unidades extraibles y los destinos Bluetooth o de
+  correo que publique el entorno de escritorio.
 - Formateo de discos que no sean del sistema con elevacion nativa en Windows y
   UDisks2/Polkit en Linux. Linux permite discos externos y discos locales
   secundarios, pero bloquea el disco fisico del sistema, firmware, imagenes
@@ -114,7 +132,10 @@ La compatibilidad continua se valida especialmente en:
   lista de archivos.
 - Integracion con Windows Defender en Windows.
 - Personalizacion de tema, color, bordes de iconos, efectos de ventana, atajos
-  y distribucion de la interfaz.
+  distribucion de la interfaz, visibilidad de unidades del sistema ocultas y
+  tamano de texto.
+- Pestanas adaptables de una sola linea y escalado coherente de controles,
+  tarjetas, filas, columnas, iconos, dialogos y Propiedades.
 
 ## Enlaces simbolicos, propiedades y aplicaciones
 
@@ -155,14 +176,14 @@ compatible concreta.
 | Navegacion local, pestanas y panel dividido | Compatible | Compatible | Experimental |
 | Transferencias y comprimidos | Compatible | Compatible | Experimental |
 | Iconos y miniaturas | Integracion nativa | Freedesktop/XDG | Experimental |
-| Dispositivos portatiles | WPD/MTP | Dispositivos montados por GVfs/FUSE | No compatible |
+| Dispositivos portatiles | WPD/MTP | KDE KIO/MTP o GVfs/FUSE | No compatible |
 | Descubrimiento de red | Proveedores nativos | GVfs/Samba/Avahi y enriquecimiento SMB opcional con KIO | Solo SMB montado |
 | Montaje y expulsion de ISO | Compatible | UDisks2 | Experimental |
 | Formateo de discos no pertenecientes al sistema | Format-Volume | UDisks2/Polkit | Experimental |
 | Difuminado | Efectos nativos | KWin o Blur My Shell opcional | Experimental |
 | Microsoft Defender | Compatible | No aplica | No aplica |
 
-Compatibilidad del paquete Linux 1.0.3 generado en la base actual:
+Compatibilidad del paquete Linux 1.0.4 generado en la base actual:
 
 | Distribucion o entorno | `.deb` actual | Nivel de validacion |
 | --- | --- | --- |
@@ -181,6 +202,25 @@ separado. La capa grafica mediante `iced`/`winit` admite sesiones Wayland y
 X11; otros escritorios Freedesktop pueden usar las funciones base, pero no se
 declaran probados solo por compartir las mismas bibliotecas.
 
+## Windows
+
+Las miniaturas locales de imagenes y videos consultan primero
+`IThumbnailCache`, la cache global del Shell de Windows, sin iniciar una
+extraccion nueva. Cuando no existe una entrada, BExplorer pide la miniatura al
+proveedor nativo registrado en Windows; el resultado se guarda en esa cache
+compartida y tambien puede ser reutilizado por el Explorador de archivos. La
+extraccion nativa y la decodificacion interna de imagenes tienen un limite
+independiente de dos tareas simultaneas.
+
+Si Windows no posee un proveedor para un formato de imagen, BExplorer conserva
+su decodificador interno como respaldo y guarda el resultado en una cache
+persistente propia, invalidada automaticamente cuando cambia la ruta, el tamano
+o la fecha del archivo original. Esta cache se limita a 512 MiB y elimina
+entradas con mas de 90 dias. Los formatos de video disponibles dependen de los
+proveedores de miniaturas y codecs instalados en Windows, sin convertir FFmpeg
+en una dependencia obligatoria. Los dispositivos portatiles siguen usando la
+miniatura que expone WPD/MTP.
+
 ## Linux
 
 El objetivo en Linux es no depender de un unico entorno de escritorio. La base
@@ -190,7 +230,14 @@ actual usa piezas comunes del sistema:
 - sysfs para detectar unidades removibles u opticas cuando esta disponible;
 - tipos de filesystem como `cifs`, `smb3`, `nfs`, `sshfs`, `iso9660` y `udf`;
 - Freedesktop Icon Theme y Shared MIME Info para iconos de archivos;
-- cache XDG de thumbnails antes de generar miniaturas propias;
+- cache XDG de miniaturas para imagenes y videos antes de generar trabajo
+  nuevo. BExplorer decodifica internamente los formatos de imagen comunes y
+  SVG, respeta la orientacion Exif, limita memoria y concurrencia, y ya no
+  descarta una foto solo por superar un limite de bytes comprimidos. Los
+  formatos restantes pueden usar un proveedor Freedesktop `.thumbnailer`, el
+  servicio D-Bus estandar Tumbler o `ffmpeg`; los videos agregan
+  `ffmpegthumbnailer` como respaldo. Toda miniatura generada se guarda de nuevo
+  en la cache XDG compartida;
 - portapapeles MIME con `wl-copy`/`wl-paste`, `xclip` o `xsel` cuando existen;
 - UDisks2 mediante `udisksctl` para montar/expulsar ISO o unidades, y mediante
   su API D-Bus estable para formatear discos que no sean del sistema con
@@ -200,7 +247,10 @@ actual usa piezas comunes del sistema:
   opcionalmente con lugares de KDE, KIOFuse y `kioclient`;
 - portal XDG `OpenFile` para mostrar el selector completo de aplicaciones sin
   convertir una ruta local en una URI `file://` incompatible con ese portal;
-- dispositivos MTP ya montados por GVfs/FUSE bajo `/run/user/.../gvfs`;
+- dispositivos MTP de KDE directamente mediante el servicio D-Bus estable
+  `org.kde.kmtpd5`, incluso sin un montaje previo;
+- dispositivos MTP de GNOME y otros escritorios mediante GIO, activando cuando
+  sea necesario su montaje GVfs/FUSE bajo `/run/user/.../gvfs`;
 - `xdg-terminal-exec` y terminales comunes como fallback;
 - `assets/linux/bexplorer.desktop` con `TryExec=bexplorer`,
   `Exec=bexplorer %f` y `MimeType=inode/directory`.
@@ -211,7 +261,8 @@ Diferencias e integraciones opcionales en Linux:
   en X11 se puede seleccionar un helper mediante `BEXPLORER_DRAG_HELPER`, y
   `BEXPLORER_DRAG_HELPER_FALLBACK=1` habilita como respaldo automatico
   `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop`;
-- MTP sin montaje GVfs/FUSE todavia no tiene backend propio;
+- MTP necesita `kio-extras` en KDE o el backend MTP de GVfs junto con
+  `gvfs-fuse` (`gvfs-backends` en Debian/Ubuntu y `gvfs-mtp` en Fedora);
 - el descubrimiento de red depende de los servicios disponibles, las
   credenciales y la configuracion de la red local;
 - el enriquecimiento KIO no reemplaza GVfs, Samba o Avahi y solo se usa cuando
@@ -237,7 +288,13 @@ una fuente de paquetes opcional deshabilitada ya no impide instalar BExplorer.
 Integraciones que siguen siendo opcionales:
 
 - `libfile-mimeinfo-perl` como alternativa del selector de aplicaciones;
-- `kde-cli-tools`, `kio-extras` y `kio-fuse` para enriquecer KDE sin instalar
+- un proveedor Freedesktop `.thumbnailer` registrado por el escritorio, el
+  servicio D-Bus Tumbler, `ffmpegthumbnailer` o `ffmpeg` para formatos de imagen
+  o video que no esten cubiertos internamente ni en la cache XDG compartida;
+  BExplorer los descubre en tiempo de ejecucion y no se vincula a un paquete
+  propio de una distribucion;
+- `kde-cli-tools`, `kio-extras` y `kio-fuse` para enriquecer KDE, acceder
+  directamente a MTP sin montaje y resolver rutas KIO existentes, sin instalar
   toda su pila en escritorios GNOME;
 - Blur My Shell para el difuminado en GNOME;
 - `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop` para arrastrar
@@ -289,7 +346,9 @@ Flujos soportados:
 - elegir nombre, formato ZIP/7z y nivel rapido, normal o alto desde la barra
   de acciones, o crear ZIP/7z normal con un clic desde el menu contextual;
 - ejecutar varias compresiones a la vez, con progreso y cancelacion por tarea;
-- extraer ZIP, 7z, RAR, ISO, TAR y otros formatos compatibles con 7-Zip;
+- extraer ZIP, 7z, RAR, ISO, TAR, TAR.GZ/TGZ y otros formatos compatibles con
+  7-Zip;
+- navegar directamente por el contenido TAR incluido dentro de TAR.GZ/TGZ;
 - pedir contrasena cuando el comprimido la requiere;
 - buscar dentro de comprimidos durante la busqueda completa.
 

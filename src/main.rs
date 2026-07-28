@@ -28,7 +28,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(exit_code) = fs::properties::try_run_elevated_helper_from_args() {
         std::process::exit(exit_code);
     }
-    iced_ui::run(command_line_path())?;
+    let initial_path = command_line_path();
+    if app::operation_host::try_activate_existing(initial_path.as_deref()) {
+        return Ok(());
+    }
+    iced_ui::run(initial_path)?;
     Ok(())
 }
 

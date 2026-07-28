@@ -16,6 +16,7 @@ pub(in crate::iced_ui) fn table_header(
     config: TableHeaderConfig,
     palette: Palette,
     font_size: f32,
+    height: f32,
 ) -> Element<'static, Message> {
     let light_header = palette.header_bg.r + palette.header_bg.g + palette.header_bg.b > 2.1;
     let header_text = if light_header {
@@ -34,6 +35,9 @@ pub(in crate::iced_ui) fn table_header(
     } else {
         ""
     };
+    let horizontal_padding = scaled_ui_metric(8.0, font_size);
+    let resize_handle_width = scaled_ui_metric(DETAIL_COLUMN_HANDLE_WIDTH, font_size);
+    let resize_handle_side = ((resize_handle_width - 1.0) * 0.5).max(0.0);
     let label_button = Button::new(
         row![
             text(label)
@@ -49,8 +53,8 @@ pub(in crate::iced_ui) fn table_header(
         .height(Length::Fill),
     )
     .width(Length::Fill)
-    .height(DETAIL_HEADER_HEIGHT)
-    .padding([0, 8])
+    .height(height)
+    .padding([0.0, horizontal_padding])
     .on_press(Message::SortColumn(config.pane, config.column))
     .style(move |_, status| button_style(palette, false, status));
 
@@ -59,31 +63,31 @@ pub(in crate::iced_ui) fn table_header(
             label_button,
             mouse_area(
                 row![
-                    Space::new().width(2),
+                    Space::new().width(resize_handle_side),
                     container(Space::new())
                         .width(1)
                         .height(Length::Fill)
                         .style(move |_| container::Style::default().background(palette.border)),
-                    Space::new().width(2),
+                    Space::new().width(resize_handle_side),
                 ]
                 .height(Length::Fill)
-                .width(DETAIL_COLUMN_HANDLE_WIDTH)
+                .width(resize_handle_width)
             )
             .on_press(Message::StartColumnResize(config.pane, config.column))
             .interaction(mouse::Interaction::ResizingColumn),
         ]
         .align_y(Alignment::Center)
-        .height(DETAIL_HEADER_HEIGHT)
+        .height(height)
         .into()
     } else {
         row![label_button]
             .align_y(Alignment::Center)
-            .height(DETAIL_HEADER_HEIGHT)
+            .height(height)
             .into()
     };
 
     let container = container(content)
-        .height(DETAIL_HEADER_HEIGHT)
+        .height(height)
         .align_y(Alignment::Center)
         .style(move |_| container::Style::default().background(header_background));
 
@@ -100,6 +104,7 @@ pub(in crate::iced_ui) fn render_progress_footer(
     palette: Palette,
     font_size: f32,
 ) -> Element<'static, Message> {
+    let height = scaled_ui_metric(36.0, font_size).max(ui_text_line_height(font_size) + 10.0);
     container(
         text(format!(
             "Showing {visible} of {total}. Scroll to continue loading."
@@ -108,9 +113,9 @@ pub(in crate::iced_ui) fn render_progress_footer(
         .color(palette.muted_text),
     )
     .width(Length::Fill)
-    .height(36)
+    .height(height)
     .center_x(Length::Fill)
-    .center_y(36)
+    .center_y(height)
     .into()
 }
 
@@ -202,6 +207,7 @@ pub(in crate::iced_ui) fn file_group_header(
     label: String,
     palette: Palette,
     font_size: f32,
+    height: f32,
 ) -> Element<'static, Message> {
     container(
         text(label)
@@ -209,10 +215,10 @@ pub(in crate::iced_ui) fn file_group_header(
             .color(palette.muted_text),
     )
     .width(Length::Fill)
-    .height(DETAIL_GROUP_HEIGHT)
+    .height(height)
     // Keep the group strip flush with the file surface while giving its label
     // enough breathing room from the horizontal edge.
-    .padding([0, 10])
+    .padding([0.0, scaled_ui_metric(10.0, font_size)])
     .align_y(Alignment::Center)
     .style(move |_| {
         container::Style::default()
@@ -360,12 +366,13 @@ pub(in crate::iced_ui) fn drive_capacity_bar(
     progress: f32,
     palette: Palette,
     selected: bool,
+    font_size: f32,
 ) -> Element<'static, Message> {
-    const HEIGHT: f32 = 10.0;
     const RADIUS: f32 = 2.0;
+    let height = scaled_ui_metric(10.0, font_size);
     let light_theme = palette.page_bg.r + palette.page_bg.g + palette.page_bg.b > 1.8;
     let inset = if selected && !light_theme { 1.0 } else { 0.0 };
-    let inner_height = HEIGHT - inset * 2.0;
+    let inner_height = height - inset * 2.0;
 
     let filled = ((progress.clamp(0.0, 1.0) * 1000.0).round() as u16).min(1000);
     let empty = 1000_u16.saturating_sub(filled);
@@ -396,7 +403,7 @@ pub(in crate::iced_ui) fn drive_capacity_bar(
     }
 
     container(segments)
-        .height(HEIGHT)
+        .height(height)
         .width(Length::Fill)
         .padding(inset)
         .clip(true)
@@ -422,15 +429,16 @@ pub(in crate::iced_ui) fn drive_formatting_bar(
     phase: f32,
     palette: Palette,
     selected: bool,
+    font_size: f32,
 ) -> Element<'static, Message> {
-    const HEIGHT: f32 = 10.0;
     const RADIUS: f32 = 2.0;
     const SEGMENT: u16 = 280;
     const TRAVEL: u16 = 1000 - SEGMENT;
 
     let light_theme = palette.page_bg.r + palette.page_bg.g + palette.page_bg.b > 1.8;
+    let height = scaled_ui_metric(10.0, font_size);
     let inset = if selected && !light_theme { 1.0 } else { 0.0 };
-    let inner_height = HEIGHT - inset * 2.0;
+    let inner_height = height - inset * 2.0;
     let phase = phase.rem_euclid(1.0);
     let position = if phase <= 0.5 {
         phase * 2.0
@@ -468,7 +476,7 @@ pub(in crate::iced_ui) fn drive_formatting_bar(
     }
 
     container(segments)
-        .height(HEIGHT)
+        .height(height)
         .width(Length::Fill)
         .padding(inset)
         .clip(true)
@@ -513,6 +521,8 @@ pub(in crate::iced_ui) fn transfer_title(item: &TransferDisplayState) -> &'stati
             TransferDisplayKind::Move => "Moviendo",
             TransferDisplayKind::Trash => "Moviendo a la papelera",
             TransferDisplayKind::PermanentDelete => "Eliminando permanentemente",
+            TransferDisplayKind::RestoreTrash => "Restaurando desde la papelera",
+            TransferDisplayKind::PurgeTrash => "Eliminando de la papelera",
         },
     }
 }
@@ -523,6 +533,8 @@ pub(in crate::iced_ui) fn transfer_state_text(item: &TransferDisplayState) -> &'
         TransferState::Copying => match item.kind {
             TransferDisplayKind::Trash => "Moviendo elementos a la papelera",
             TransferDisplayKind::PermanentDelete => "Eliminando elementos",
+            TransferDisplayKind::RestoreTrash => "Restaurando elementos",
+            TransferDisplayKind::PurgeTrash => "Eliminando elementos",
             _ => "Copiando archivos",
         },
         TransferState::Paused => "Pausado",

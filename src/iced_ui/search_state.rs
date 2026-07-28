@@ -249,6 +249,97 @@ impl BExplorerIced {
         self.config.font_size.round().clamp(10.0, 18.0)
     }
 
+    pub(in crate::iced_ui) fn ui_density(&self) -> f32 {
+        ui_density_level(self.font_size())
+    }
+
+    pub(in crate::iced_ui) fn ui_metric(&self, base: f32) -> f32 {
+        scaled_ui_metric(base, self.font_size())
+    }
+
+    pub(in crate::iced_ui) fn modal_text_surface_width(&self, base: f32) -> f32 {
+        modal_text_surface_width(base, self.font_size(), self.window_size.width)
+    }
+
+    pub(in crate::iced_ui) fn ui_vertical_padding(&self, base: f32) -> f32 {
+        base + self.ui_density() * 0.5
+    }
+
+    pub(in crate::iced_ui) fn stacked_text_control_height(&self, base: f32) -> f32 {
+        stacked_text_control_height(base, self.font_size())
+    }
+
+    pub(in crate::iced_ui) fn toolbar_height(&self) -> f32 {
+        self.ui_metric(42.0)
+    }
+
+    pub(in crate::iced_ui) fn action_bar_height(&self) -> f32 {
+        (action_button_height(self.font_size()) + 10.0).max(self.ui_metric(46.0))
+    }
+
+    pub(in crate::iced_ui) fn bookmark_bar_height(&self) -> f32 {
+        (bookmark_button_height(self.font_size()) + 10.0).max(self.ui_metric(46.0))
+    }
+
+    pub(in crate::iced_ui) fn status_bar_height(&self) -> f32 {
+        self.ui_metric(40.0)
+    }
+
+    pub(in crate::iced_ui) fn filter_control_height(&self) -> f32 {
+        self.ui_metric(32.0)
+    }
+
+    pub(in crate::iced_ui) fn tab_width(&self) -> f32 {
+        self.ui_metric(TAB_WIDTH)
+    }
+
+    pub(in crate::iced_ui) fn tab_width_for_pane(&self, pane: PaneId) -> f32 {
+        let tab_count = self.tab_indices_for_pane(pane).len();
+        let (_, area_width) = self.title_pane_bounds(pane);
+        fitted_tab_width(
+            area_width,
+            tab_count,
+            self.ui_metric(TITLE_BUTTON_WIDTH),
+            self.tab_spacing(),
+            self.tab_width(),
+            self.ui_metric(TAB_MIN_WIDTH),
+        )
+    }
+
+    pub(in crate::iced_ui) fn tab_spacing(&self) -> f32 {
+        self.ui_metric(3.0)
+    }
+
+    pub(in crate::iced_ui) fn tab_drag_stride(&self, pane: PaneId) -> f32 {
+        self.tab_width_for_pane(pane) + self.tab_spacing()
+    }
+
+    pub(in crate::iced_ui) fn title_controls_width(&self) -> f32 {
+        self.ui_metric(TITLE_BUTTON_WIDTH) * 4.0 + self.ui_metric(TITLE_BUTTON_GAP) * 3.0
+    }
+
+    pub(in crate::iced_ui) fn sidebar_section_height(&self) -> f32 {
+        sidebar_section_height(self.font_size())
+    }
+
+    pub(in crate::iced_ui) fn sidebar_item_height(&self) -> f32 {
+        sidebar_item_height_for_font(self.font_size())
+    }
+
+    pub(in crate::iced_ui) fn detail_header_height(&self) -> f32 {
+        self.ui_metric(DETAIL_HEADER_HEIGHT)
+            .max(ui_text_line_height((self.font_size() - 0.5).max(11.0)) + 6.0)
+    }
+
+    pub(in crate::iced_ui) fn detail_row_height(&self) -> f32 {
+        detail_row_height_for_font(self.font_size())
+    }
+
+    pub(in crate::iced_ui) fn detail_group_height(&self) -> f32 {
+        self.ui_metric(DETAIL_GROUP_HEIGHT)
+            .max(ui_text_line_height((self.font_size() - 0.4).max(11.0)) + 4.0)
+    }
+
     pub(in crate::iced_ui) fn begin_file_operation(&mut self, pane: PaneId, status: &str) -> bool {
         if !self.pending_file_operations.insert(pane) {
             self.pane_mut(pane).status = "Another file operation is still running".into();

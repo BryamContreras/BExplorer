@@ -1,5 +1,11 @@
 use super::*;
 use iced::widget::row;
+
+pub(in crate::iced_ui) fn sidebar_section_height(font_size: f32) -> f32 {
+    scaled_ui_metric(SIDEBAR_SECTION_HEIGHT, font_size)
+        .max(ui_text_line_height((font_size + 0.8).max(12.4)) + 10.0)
+}
+
 pub(in crate::iced_ui) fn sidebar_section_header(
     section: SidebarSection,
     spanish: bool,
@@ -10,29 +16,34 @@ pub(in crate::iced_ui) fn sidebar_section_header(
     font_size: f32,
 ) -> Element<'static, Message> {
     let label = sidebar_section_label(section, spanish);
+    let height = sidebar_section_height(font_size);
     let header = container(
         row![
             inline_icon(
                 sidebar_section_icon(section),
                 palette.muted_text,
-                SIDEBAR_SECTION_ICON_SIZE
+                scaled_ui_metric(SIDEBAR_SECTION_ICON_SIZE, font_size)
             ),
-            text(label)
-                .size((font_size + 0.8).max(12.4))
-                .color(palette.muted_text)
-                .width(Length::Fill)
-                .wrapping(iced::widget::text::Wrapping::None),
+            container(
+                text(label)
+                    .size((font_size + 0.8).max(12.4))
+                    .color(palette.muted_text)
+                    .width(Length::Fill)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true),
             inline_icon(
                 if expanded { "chev-down" } else { "chev-right" },
                 palette.muted_text,
-                13.0
+                scaled_ui_metric(13.0, font_size)
             ),
         ]
-        .spacing(8)
+        .spacing(scaled_ui_metric(8.0, font_size))
         .align_y(Alignment::Center),
     )
-    .height(SIDEBAR_SECTION_HEIGHT)
-    .padding([5, 7])
+    .height(height)
+    .padding([5.0, scaled_ui_metric(7.0, font_size)])
     .width(Length::Fill)
     .style(move |_| {
         let background = if dragging {
@@ -380,8 +391,10 @@ pub(in crate::iced_ui) fn display_label(path: &Path) -> String {
 }
 
 pub(in crate::iced_ui) fn path_label(path: Option<&PathBuf>) -> String {
-    path.map(|path| path.display().to_string())
-        .unwrap_or_else(|| THIS_PC_LABEL.to_string())
+    path.map(|path| {
+        explorer::virtual_display_name(path).unwrap_or_else(|| path.display().to_string())
+    })
+    .unwrap_or_else(|| THIS_PC_LABEL.to_string())
 }
 
 pub(in crate::iced_ui) fn address_breadcrumbs(

@@ -2,7 +2,7 @@
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Version](https://img.shields.io/badge/version-1.0.3-brightgreen)
+![Version](https://img.shields.io/badge/version-1.0.4-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -20,7 +20,7 @@ platform modules.
 
 ## Status
 
-BExplorer 1.0.3 is the current stable Windows and Linux version. Its desktop
+BExplorer 1.0.4 is the current stable Windows and Linux version. Its desktop
 interface, file-operation engine, archive workflows, platform integrations,
 configuration format, and session format form the supported 1.x baseline.
 Development now prioritizes compatibility fixes, reliability, and focused
@@ -36,13 +36,14 @@ symbolic links, native properties, and application selection are connected to
 the `iced` interface.
 
 Linux provides local and removable storage, file operations, archives,
-previews, search, GVfs/FUSE portable devices, GVfs/Samba/Avahi network
-discovery with optional KIO enrichment for SMB, UDisks2, Polkit, XDG portals,
-Freedesktop icons and thumbnails, clipboard interoperability, and Wayland/X11
-support. The Debian package keeps libraries and core desktop services in
-`Depends`, installs feature integrations through `Recommends` when available,
-and leaves desktop-specific fallbacks in `Suggests`. Missing optional helpers
-therefore do not prevent BExplorer itself from being installed.
+previews, search, MTP devices through KDE KIO or GVfs/FUSE, GVfs/Samba/Avahi
+network discovery with optional KIO enrichment for SMB, UDisks2, Polkit, XDG
+portals, Freedesktop icons and thumbnails, clipboard interoperability, and
+Wayland/X11 support. The Debian package keeps libraries and core desktop
+services in `Depends`, installs feature integrations through `Recommends` when
+available, and leaves desktop-specific fallbacks in `Suggests`. Missing
+optional helpers therefore do not prevent BExplorer itself from being
+installed.
 
 ## Highlights
 
@@ -54,13 +55,21 @@ therefore do not prevent BExplorer itself from being installed.
 - Incremental rendering for directories with thousands of entries.
 - Background rename, create-folder, trash, and permanent-delete operations so
   slow disks and network paths do not block the UI thread.
+- Native Trash views on Windows and Linux with restore, permanent delete, and
+  empty-trash actions.
+- Recursive duplicate cleanup for folders and removable storage with grouped,
+  selectable results and native-trash deletion.
+- Long-running transfers, deletions, compression, extraction, duplicate scans,
+  and security scans continue in their own windows after the explorer closes.
 - Background storage monitoring refreshes disks, USB media, optical drives, and
   mounted portable devices on Windows and Linux without blocking the UI.
 - Resizable and reorderable sidebar.
 - Optional action bar and bookmark bar.
 - Details, list, icons, large icons, extra-large icons, and tile views.
 - Local drives, removable drives, mounted ISO images, UNC paths, network
-  locations, Linux mount points, and Windows MTP portable devices.
+  locations, Linux mount points, and MTP portable devices on Windows and Linux.
+- Send to removable storage and available desktop Bluetooth or mail
+  destinations through the contextual menu.
 - Symbolic-link awareness on Linux: links to directories navigate as folders,
   links to files open as files, and broken links remain visible and identifiable.
 - Non-system drive formatting with native Windows elevation or UDisks2/Polkit
@@ -96,7 +105,9 @@ therefore do not prevent BExplorer itself from being installed.
   Linux uses the XDG desktop portal for the full application chooser.
 - Windows Defender scan integration.
 - Configurable theme, accent color, icon borders, window effects, shortcuts,
-  and sidebar layout.
+  sidebar layout, hidden-system-unit visibility, and scalable interface text.
+- Adaptive single-line tabs and responsive controls, cards, rows, columns,
+  icons, dialogs, and properties layouts at every supported font size.
 - An About dialog with the application icon, version, description, and project
   link.
 
@@ -170,9 +181,11 @@ Supported workflows:
   from the action bar; context menus also offer one-click normal ZIP or 7z;
 - run multiple compression jobs at once with individual progress and cancel
   controls;
-- extract ZIP, 7z, RAR, ISO, TAR, and other formats supported by 7-Zip;
+- extract ZIP, 7z, RAR, ISO, TAR, TAR.GZ/TGZ, and other formats supported by
+  7-Zip;
 - extract password-protected archives when a password is provided;
-- browse common archive formats as folders;
+- browse common archive formats as folders, including the contents of the TAR
+  layer inside TAR.GZ/TGZ archives;
 - extract selected archive entries into normal folders;
 - search inside supported archives during complete search.
 
@@ -206,7 +219,7 @@ blocking the UI.
 | Symbolic links | Shell behavior | File/folder/broken-link aware | Experimental |
 | Properties | Windows Shell sheet | Native BExplorer dialog | Not supported |
 | Open with / app chooser | Windows Shell | XDG portal + desktop entries | Not supported |
-| MTP portable devices | WPD/MTP | Mounted GVfs/FUSE devices | Not supported |
+| MTP portable devices | WPD/MTP | KDE KIO/MTP or GVfs/FUSE | Not supported |
 | Network discovery | Native providers | GVfs/Samba/Avahi + optional KIO SMB enrichment | Mounted SMB only |
 | ISO mount/eject | Supported | UDisks2 | Experimental |
 | Non-system drive format | Format-Volume | UDisks2 D-Bus | Experimental |
@@ -268,9 +281,31 @@ Directory views initially build 500 entries and automatically append additional
 batches near the end of the scroll area. All matching entries remain available;
 the batching only limits how many widgets are constructed at once.
 
+On Windows, local image and video thumbnails first query the system-wide Shell
+`IThumbnailCache` without starting new extraction work. A miss is handled in the
+background by the registered Windows thumbnail provider, and Windows stores a
+successful result in its shared cache for BExplorer, File Explorer, and other
+Shell clients. Native extraction and internal image decoding are each limited
+to two concurrent jobs. If Windows has no image provider for a format,
+BExplorer's bounded internal decoder remains the fallback and writes its result
+to a persistent, source-metadata-aware cache. That fallback cache is pruned
+after 90 days and capped at 512 MiB. Video coverage follows the thumbnail
+providers and codecs installed in Windows, without a hard FFmpeg dependency.
+Portable-device thumbnails continue to use the thumbnail resource exposed by
+WPD/MTP.
+
 On Linux, file icons are resolved through the Freedesktop icon theme layout and
-Shared MIME Info database. Image thumbnails first try the standard XDG
-thumbnail cache and then fall back to BExplorer's internal thumbnail generation.
+Shared MIME Info database. Image and video thumbnails first try the standard
+XDG thumbnail cache. Common raster images and SVG are decoded by BExplorer
+itself, with Exif orientation, bounded allocations, and no arbitrary compressed
+file-size cutoff; the resulting 256 px preview is written back to XDG. Formats
+not handled internally can use a registered Freedesktop `.thumbnailer`, the
+standard Tumbler D-Bus service, or `ffmpeg`. Videos use the same cache/provider
+path and then try `ffmpegthumbnailer` or `ffmpeg` as optional direct fallbacks.
+This works without linking to GTK, Qt/KIO, or a distribution-specific library:
+GNOME providers are executable when registered, XFCE providers are reached
+through Tumbler, and KDE's in-process KIO plugins interoperate through the cache
+while the command fallback covers uncached files.
 Disk image mount/eject uses UDisks2 through `udisksctl` when available.
 Non-system drive formatting uses the stable UDisks2 D-Bus API so authorization
 is handled by the distribution's Polkit policy. Elevated file-operation retry
@@ -278,23 +313,32 @@ uses Polkit through `pkexec`, and network discovery uses available
 Freedesktop/GVfs, Avahi, and Samba helpers. On KDE, cached Dolphin places,
 active KIOFuse mounts, and short non-interactive `kioclient` probes complement
 those providers without replacing them or leaving an unbounded network scan on
-the UI thread. The XDG application chooser also runs away from the UI thread.
+the UI thread. Phones and tablets are discovered directly through KDE's
+`org.kde.kmtpd5` service when no GVfs volume is available; GNOME uses GIO to
+activate the MTP volume and its GVfs/FUSE path. The XDG application chooser also
+runs away from the UI thread.
 
-KDE Plasma/Wayland uses KWin's optional native blur protocol. GNOME/Mutter does
-not expose its Shell blur actor as a Wayland client protocol, so BExplorer uses
-the optional [Blur My Shell](https://extensions.gnome.org/extension/3193/blur-my-shell/)
+KDE Plasma/Wayland uses the standardized `ext-background-effect-v1` protocol
+on KWin 6.7 and newer, with KWin's legacy native blur protocol retained for
+older Plasma releases. Both paths use the same linear per-pixel transparency
+control. The renderer prefers an 8-bit alpha surface and premultiplied
+composition, avoiding the four-level opacity quantization caused by KWin's
+10-bit-color/2-bit-alpha fallback. Proportional surface tints keep the content
+readable without masking the full-window blur. GNOME/Mutter does not expose its
+Shell blur actor as a Wayland client protocol, so BExplorer uses the optional
+[Blur My Shell](https://extensions.gnome.org/extension/3193/blur-my-shell/)
 extension for GNOME application blur. Selecting Blur registers the `bexplorer`
 application ID with that extension and disables its focused-window opacity
 override so the active explorer remains blurred; disabling the effect removes
-BExplorer's entry again. If the extension is unavailable, BExplorer keeps an
-opaque readable background.
+BExplorer's entry again. If the required integration is unavailable,
+BExplorer keeps an opaque readable background.
 
 ## Known Limitations
 
 - Windows and Linux use different native facilities, so a few integrations are
   intentionally platform-specific rather than identical.
-- Direct WPD/MTP sessions and Microsoft Defender are Windows-only. Linux exposes
-  portable devices mounted by GVfs as regular storage paths.
+- Microsoft Defender remains Windows-only. Linux MTP uses KDE's KIO Extras
+  service or the cross-desktop GVfs MTP backend instead of Windows WPD.
 - macOS has initial storage, disk-image, eject, and mounted-SMB adapters but
   still needs broader runtime testing and native drag-and-drop integration.
 - Browsing an unmounted authenticated SMB share on Linux or macOS may still
@@ -316,7 +360,9 @@ opaque readable background.
   `BEXPLORER_DRAG_HELPER_FALLBACK=1` also permits a known helper such as
   `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` when the native
   Wayland path is unavailable.
-- Linux MTP support currently covers devices already mounted by GVfs/FUSE.
+- Linux MTP requires either `kio-extras` on KDE or the distribution's GVfs MTP
+  backend plus `gvfs-fuse` (`gvfs-backends` on Debian/Ubuntu, `gvfs-mtp` on
+  Fedora). BExplorer detects both at runtime and does not link to GTK or Qt.
 - Copying directly between two folders on the same MTP device is not supported.
 - Extracting selected archive entries directly into an MTP device is blocked;
   extract to a normal folder first.
@@ -384,10 +430,14 @@ uninstallable.
 Optional desktop-specific enhancements remain:
 
 - Blur My Shell for application blur on GNOME Wayland; the fallback is opaque.
-- `kde-cli-tools`, `kio-extras`, and `kio-fuse` for additional KDE discovery and
-  already-mounted KIO paths. They remain suggested rather than pulling KDE into
-  a GNOME installation.
+- `kde-cli-tools`, `kio-extras`, and `kio-fuse` for additional KDE discovery,
+  direct unmounted MTP access, and already-mounted KIO paths. They remain
+  suggested rather than pulling KDE into a GNOME installation.
 - `libfile-mimeinfo-perl` as an additional application-chooser fallback.
+- A desktop-registered Freedesktop `.thumbnailer`, the standard Tumbler D-Bus
+  service, `ffmpegthumbnailer`, or `ffmpeg` for image/video formats not already
+  handled internally or present in the shared XDG cache. They are discovered
+  at runtime; none is a hard dependency.
 - `ripdrag`, `dragon-drag-and-drop`, `dragon`, or `dragon-drop` for drag-out on
   X11 or as a Wayland fallback. `BEXPLORER_DRAG_HELPER` selects a custom helper,
   while `BEXPLORER_DRAG_HELPER_FALLBACK=1` enables automatic fallback to a

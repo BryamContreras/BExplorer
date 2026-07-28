@@ -6,6 +6,76 @@ pub fn start_file_drag(paths: Vec<PathBuf>) -> Result<()> {
     run_file_drag(paths)
 }
 
+pub fn send_files_to_shell_target(paths: Vec<PathBuf>, target: &std::path::Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::Foundation::POINTL;
+    use windows::Win32::System::Com::IDataObject;
+    use windows::Win32::System::Ole::{
+        DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_NONE, IDropTarget,
+    };
+    use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+    use windows::Win32::UI::Shell::{BHID_SFUIObject, IShellItem, SHCreateItemFromParsingName};
+    use windows::core::PCWSTR;
+
+    if paths.is_empty() {
+        return Err(BExplorerError::Shell("No files to send".into()));
+    }
+
+    let _ole = OleDragGuard::new()?;
+    let data_object: IDataObject = NativeFileDataObject { paths }.into();
+    let target_wide = target
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let shell_item: IShellItem =
+        unsafe { SHCreateItemFromParsingName(PCWSTR(target_wide.as_ptr()), None) }.map_err(
+            |error| {
+                BExplorerError::Shell(format!(
+                    "Could not open the Windows Send To target {}: {error}",
+                    target.display()
+                ))
+            },
+        )?;
+    let drop_target: IDropTarget = unsafe { shell_item.BindToHandler(None, &BHID_SFUIObject) }
+        .map_err(|error| {
+            BExplorerError::Shell(format!(
+                "The Windows Send To target {} cannot receive files: {error}",
+                target.display()
+            ))
+        })?;
+
+    let point = POINTL { x: 0, y: 0 };
+    let key_state = MODIFIERKEYS_FLAGS(0);
+    let mut effect = DROPEFFECT_COPY | DROPEFFECT_LINK;
+    unsafe {
+        drop_target
+            .DragEnter(&data_object, key_state, point, &mut effect)
+            .map_err(|error| {
+                BExplorerError::Shell(format!(
+                    "The Windows Send To target rejected the files: {error}"
+                ))
+            })?;
+    }
+    if effect == DROPEFFECT_NONE {
+        let _ = unsafe { drop_target.DragLeave() };
+        return Err(BExplorerError::Shell(
+            "The selected Windows Send To target does not accept these items".into(),
+        ));
+    }
+    unsafe {
+        drop_target
+            .Drop(&data_object, key_state, point, &mut effect)
+            .map_err(|error| {
+                BExplorerError::Shell(format!(
+                    "Windows could not send the selected files: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
 pub fn release_mouse_capture() {
     unsafe {
         let _ = windows::Win32::UI::Input::KeyboardAndMouse::ReleaseCapture();

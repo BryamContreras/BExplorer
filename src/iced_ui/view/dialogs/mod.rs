@@ -5,6 +5,7 @@ mod appearance;
 mod archive_jobs;
 mod confirmations;
 mod defender;
+mod duplicate_cleanup;
 mod error;
 mod format;
 #[cfg(target_os = "linux")]

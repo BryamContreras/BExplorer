@@ -302,7 +302,7 @@ mod tests {
         let gnome_alpha = vibrancy_surface_alpha(60, VibrancyMode::Blur, true);
         let strongest_gnome_alpha = vibrancy_surface_alpha(100, VibrancyMode::Blur, true);
 
-        assert!(gnome_alpha > compositor_alpha + 0.25);
+        assert!(gnome_alpha > compositor_alpha + 0.20);
         assert_eq!(gnome_alpha, 1.0);
         assert_eq!(strongest_gnome_alpha, 1.0);
         assert_eq!(vibrancy_surface_alpha(0, VibrancyMode::Blur, true), 1.0);
@@ -310,12 +310,29 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn kwin_blur_keeps_a_readable_surface_opacity_floor() {
-        let middle = vibrancy_surface_alpha(50, VibrancyMode::Blur, false);
-        let strongest = vibrancy_surface_alpha(100, VibrancyMode::Blur, false);
+    fn kwin_blur_curve_is_smooth_and_keeps_the_backdrop_readable() {
+        let samples = (0..=100)
+            .map(|intensity| {
+                let primary = vibrancy_surface_alpha(intensity, VibrancyMode::Blur, false);
+                let content = layered_blur_tint_alpha(primary);
+                let frame = blur_frame_tint_alpha(primary);
+                1.0 - (1.0 - frame) * (1.0 - primary) * (1.0 - content)
+            })
+            .collect::<Vec<_>>();
 
-        assert!((middle - 0.75).abs() < f32::EPSILON);
-        assert!((strongest - 0.50).abs() < f32::EPSILON);
+        assert_eq!(samples[0], 1.0);
+        assert!((samples[100] - 0.746_621_9).abs() < 0.000_01);
+        for pair in samples.windows(2) {
+            assert!(pair[0] > pair[1], "every slider step must be visible");
+        }
+        for pair in samples.windows(3) {
+            let previous_change = pair[0] - pair[1];
+            let next_change = pair[1] - pair[2];
+            assert!(
+                (previous_change - next_change).abs() < 0.000_1,
+                "adjacent slider steps must not introduce a jump"
+            );
+        }
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -479,6 +496,26 @@ mod tests {
         );
 
         assert!(pixmap.data().chunks_exact(4).any(|pixel| pixel[3] > 0));
+    }
+
+    #[test]
+    fn removable_destination_icons_are_renderable() {
+        let options = resvg::usvg::Options::default();
+        for label in ["usb", "external-drive"] {
+            let tree = resvg::usvg::Tree::from_data(icon_svg(label), &options)
+                .expect("removable destination icon should be a valid SVG");
+            let mut pixmap =
+                resvg::tiny_skia::Pixmap::new(24, 24).expect("removable destination icon pixmap");
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
+            assert!(
+                pixmap.data().chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "{label} should render visible pixels"
+            );
+        }
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]
@@ -725,37 +762,210 @@ mod tests {
 
     #[test]
     fn card_only_progress_window_grows_for_three_cards_then_caps_and_scrolls() {
-        assert_eq!(progress_card_list_height(1), TRANSFER_CARD_HEIGHT);
+        let font_size = 12.0;
+        let card_height = progress_card_height(font_size);
+        let card_gap = progress_card_gap(font_size);
+        let chrome_height = WINDOW_BORDER_WIDTH * 2.0
+            + transfer_window_title_height(font_size)
+            + TRANSFER_WINDOW_CARD_TOP_GAP
+            + TRANSFER_WINDOW_CARD_BOTTOM_PADDING;
+
+        assert_eq!(progress_card_list_height(1, font_size), card_height);
         assert_eq!(
-            progress_card_list_height(2),
-            TRANSFER_CARD_HEIGHT * 2.0 + TRANSFER_CARD_GAP
+            progress_card_list_height(2, font_size),
+            card_height * 2.0 + card_gap
         );
         assert_eq!(
-            progress_visible_card_list_height(4),
-            TRANSFER_CARD_HEIGHT * 3.0 + TRANSFER_CARD_GAP * 2.0
+            progress_visible_card_list_height(4, font_size),
+            card_height * 3.0 + card_gap * 2.0
         );
 
         assert_eq!(
-            transfer_window_size_for_item_count(1).height,
-            TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT
+            transfer_window_size_for_item_count(1, font_size).height,
+            chrome_height + card_height
         );
         assert_eq!(
-            transfer_window_size_for_item_count(2).height,
-            TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT + TRANSFER_CARD_HEIGHT + TRANSFER_CARD_GAP
+            transfer_window_size_for_item_count(2, font_size).height,
+            chrome_height + card_height * 2.0 + card_gap
         );
         assert_eq!(
-            transfer_window_size_for_item_count(3).height,
-            TRANSFER_WINDOW_CARD_ONLY_MAX_HEIGHT
+            transfer_window_size_for_item_count(3, font_size).height,
+            chrome_height + card_height * 3.0 + card_gap * 2.0
         );
         assert_eq!(
-            transfer_window_size_for_item_count(4).height,
-            TRANSFER_WINDOW_CARD_ONLY_MAX_HEIGHT
+            transfer_window_size_for_item_count(4, font_size).height,
+            chrome_height + card_height * 3.0 + card_gap * 2.0
+        );
+    }
+
+    #[test]
+    fn ui_density_adds_one_pixel_for_each_three_font_pixels() {
+        assert_eq!(ui_density_level(10.0), 0.0);
+        assert_eq!(ui_density_level(12.0), 0.0);
+        assert_eq!(ui_density_level(13.0), 1.0);
+        assert_eq!(ui_density_level(15.0), 1.0);
+        assert_eq!(ui_density_level(16.0), 2.0);
+        assert_eq!(ui_density_level(18.0), 2.0);
+
+        assert_eq!(scaled_ui_metric(44.0, 12.0), 44.0);
+        assert_eq!(scaled_ui_metric(44.0, 13.0), 45.0);
+        assert_eq!(scaled_ui_metric(44.0, 16.0), 46.0);
+    }
+
+    #[test]
+    fn text_surfaces_grow_horizontally_with_large_fonts_and_respect_the_window() {
+        assert_eq!(adaptive_text_surface_width(470.0, 12.0), 470.0);
+        assert_eq!(adaptive_text_surface_width(470.0, 13.0), 471.0);
+        assert_eq!(adaptive_text_surface_width(470.0, 16.0), 506.0);
+        assert_eq!(adaptive_text_surface_width(470.0, 18.0), 530.0);
+
+        assert_eq!(modal_text_surface_width(470.0, 16.0, 920.0), 506.0);
+        assert_eq!(modal_text_surface_width(470.0, 16.0, 500.0), 476.0);
+    }
+
+    #[test]
+    fn settings_slider_label_reserves_its_rendered_text_width() {
+        let font_size = 16.0;
+        let label = "Transparencia";
+        let slot = adaptive_text_slot_width(label, font_size, 84.0);
+
+        assert!(slot > scaled_ui_metric(84.0, font_size));
+        assert!(slot >= estimated_ui_text_width(label, font_size) + 8.0);
+    }
+
+    #[test]
+    fn fixed_visual_cells_grow_enough_for_large_text() {
+        assert_eq!(visual_cell_width_for_font(ViewMode::Tiles, 12.0), 246.0);
+        assert_eq!(visual_cell_width_for_font(ViewMode::Tiles, 16.0), 282.0);
+        assert_eq!(visual_cell_width_for_font(ViewMode::Tiles, 18.0), 306.0);
+        assert!(
+            visual_min_cell_width_for_font(ViewMode::SmallIcons, 16.0)
+                > visual_min_cell_width(ViewMode::SmallIcons)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn long_native_titles_stay_on_one_ellipsized_line() {
+        let title = "Propiedades de BStream-Music-1.2.1-Android-arm64-v8a.apk";
+        let width = 310.0;
+        let shortened = ellipsize_ui_text_to_width(title, width, 16.0);
+
+        assert!(shortened.ends_with('…'));
+        assert!(!shortened.contains('\n'));
+        assert!(estimated_ui_text_width(&shortened, 16.0) <= width);
+        assert_eq!(
+            ellipsize_ui_text_to_width("Propiedades de /", width, 16.0),
+            "Propiedades de /"
+        );
+    }
+
+    #[test]
+    fn entry_count_status_is_localized_and_uses_the_correct_number() {
+        assert_eq!(localized_entry_count(1, true), "1 elemento");
+        assert_eq!(localized_entry_count(2, true), "2 elementos");
+        assert_eq!(localized_entry_count(1, false), "1 element");
+        assert_eq!(localized_entry_count(2, false), "2 elements");
+
+        assert!(is_entry_count_status("1 elements", 1));
+        assert!(is_entry_count_status("2 elementos", 2));
+        assert!(is_entry_count_status("3 items", 3));
+        assert!(!is_entry_count_status("Loading...", 0));
+        assert!(!is_entry_count_status("2 elements selected", 2));
+    }
+
+    #[test]
+    fn primary_bars_sidebar_and_details_share_the_same_density_steps() {
+        for (font_size, step) in [(12.0, 0.0), (13.0, 1.0), (16.0, 2.0)] {
+            assert_eq!(action_button_height(font_size), 36.0 + step);
+            assert_eq!(bookmark_button_height(font_size), 36.0 + step);
+            assert_eq!(
+                sidebar_section_height(font_size),
+                SIDEBAR_SECTION_HEIGHT + step
+            );
+            assert_eq!(
+                sidebar_item_height_for_font(font_size),
+                SIDEBAR_ITEM_HEIGHT + step
+            );
+            assert_eq!(
+                detail_row_height_for_font(font_size),
+                DETAIL_ROW_HEIGHT + step
+            );
+            assert_eq!(
+                rendered_inline_icon_size(scaled_ui_metric(DETAIL_ICON_SIZE, font_size)),
+                20.0 + step
+            );
+        }
+    }
+
+    #[test]
+    fn user_resized_detail_columns_follow_density_boundaries() {
+        let mut widths = ColumnWidthOverrides {
+            name: Some(240.0),
+            type_label: Some(120.0),
+            size: Some(90.0),
+            modified: Some(150.0),
+        };
+
+        widths.adjust_for_density_change(1.0);
+        assert_eq!(widths.name, Some(241.0));
+        assert_eq!(widths.type_label, Some(121.0));
+        assert_eq!(widths.size, Some(91.0));
+        assert_eq!(widths.modified, Some(151.0));
+
+        widths.adjust_for_density_change(-1.0);
+        assert_eq!(widths.name, Some(240.0));
+        assert_eq!(widths.type_label, Some(120.0));
+        assert_eq!(widths.size, Some(90.0));
+        assert_eq!(widths.modified, Some(150.0));
+    }
+
+    #[test]
+    fn two_line_settings_cards_keep_a_text_based_minimum_height() {
+        assert_eq!(stacked_text_control_height(44.0, 12.0), 44.0);
+        assert!(stacked_text_control_height(44.0, 18.0) > scaled_ui_metric(44.0, 18.0));
+        assert!(
+            stacked_text_control_height(44.0, 18.0)
+                >= ui_text_line_height(18.0) + ui_text_line_height(17.0) + 13.0
+        );
+    }
+
+    #[test]
+    fn long_menu_labels_expand_their_row_and_popup_height() {
+        let font_size = 18.0;
+        let menu_width = scaled_ui_metric(286.0, font_size);
+        let short = "Barra de acciones";
+        let long = "Panel de vista previa en pantalla dividida";
+
+        assert_eq!(
+            adaptive_menu_item_height(short, font_size, menu_width),
+            scaled_ui_metric(32.0, font_size)
+        );
+        assert!(
+            adaptive_menu_item_height(long, font_size, menu_width)
+                > scaled_ui_metric(32.0, font_size)
+        );
+        assert_eq!(
+            adaptive_menu_list_height(&[short, long], font_size, menu_width, 3.0, 7.0),
+            adaptive_menu_item_height(short, font_size, menu_width)
+                + adaptive_menu_item_height(long, font_size, menu_width)
+                + 17.0
+        );
+    }
+
+    #[test]
+    fn progress_cards_expand_when_large_text_needs_more_than_density_spacing() {
+        assert_eq!(progress_card_height(12.0), TRANSFER_CARD_HEIGHT);
+        assert!(progress_card_height(18.0) > scaled_ui_metric(TRANSFER_CARD_HEIGHT, 18.0));
+        assert_eq!(
+            transfer_window_size_for_item_count(1, 18.0).width,
+            adaptive_text_surface_width(TRANSFER_WINDOW_WIDTH, 18.0)
         );
     }
 
     #[test]
     fn native_progress_windows_are_fixed_size_and_open_at_the_requested_height() {
-        let size = transfer_window_size_for_item_count(2);
+        let size = transfer_window_size_for_item_count(2, 12.0);
         let transfer = transfer_window_settings(size);
         let archive = archive_window_settings(size);
         let defender_size = defender_window_size_for_detail_lines(2);
@@ -763,9 +973,9 @@ mod tests {
         let threats_size = defender_threats_window_size(2);
         let threats = defender_threats_window_settings(2);
         #[cfg(target_os = "linux")]
-        let properties_size = properties_window_size();
+        let properties_size = properties_window_size(12.0);
         #[cfg(target_os = "linux")]
-        let properties = properties_window_settings();
+        let properties = properties_window_settings(12.0);
 
         assert_eq!(transfer.size, size);
         assert_eq!(archive.size, size);
@@ -813,9 +1023,49 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_cleanup_window_is_resizable_without_an_artificial_maximum() {
+        let font_size = 13.0;
+        let expected_size = duplicate_cleanup_window_size(font_size);
+        let expected_minimum = duplicate_cleanup_window_min_size(font_size);
+        let settings = duplicate_cleanup_window_settings(font_size);
+
+        assert_eq!(settings.size, expected_size);
+        assert_eq!(settings.min_size, Some(expected_minimum));
+        assert_eq!(settings.max_size, None);
+        assert!(settings.resizable);
+        assert!(!settings.exit_on_close_request);
+    }
+
+    #[test]
     fn main_window_uses_the_controlled_shutdown_path() {
         let settings = main_window_settings(Size::new(1280.0, 760.0), false);
         assert!(!settings.exit_on_close_request);
+    }
+
+    #[test]
+    fn main_window_close_keeps_the_process_only_for_detached_operations() {
+        assert!(!keep_process_after_main_window_closes(false, false));
+        assert!(keep_process_after_main_window_closes(false, true));
+        assert!(keep_process_after_main_window_closes(true, false));
+    }
+
+    #[test]
+    fn detached_operation_host_exits_only_after_its_last_job() {
+        assert!(!should_exit_detached_operation_host(
+            true, false, true, false
+        ));
+        assert!(!should_exit_detached_operation_host(
+            true, true, false, false
+        ));
+        assert!(!should_exit_detached_operation_host(
+            false, false, false, false
+        ));
+        assert!(!should_exit_detached_operation_host(
+            true, false, false, true
+        ));
+        assert!(should_exit_detached_operation_host(
+            true, false, false, false
+        ));
     }
 
     #[test]
@@ -856,14 +1106,17 @@ mod tests {
         );
         assert!(defender_threats_window_settings(1).icon.is_some());
         #[cfg(target_os = "linux")]
-        assert!(properties_window_settings().icon.is_some());
+        assert!(properties_window_settings(12.0).icon.is_some());
     }
 
     #[test]
     fn progress_window_retries_after_the_compositor_reports_a_scaled_initial_size() {
-        let expected = transfer_window_size_for_item_count(2);
+        let expected = transfer_window_size_for_item_count(2, 12.0);
         assert!(progress_window_needs_resize(
-            Size::new(expected.width, TRANSFER_WINDOW_CARD_ONLY_MIN_HEIGHT),
+            Size::new(
+                expected.width,
+                transfer_window_size_for_item_count(1, 12.0).height
+            ),
             expected
         ));
         assert!(!progress_window_needs_resize(expected, expected));

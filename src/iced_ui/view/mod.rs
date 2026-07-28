@@ -119,6 +119,11 @@ impl BExplorerIced {
                 &self.config,
                 self.is_dark_theme(),
             ))
+        } else if self.duplicate_window_id == Some(id) {
+            self.duplicate_cleanup_window_view(Palette::from_config(
+                &self.config,
+                self.is_dark_theme(),
+            ))
         } else if cfg!(target_os = "linux") && self.is_properties_window(id) {
             #[cfg(target_os = "linux")]
             return self
@@ -144,6 +149,9 @@ impl BExplorerIced {
                 "Microsoft Defender threats",
             )
             .to_owned()
+        } else if self.duplicate_window_id == Some(id) {
+            self.localized("Limpieza de duplicados", "Duplicate cleanup")
+                .to_owned()
         } else if cfg!(target_os = "linux") && self.is_properties_window(id) {
             #[cfg(target_os = "linux")]
             return self.properties_window_title();
@@ -158,6 +166,14 @@ impl BExplorerIced {
         let palette = Palette::from_config(&self.config, self.is_dark_theme());
         let popup_palette = palette.with_opacity(self.popup_fade_progress);
         let window_radius = self.main_window_corner_radius();
+        let frame_background = if self.uses_linux_surface_blur() {
+            Color {
+                a: blur_frame_tint_alpha(palette.page_bg.a),
+                ..palette.page_bg
+            }
+        } else {
+            palette.page_bg
+        };
         // With one shared sidebar in split mode, it controls whichever pane
         // currently owns focus. Once per-pane sidebars are enabled, each one
         // keeps its own explicit target below in `content_area`.
@@ -184,7 +200,7 @@ impl BExplorerIced {
             .clip(true)
             .style(move |_| {
                 container::Style::default()
-                    .background(palette.page_bg)
+                    .background(frame_background)
                     .border(border::rounded(
                         (window_radius - WINDOW_BORDER_WIDTH).max(0.0),
                     ))
@@ -269,7 +285,7 @@ pub(super) fn context_archive_option_label(action: &str, name: &str, extension: 
     format!("{action} {truncated}.{extension}")
 }
 
-pub(super) fn context_submenu_width(labels: &[String]) -> f32 {
+pub(super) fn context_submenu_width(labels: &[String], font_size: f32) -> f32 {
     // Rows use a 20 px icon, 12 px gap and 10 px padding on each side. A
     // uniform character width made labels with many `i`, dots and hyphens
     // needlessly wide, so approximate the proportional UI font instead.
@@ -286,9 +302,14 @@ pub(super) fn context_submenu_width(labels: &[String]) -> f32 {
                     'A'..='Z' => 0.65,
                     '0'..='9' => 0.52,
                     _ => 0.55,
-                } * 13.0)
+                } * font_size)
                 .sum::<f32>()
         })
         .fold(0.0_f32, f32::max);
-    (text_width + 68.0).ceil().clamp(204.0, 318.0)
+    let minimum = scaled_ui_metric(204.0, font_size);
+    let maximum =
+        scaled_ui_metric(318.0, font_size).max(318.0 + (font_size - 13.0).max(0.0) * 12.0);
+    (text_width + scaled_ui_metric(68.0, font_size))
+        .ceil()
+        .clamp(minimum, maximum)
 }

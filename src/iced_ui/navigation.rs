@@ -27,6 +27,13 @@ pub(in crate::iced_ui) fn file_entry_presentation_opacity(
 }
 
 impl BExplorerIced {
+    pub(in crate::iced_ui) fn storage_display_name_for_path(&self, path: &Path) -> Option<&str> {
+        self.sidebar_storage_entries
+            .iter()
+            .find(|entry| entry.path == path && entry.drive_kind != Some(DriveKind::System))
+            .map(|entry| entry.name.as_str())
+    }
+
     pub(in crate::iced_ui) fn track_startup_initial_load(&mut self, pane: PaneId) {
         let storage_root = self.tab_for_pane(pane).path.is_none();
         let request_id = self.pane(pane).request_id;
@@ -192,8 +199,11 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn refresh_sidebar_storage(&self) -> Task<Message> {
+        let show_hidden_system_drives = self.config.show_hidden_system_drives;
         Task::perform(
-            run_blocking_file_operation(explorer::list_this_pc_entries),
+            run_blocking_file_operation(move || {
+                explorer::list_this_pc_entries(show_hidden_system_drives)
+            }),
             Message::SidebarStorageLoaded,
         )
     }
@@ -219,6 +229,34 @@ impl BExplorerIced {
         }
         if panes.is_empty() {
             panes.push(fallback);
+        }
+        Task::batch(panes.into_iter().map(|pane| self.start_load(pane)))
+    }
+
+    pub(in crate::iced_ui) fn refresh_after_trash_change(
+        &mut self,
+        fallback: PaneId,
+        restored_paths: &[PathBuf],
+    ) -> Task<Message> {
+        let restored_directories = restored_paths
+            .iter()
+            .filter_map(|path| path.parent().map(Path::to_path_buf))
+            .collect::<HashSet<_>>();
+        let mut panes = vec![fallback];
+        for pane in [PaneId::Primary, PaneId::Secondary] {
+            if pane == PaneId::Secondary && self.split.is_none() {
+                continue;
+            }
+            let should_refresh = self
+                .tab_for_pane(pane)
+                .path
+                .as_ref()
+                .is_some_and(|current| {
+                    explorer::is_trash_root_path(current) || restored_directories.contains(current)
+                });
+            if should_refresh && !panes.contains(&pane) {
+                panes.push(pane);
+            }
         }
         Task::batch(panes.into_iter().map(|pane| self.start_load(pane)))
     }
@@ -269,6 +307,11 @@ impl BExplorerIced {
             self.pane_mut(pane).text_preview = None;
             return Task::none();
         };
+        if explorer::is_trash_item_path(&entry.path) {
+            self.pdf_previews.remove(&pane);
+            self.pane_mut(pane).text_preview = None;
+            return Task::none();
+        }
         if thumbnail_data::is_pdf_preview_candidate(&entry) {
             if self
                 .pdf_previews
@@ -340,7 +383,9 @@ impl BExplorerIced {
             IcedImageVariant::Small => thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
         };
 
-        if thumbnail_data::is_thumbnail_candidate(entry) {
+        if thumbnail_data::is_thumbnail_candidate(entry)
+            && !explorer::is_trash_item_path(&entry.path)
+        {
             if explorer::is_portable_path(&entry.path) {
                 if !self.thumbnail_cache_for(variant).contains_key(&entry.path) {
                     self.thumbnail_cache_for_mut(variant)
@@ -357,11 +402,7 @@ impl BExplorerIced {
                         variant,
                     }));
                 }
-            } else if thumbnail_data::is_pdf_preview_candidate(entry)
-                || entry
-                    .size
-                    .is_some_and(|size| size <= self.config.preview_limit_bytes as u64)
-            {
+            } else {
                 if !self.thumbnail_cache_for(variant).contains_key(&entry.path) {
                     self.thumbnail_cache_for_mut(variant)
                         .insert(entry.path.clone(), IcedImageState::Loading);
@@ -373,9 +414,6 @@ impl BExplorerIced {
                         variant,
                     }));
                 }
-            } else {
-                self.thumbnail_cache_for_mut(variant)
-                    .insert(entry.path.clone(), IcedImageState::Missing);
             }
         }
 
@@ -458,9 +496,6 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn queue_sidebar_path_icon(&mut self, path: &Path) -> Task<Message> {
-        if explorer::is_virtual_path(path) {
-            return Task::none();
-        }
         if let Some(entry) = self
             .sidebar_storage_entries
             .iter()
@@ -468,6 +503,9 @@ impl BExplorerIced {
             .cloned()
         {
             return self.queue_sidebar_storage_icon(&entry);
+        }
+        if explorer::is_virtual_path(path) {
+            return Task::none();
         }
         let cache_key = thumbnail_data::native_path_icon_cache_key(
             path,
@@ -651,13 +689,24 @@ impl BExplorerIced {
             return entry.name.clone();
         }
 
-        entry
-            .path
+        let name_path = if explorer::is_virtual_path(&entry.path) {
+            Path::new(&entry.name)
+        } else {
+            &entry.path
+        };
+        name_path
             .file_stem()
             .and_then(|stem| stem.to_str())
             .filter(|stem| !stem.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| entry.name.clone())
+    }
+
+    pub(in crate::iced_ui) fn is_trash_pane(&self, pane: PaneId) -> bool {
+        self.tab_for_pane(pane)
+            .path
+            .as_deref()
+            .is_some_and(explorer::is_trash_root_path)
     }
 
     pub(in crate::iced_ui) fn entry_presentation_opacity(
@@ -901,6 +950,12 @@ impl BExplorerIced {
         }
         if value.eq_ignore_ascii_case("Red") {
             return Ok(Some(explorer::network_root_path()));
+        }
+        if value.eq_ignore_ascii_case("Papelera")
+            || value.eq_ignore_ascii_case("Recycle Bin")
+            || value.eq_ignore_ascii_case("Trash")
+        {
+            return Ok(Some(explorer::trash_root_path()));
         }
 
         let path = if value == "~" {

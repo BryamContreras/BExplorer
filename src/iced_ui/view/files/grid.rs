@@ -43,7 +43,12 @@ impl BExplorerIced {
                         col = 0;
                     }
                     current_group = Some(group.clone());
-                    grid = grid.push(file_group_header(group, palette, self.font_size()));
+                    grid = grid.push(file_group_header(
+                        group,
+                        palette,
+                        self.font_size(),
+                        self.detail_group_height(),
+                    ));
                 }
             }
             row_items = row_items.push(self.visual_file_item(pane, index, entry, palette, metrics));
@@ -103,12 +108,13 @@ impl BExplorerIced {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
+        let content_background = self.file_content_background(palette);
         let base: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| {
                 container::Style::default()
-                    .background(palette.table_bg)
+                    .background(content_background)
                     .border(border::color(palette.border).width(1))
             })
             .into();
@@ -162,7 +168,7 @@ impl BExplorerIced {
             // use the spare horizontal room normally reserved for one.
             let text_width = metrics.cell_width
                 - metrics.icon_size
-                - if is_portable_drive { 24.0 } else { 36.0 };
+                - self.ui_metric(if is_portable_drive { 24.0 } else { 36.0 });
             let is_this_pc_drive =
                 self.is_this_pc_root(pane) && entry.kind == EntryKind::Drive && !is_portable_drive;
             let name_height = if is_this_pc_drive {
@@ -203,9 +209,19 @@ impl BExplorerIced {
                 let formatting_drive = self.pane(pane).formatting
                     && self.pane(pane).formatting_path.as_deref() == Some(entry.path.as_path());
                 let capacity_indicator: Element<'_, Message> = if formatting_drive {
-                    drive_formatting_bar(self.pane(pane).search_progress_phase, palette, selected)
+                    drive_formatting_bar(
+                        self.pane(pane).search_progress_phase,
+                        palette,
+                        selected,
+                        self.font_size(),
+                    )
                 } else {
-                    drive_capacity_bar(entry.percent_full.unwrap_or(0.0), palette, selected)
+                    drive_capacity_bar(
+                        entry.percent_full.unwrap_or(0.0),
+                        palette,
+                        selected,
+                        self.font_size(),
+                    )
                 };
                 let capacity_label = if formatting_drive {
                     self.localized("Formateando...", "Formatting...").to_owned()
@@ -219,7 +235,7 @@ impl BExplorerIced {
                         .color(secondary)
                         .wrapping(iced::widget::text::Wrapping::None),
                 ]
-                .spacing(4)
+                .spacing(self.ui_metric(4.0))
                 .width(Length::Fixed(text_width))
                 .into()
             } else {
@@ -253,15 +269,16 @@ impl BExplorerIced {
                     metrics.icon_size
                 ),
                 column![name_editor, metadata,]
-                    .spacing(3)
+                    .spacing(self.ui_metric(3.0))
                     .width(Length::Fixed(text_width)),
             ]
-            .spacing(8)
+            .spacing(self.ui_metric(8.0))
             .align_y(Alignment::Center)
             .into()
         } else {
-            let preview_width = (metrics.cell_width - 18.0).max(metrics.icon_size);
-            let label_width = metrics.cell_width - 18.0;
+            let content_inset = self.ui_metric(18.0);
+            let preview_width = (metrics.cell_width - content_inset).max(metrics.icon_size);
+            let label_width = metrics.cell_width - content_inset;
             let label_height = visual_label_height(font_size);
             let name_editor: Element<'_, Message> = if let Some(dialog) = editing {
                 wrapped_inline_rename_editor(
@@ -303,7 +320,7 @@ impl BExplorerIced {
                 .center_y(Length::Fill),
                 name_editor,
             ]
-            .spacing(4)
+            .spacing(self.ui_metric(4.0))
             .align_x(Horizontal::Center)
             .into()
         };
@@ -317,7 +334,7 @@ impl BExplorerIced {
             container(body)
                 .width(metrics.cell_width)
                 .height(metrics.cell_height)
-                .padding(if metrics.tile { 6 } else { 8 })
+                .padding(self.ui_vertical_padding(if metrics.tile { 6.0 } else { 8.0 }))
                 .style(move |_| {
                     let style = if selected {
                         container::Style::default().background(accent_gradient(palette))
@@ -337,7 +354,7 @@ impl BExplorerIced {
             )
             .width(metrics.cell_width)
             .height(metrics.cell_height)
-            .padding(if metrics.tile { 6 } else { 8 })
+            .padding(self.ui_vertical_padding(if metrics.tile { 6.0 } else { 8.0 }))
             .on_press(Message::RowPressed(pane, index))
             .style(move |_, status| file_item_button_style(palette, selected, status))
             .into()

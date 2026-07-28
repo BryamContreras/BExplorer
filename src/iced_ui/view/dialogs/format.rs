@@ -7,6 +7,8 @@ impl BExplorerIced {
             return Space::new().into();
         };
         let font_size = self.font_size();
+        let surface_width = self.modal_text_surface_width(480.0);
+        let check_size = self.ui_metric(20.0).max(ui_text_line_height(font_size));
         let can_start = dialog.confirm_erase && !dialog.file_system.trim().is_empty();
         let allocation_options = vec![
             self.localized("Predeterminado", "Default").to_owned(),
@@ -49,9 +51,9 @@ impl BExplorerIced {
             Button::new(
                 row![
                     container(text(if checked { "✓" } else { "" }).size(font_size))
-                        .width(20)
-                        .height(20)
-                        .center(20)
+                        .width(check_size)
+                        .height(check_size)
+                        .center(check_size)
                         .style(move |_| {
                             let mut style = container::Style::default()
                                 .border(border::rounded(3).color(palette.strong_border).width(1));
@@ -85,7 +87,13 @@ impl BExplorerIced {
                 ]
                 .spacing(3)
                 .width(Length::Fill),
-                icon_button("x", Message::CancelFormatDialog, palette, false),
+                icon_button(
+                    "x",
+                    Message::CancelFormatDialog,
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
             column![
@@ -176,7 +184,7 @@ impl BExplorerIced {
         .spacing(13)
         .padding(18);
 
-        let surface = container(panel).width(480).style(move |_| {
+        let surface = container(panel).width(surface_width).style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
                 .border(border::rounded(8).color(palette.strong_border).width(1))
@@ -186,8 +194,12 @@ impl BExplorerIced {
                     blur_radius: 24.0,
                 })
         });
-        let surface =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), surface.into(), 480.0, 560.0);
+        let surface = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            surface.into(),
+            surface_width,
+            560.0,
+        );
         container(surface)
             .width(Length::Fill)
             .height(Length::Fill)

@@ -105,10 +105,20 @@ pub(super) fn archive_selection_entries(
     } else {
         list_7z_entries(archive)?
     };
+    Ok(archive_selection_from_entries(&entries, selected_paths))
+}
 
+fn archive_selection_from_entries(
+    entries: &[ArchiveListEntry],
+    selected_paths: &[PathBuf],
+) -> ArchiveSelection {
     let archive_names = entries
         .iter()
-        .map(|entry| normalize_archive_item_name(&entry.name))
+        .map(|entry| {
+            let raw_name = entry.name.replace('\\', "/").trim_matches('/').to_string();
+            let normalized_name = normalize_archive_item_name(&raw_name);
+            (raw_name, normalized_name)
+        })
         .collect::<Vec<_>>();
     let mut extract_entries = BTreeSet::new();
     let mut output_roots = BTreeSet::new();
@@ -121,9 +131,9 @@ pub(super) fn archive_selection_entries(
 
         let mut matched = false;
         let prefix = format!("{selected_name}/");
-        for entry_name in &archive_names {
-            if entry_name == &selected_name || entry_name.starts_with(&prefix) {
-                extract_entries.insert(entry_name.clone());
+        for (raw_name, normalized_name) in &archive_names {
+            if normalized_name == &selected_name || normalized_name.starts_with(&prefix) {
+                extract_entries.insert(raw_name.clone());
                 matched = true;
             }
         }
@@ -134,10 +144,10 @@ pub(super) fn archive_selection_entries(
         output_roots.insert(selected_name);
     }
 
-    Ok(ArchiveSelection {
+    ArchiveSelection {
         extract_entries: extract_entries.into_iter().collect(),
         output_roots: compact_archive_output_roots(output_roots),
-    })
+    }
 }
 
 fn normalize_archive_path(path: &Path) -> String {
@@ -151,10 +161,6 @@ fn normalize_archive_path(path: &Path) -> String {
         .join("/")
         .trim_matches('/')
         .to_string()
-}
-
-fn normalize_archive_item_name(name: &str) -> String {
-    name.replace('\\', "/").trim_matches('/').to_string()
 }
 
 fn compact_archive_output_roots(roots: BTreeSet<String>) -> Vec<String> {
@@ -337,7 +343,9 @@ pub(super) fn parse_7z_slt_entries(output: &str) -> Vec<ArchiveListEntry> {
 }
 
 fn push_7z_slt_entry(block: &BTreeMap<String, String>, entries: &mut Vec<ArchiveListEntry>) {
-    if !block.contains_key("Folder") && !block.contains_key("Attributes") {
+    let has_entry_kind = block.contains_key("Folder") || block.contains_key("Attributes");
+    let has_stream_sizes = block.contains_key("Size") && block.contains_key("Packed Size");
+    if !has_entry_kind && !has_stream_sizes {
         return;
     }
 
@@ -386,4 +394,38 @@ fn parse_7z_modified_time(value: &str) -> Option<SystemTime> {
     let parsed =
         chrono::NaiveDateTime::parse_from_str(without_fraction, "%Y-%m-%d %H:%M:%S").ok()?;
     Some(parsed.and_utc().into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, is_dir: bool) -> ArchiveListEntry {
+        ArchiveListEntry {
+            name: name.to_string(),
+            is_dir,
+            size: (!is_dir).then_some(1),
+            pack_size: None,
+            modified: None,
+        }
+    }
+
+    #[test]
+    fn tar_selection_matches_normalized_paths_but_preserves_raw_7zip_names() {
+        let entries = vec![
+            entry(".", true),
+            entry("./nested", true),
+            entry("./nested/deep.txt", false),
+            entry("./other.txt", false),
+        ];
+        let selected = vec![PathBuf::from("nested")];
+
+        let selection = archive_selection_from_entries(&entries, &selected);
+
+        assert_eq!(
+            selection.extract_entries,
+            vec!["./nested".to_string(), "./nested/deep.txt".to_string()]
+        );
+        assert_eq!(selection.output_roots, vec!["nested".to_string()]);
+    }
 }

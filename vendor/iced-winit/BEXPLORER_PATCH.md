@@ -1,9 +1,11 @@
 # BExplorer iced_winit patch
 
-This directory contains `iced_winit` 0.14.0 with one focused Linux fix.
+This directory contains `iced_winit` 0.14.0 with two focused Linux fixes.
 
-Iced currently creates winit windows without reading the startup activation
-token supplied by XDG-compliant launchers. On GNOME/Wayland this leaves startup
+## Startup activation
+
+Iced creates winit windows without reading the startup activation token
+supplied by XDG-compliant launchers. On GNOME/Wayland this leaves startup
 feedback active until the compositor times out, even though the application is
 already responsive.
 
@@ -18,4 +20,15 @@ startup-notification protocol on X11.
 
 Upstream issue: <https://github.com/iced-rs/iced/issues/3317>
 
-Remove this crate patch once an Iced release includes equivalent behavior.
+## Theme inheritance for auxiliary Wayland windows
+
+Some Wayland compositors return no per-window theme while Iced opens a new
+window. The runtime previously replaced the desktop theme already detected by
+`mundy` with `Mode::None` in that case and broadcast it to the application.
+Opening a transfer or archive progress window could therefore make a dark
+application switch to its light fallback.
+
+The patch now preserves the known system theme whenever a new native window
+does not report an override of its own.
+
+Remove this crate patch once an Iced release includes both behaviors.
