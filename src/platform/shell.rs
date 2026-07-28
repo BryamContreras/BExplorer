@@ -7,6 +7,8 @@ use std::process::Command;
 use std::process::Stdio;
 #[cfg(target_os = "windows")]
 use std::sync::atomic::AtomicBool;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 use crate::utils::errors::{BExplorerError, Result};
 
@@ -597,21 +599,32 @@ fn linux_set_clipboard_mime(mime: &str, text: &str) -> Result<()> {
         if !command_exists(program) {
             continue;
         }
-        let mut child = Command::new(program)
+        let Ok(mut child) = Command::new(program)
             .args(program_args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
-        if let Some(stdin) = child.stdin.as_mut() {
-            stdin
-                .write_all(text.as_bytes())
-                .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+        else {
+            continue;
+        };
+        if child
+            .stdin
+            .as_mut()
+            .is_none_or(|stdin| stdin.write_all(text.as_bytes()).is_err())
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            continue;
         }
-        let status = child
-            .wait()
-            .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+        // Close the pipe before polling: clipboard helpers wait for EOF before
+        // publishing the supplied MIME payload.
+        drop(child.stdin.take());
+        let Some(status) =
+            crate::utils::process::wait_for_child_with_timeout(&mut child, Duration::from_secs(1))
+        else {
+            continue;
+        };
         if status.success() {
             return Ok(());
         }
@@ -645,10 +658,14 @@ fn linux_get_clipboard_mime(mime: &str) -> Result<String> {
         if !command_exists(program) {
             continue;
         }
-        let output = Command::new(program)
-            .args(program_args)
-            .output()
-            .map_err(|error| BExplorerError::Clipboard(error.to_string()))?;
+        let mut command = Command::new(program);
+        command.args(program_args).stdin(Stdio::null());
+        let Some(output) = crate::utils::process::command_output_with_timeout(
+            &mut command,
+            Duration::from_millis(450),
+        ) else {
+            continue;
+        };
         if output.status.success() {
             return Ok(String::from_utf8_lossy(&output.stdout).to_string());
         }

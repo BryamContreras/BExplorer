@@ -601,11 +601,19 @@ impl BExplorerIced {
                         self.pdf_previews.clear();
                     }
                 }
-                self.popup_fade_progress = advance_popup_animation(
-                    self.popup_fade_progress,
-                    self.popup_fade_target,
-                    elapsed,
-                );
+                self.popup_fade_progress = if self.context_menu.is_some() {
+                    advance_context_menu_animation(
+                        self.popup_fade_progress,
+                        self.popup_fade_target,
+                        elapsed,
+                    )
+                } else {
+                    advance_popup_animation(
+                        self.popup_fade_progress,
+                        self.popup_fade_target,
+                        elapsed,
+                    )
+                };
                 self.color_picker_fade_progress = advance_popup_animation(
                     self.color_picker_fade_progress,
                     self.color_picker_fade_target,

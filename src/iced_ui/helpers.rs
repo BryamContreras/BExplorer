@@ -201,6 +201,37 @@ mod tests {
     }
 
     #[test]
+    fn context_menu_fade_completes_in_about_one_tenth_of_a_second() {
+        fn simulate(refresh_rate: u32, seconds: f32) -> f32 {
+            let frames = (refresh_rate as f32 * seconds).round() as u32;
+            let elapsed = Duration::from_secs_f32(1.0 / refresh_rate as f32);
+            (0..frames).fold(0.0, |progress, _| {
+                advance_context_menu_animation(progress, 1.0, elapsed)
+            })
+        }
+
+        let at_60_hz = simulate(60, 0.10);
+        let at_144_hz = simulate(144, 0.10);
+        assert!(at_60_hz > 0.99);
+        assert!((at_60_hz - at_144_hz).abs() < 0.002);
+    }
+
+    #[test]
+    fn context_menu_micro_translation_finishes_at_its_layout_position() {
+        assert_eq!(context_menu_reveal_offset(0.0, false, 4.0), 4.0);
+        assert_eq!(context_menu_reveal_offset(0.5, false, 4.0), 2.0);
+        assert_eq!(context_menu_reveal_offset(0.0, true, 4.0), -4.0);
+        assert_eq!(context_menu_reveal_offset(1.0, true, 4.0), 0.0);
+    }
+
+    #[test]
+    fn context_menu_scale_grows_subtly_to_full_size() {
+        assert!((context_menu_reveal_scale(0.0) - 0.98).abs() < f32::EPSILON);
+        assert!((context_menu_reveal_scale(0.5) - 0.99).abs() < f32::EPSILON);
+        assert_eq!(context_menu_reveal_scale(1.0), 1.0);
+    }
+
+    #[test]
     fn popup_blur_retires_before_the_foreground_while_closing() {
         assert_eq!(popup_backdrop_opacity(0.5, 1.0), 0.5);
         assert_eq!(popup_backdrop_opacity(0.5, 0.0), 0.25);

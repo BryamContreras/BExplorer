@@ -6,13 +6,14 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{Fd, OwnedObjectPath};
 
 use crate::platform::{PortableDeviceInfo, PortableObjectInfo};
 use crate::utils::errors::{BExplorerError, Result};
+use crate::utils::process::command_output_with_timeout;
 
 const KIO_MTP_SERVICE: &str = "org.kde.kmtpd5";
 const KIO_MTP_DAEMON_PATH: &str = "/modules/kmtpd";
@@ -24,6 +25,9 @@ const KIO_OBJECT_PREFIX: &str = "kio:";
 const GVFS_DEVICE_PREFIX: &str = "linux-gvfs-mtp:";
 const GVFS_OBJECT_PREFIX: &str = "gvfs:";
 const PORTABLE_ROOT_OBJECT_ID: &str = "DEVICE";
+const GVFS_VOLUME_CACHE_TTL: Duration = Duration::from_secs(2);
+const GVFS_VOLUME_QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
+const GVFS_MOUNT_TIMEOUT: Duration = Duration::from_secs(4);
 
 type KmtpFile = (u32, u32, u32, String, u64, i64, String);
 
@@ -40,8 +44,11 @@ struct KioObject {
     remote_path: String,
 }
 
+type GvfsVolumeCache = Option<(Instant, Vec<GvfsMtpVolume>)>;
+
 static KIO_MTP_ACCESS: OnceLock<Mutex<()>> = OnceLock::new();
 static GVFS_PORTABLE_ICON_NAMES: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+static GVFS_VOLUME_CACHE: OnceLock<Mutex<GvfsVolumeCache>> = OnceLock::new();
 static THUMBNAIL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub fn portable_devices() -> Vec<PortableDeviceInfo> {
@@ -595,21 +602,66 @@ fn decode_kio_object(value: &str) -> Result<KioObject> {
 }
 
 fn gvfs_mtp_volumes() -> Vec<GvfsMtpVolume> {
-    if !command_exists("gio") {
+    let cache = GVFS_VOLUME_CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(cache) = cache.lock()
+        && let Some((loaded_at, volumes)) = cache.as_ref()
+        && loaded_at.elapsed() <= GVFS_VOLUME_CACHE_TTL
+    {
+        return volumes.clone();
+    }
+    let volumes = query_gvfs_mtp_volumes();
+    if let Ok(mut cache) = cache.lock() {
+        *cache = Some((Instant::now(), volumes.clone()));
+    }
+    volumes
+}
+
+fn query_gvfs_mtp_volumes() -> Vec<GvfsMtpVolume> {
+    if !command_exists("gio") || !portable_transport_present() {
         return Vec::new();
     }
-    let Some(output) = Command::new("gio")
+    let mut command = Command::new("gio");
+    command
         .args(["mount", "-li"])
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()
+        .stderr(Stdio::null());
+    let Some(output) = command_output_with_timeout(&mut command, GVFS_VOLUME_QUERY_TIMEOUT)
         .filter(|output| output.status.success())
     else {
         return Vec::new();
     };
     parse_gio_mtp_volumes(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn portable_transport_present() -> bool {
+    let usb_devices = match fs::read_dir("/sys/bus/usb/devices") {
+        Ok(entries) => entries.flatten().any(|entry| {
+            let path = entry.path();
+            path.join("idVendor").is_file() && path.join("idProduct").is_file()
+        }),
+        // On systems without readable sysfs, retain the conservative GIO probe.
+        Err(_) => true,
+    };
+    usb_devices || mounted_gvfs_portable_transport_present()
+}
+
+fn mounted_gvfs_portable_transport_present() -> bool {
+    let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {
+        return false;
+    };
+    fs::read_dir(runtime.join("gvfs"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            ["mtp:", "gphoto2:", "afc:"]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+        })
 }
 
 fn parse_gio_mtp_volumes(output: &str) -> Vec<GvfsMtpVolume> {
@@ -859,15 +911,16 @@ fn ensure_gvfs_mounted(uri: &str) -> Result<PathBuf> {
     if let Some(path) = gvfs_mount_path_for_uri(uri) {
         return Ok(path);
     }
-    let output = Command::new("gio")
+    let mut command = Command::new("gio");
+    command
         .args(["mount", uri])
         .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| {
-            BExplorerError::Operation(format!("Could not start the GVfs MTP mount: {error}"))
+        .stderr(Stdio::piped());
+    let output =
+        command_output_with_timeout(&mut command, GVFS_MOUNT_TIMEOUT).ok_or_else(|| {
+            BExplorerError::Operation("The GVfs MTP mount did not respond in time".into())
         })?;
     if !output.status.success() {
         let message = String::from_utf8_lossy(&output.stderr);

@@ -16,7 +16,7 @@ impl BExplorerIced {
         for application in applications {
             let Some(key) = open_with_application_icon_cache_key(
                 &application,
-                thumbnail_data::NATIVE_ICON_SIZE,
+                thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
             ) else {
                 continue;
             };
@@ -28,7 +28,7 @@ impl BExplorerIced {
             tasks.push(load_iced_image_task(IcedImageJob::ApplicationIcon {
                 cache_key: key,
                 application,
-                size: thumbnail_data::NATIVE_ICON_SIZE,
+                size: thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
             }));
         }
         Task::batch(tasks)

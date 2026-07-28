@@ -880,8 +880,30 @@ impl BExplorerIced {
         )
         .on_press(Message::CloseContextMenu);
 
+        let reveal_distance = self.ui_metric(4.0);
+        let opens_upward =
+            y + menu_height + reveal_distance > self.window_size.height - self.ui_metric(8.0);
+        let reveal_y =
+            context_menu_reveal_offset(self.popup_fade_progress, opens_upward, reveal_distance);
+        let reveal_scale = context_menu_reveal_scale(self.popup_fade_progress);
         let floating_menu: Element<'_, Message> = float(opaque(menu))
-            .translate(move |_, _| Vector::new(x, y))
+            .scale(reveal_scale)
+            .translate(move |bounds, _| {
+                // `Float` scales around its center. Offset that transform so
+                // regular menus grow from their top-left corner and menus near
+                // the bottom edge grow from their bottom-left corner.
+                let x_compensation = (1.0 - reveal_scale) * bounds.width / 2.0;
+                let y_compensation = (1.0 - reveal_scale) * bounds.height / 2.0;
+                Vector::new(
+                    x - x_compensation,
+                    y + reveal_y
+                        + if opens_upward {
+                            y_compensation
+                        } else {
+                            -y_compensation
+                        },
+                )
+            })
             .into();
 
         let mut overlay_layers = vec![backdrop.into(), floating_menu];
@@ -899,7 +921,7 @@ impl BExplorerIced {
             for (index, application) in applications.iter().enumerate() {
                 let icon = open_with_application_icon_cache_key(
                     application,
-                    thumbnail_data::NATIVE_ICON_SIZE,
+                    thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
                 )
                 .and_then(|key| match self.native_icon_cache.get(&key) {
                     Some(IcedImageState::Ready(handle)) => Some(handle.clone()),

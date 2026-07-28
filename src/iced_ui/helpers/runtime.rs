@@ -287,14 +287,46 @@ pub(in crate::iced_ui) fn advance_popup_animation(
     target: f32,
     elapsed: Duration,
 ) -> f32 {
+    advance_popup_animation_with_response(current, target, elapsed, POPUP_ANIMATION_RESPONSE)
+}
+
+pub(in crate::iced_ui) fn advance_context_menu_animation(
+    current: f32,
+    target: f32,
+    elapsed: Duration,
+) -> f32 {
+    advance_popup_animation_with_response(current, target, elapsed, CONTEXT_MENU_ANIMATION_RESPONSE)
+}
+
+fn advance_popup_animation_with_response(
+    current: f32,
+    target: f32,
+    elapsed: Duration,
+    response: f32,
+) -> f32 {
     let elapsed = elapsed.as_secs_f32().clamp(0.0, 1.0 / 30.0);
-    let blend = 1.0 - (-POPUP_ANIMATION_RESPONSE * elapsed).exp();
+    let blend = 1.0 - (-response * elapsed).exp();
     let next = current + (target - current) * blend;
     if (next - target).abs() <= 0.002 {
         target
     } else {
         next.clamp(0.0, 1.0)
     }
+}
+
+pub(in crate::iced_ui) fn context_menu_reveal_offset(
+    progress: f32,
+    opens_upward: bool,
+    distance: f32,
+) -> f32 {
+    let remaining = 1.0 - progress.clamp(0.0, 1.0);
+    let direction = if opens_upward { -1.0 } else { 1.0 };
+    direction * distance.max(0.0) * remaining
+}
+
+pub(in crate::iced_ui) fn context_menu_reveal_scale(progress: f32) -> f32 {
+    let progress = progress.clamp(0.0, 1.0);
+    CONTEXT_MENU_INITIAL_SCALE + (1.0 - CONTEXT_MENU_INITIAL_SCALE) * progress
 }
 
 pub(in crate::iced_ui) fn popup_backdrop_opacity(progress: f32, target: f32) -> f32 {
