@@ -374,6 +374,25 @@ pub(in crate::iced_ui) fn storage_change_stream() -> impl iced::futures::Stream<
     })
 }
 
+pub(in crate::iced_ui) fn directory_change_stream() -> impl iced::futures::Stream<Item = Message> {
+    use iced::futures::channel::mpsc;
+
+    iced::stream::channel(1, move |output: mpsc::Sender<Message>| async move {
+        thread::spawn(move || {
+            let receiver = crate::fs::watcher::directory_change_receiver();
+            let mut output = output;
+            while let Ok(change) = receiver.recv() {
+                if let Err(error) = output.try_send(Message::DirectoryChanged(change))
+                    && error.is_disconnected()
+                {
+                    break;
+                }
+            }
+        });
+        iced::futures::future::pending::<()>().await;
+    })
+}
+
 fn periodic_message_stream(
     interval: Duration,
     message: Message,

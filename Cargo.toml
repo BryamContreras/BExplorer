@@ -38,6 +38,7 @@ image = { version = "0.25", default-features = false, features = [
     "webp",
 ] }
 md5 = "0.7"
+notify = "8.2"
 open = "5"
 raw-window-handle = "0.6"
 resvg = "0.45"

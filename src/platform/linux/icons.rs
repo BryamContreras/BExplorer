@@ -1,4 +1,21 @@
 fn icon_names_for_path(path: &Path, is_directory: bool) -> Vec<String> {
+    if path == Path::new(crate::app::thumbnail_data::TRASH_EMPTY_ICON_LOOKUP_PATH) {
+        return names([
+            "user-trash",
+            "user-trash-symbolic",
+            "trash-empty",
+            "edit-delete",
+        ]);
+    }
+    if path == Path::new(crate::app::thumbnail_data::TRASH_FULL_ICON_LOOKUP_PATH) {
+        return names([
+            "user-trash-full",
+            "user-trash-full-symbolic",
+            "user-trash",
+            "user-trash-symbolic",
+            "edit-delete",
+        ]);
+    }
     if let Some(encoded) = path
         .to_str()
         .and_then(|path| path.strip_prefix(PORTABLE_DEVICE_ICON_LOOKUP_PREFIX))

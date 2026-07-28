@@ -714,9 +714,12 @@ pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
     height: f32,
     font_size: f32,
     palette: Palette,
+    center_text: bool,
 ) -> Element<'a, Message> {
     let light_surface = palette.table_bg.r + palette.table_bg.g + palette.table_bg.b > 2.1;
     let input_width = width.max(28.0);
+    let horizontal_padding =
+        wrapped_rename_horizontal_padding(content, input_width, font_size, center_text);
     let rename_border = if light_surface {
         Color::from_rgb8(176, 181, 185)
     } else {
@@ -737,7 +740,12 @@ pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
         .on_action(Message::RenameEdited)
         .key_binding(rename_editor_key_binding)
         .size(font_size)
-        .padding([2, 6])
+        .padding(Padding {
+            top: 2.0,
+            right: horizontal_padding,
+            bottom: 2.0,
+            left: horizontal_padding,
+        })
         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
         .width(input_width)
         .height(Length::Fixed(height.max((font_size * 2.35).ceil())))
@@ -758,6 +766,31 @@ pub(in crate::iced_ui) fn wrapped_inline_rename_editor<'a>(
         .width(Length::Fixed(width.max(64.0)))
         .height(Length::Fixed(height.max((font_size * 2.35).ceil())))
         .into()
+}
+
+fn wrapped_rename_horizontal_padding(
+    content: &text_editor::Content,
+    width: f32,
+    font_size: f32,
+    center_text: bool,
+) -> f32 {
+    const DEFAULT_PADDING: f32 = 6.0;
+    if !center_text {
+        return DEFAULT_PADDING;
+    }
+
+    let widest_line = content
+        .text()
+        .lines()
+        .map(|line| line.chars().count())
+        .max()
+        .unwrap_or_default() as f32;
+    let estimated_text_width = widest_line * font_size * 0.58;
+    let centered_padding = ((width - estimated_text_width) * 0.5).max(DEFAULT_PADDING);
+
+    // Keep a small editable content area. The symmetric padding returns to
+    // the regular value as the filename grows, allowing normal wrapping.
+    centered_padding.min((width * 0.45).max(DEFAULT_PADDING))
 }
 
 fn rename_editor_key_binding(
@@ -840,7 +873,12 @@ pub(in crate::iced_ui) fn focus_inline_rename_task(_select_end: usize) -> Task<M
 
 #[cfg(test)]
 mod search_highlight_tests {
-    use super::{sanitize_rename_clipboard_text, search_highlight_token, search_match_ranges};
+    use iced::widget::text_editor;
+
+    use super::{
+        sanitize_rename_clipboard_text, search_highlight_token, search_match_ranges,
+        wrapped_rename_horizontal_padding,
+    };
 
     #[test]
     fn rename_paste_remains_a_single_filename_line() {
@@ -864,5 +902,23 @@ mod search_highlight_tests {
             vec![(0, 6), (7, 13)]
         );
         assert_eq!(search_match_ranges("banana", "ana"), vec![(1, 4)]);
+    }
+
+    #[test]
+    fn icon_rename_padding_centers_short_names_and_releases_long_names() {
+        let short = text_editor::Content::with_text("Nueva carpeta");
+        let long = text_editor::Content::with_text(
+            "Un nombre de archivo suficientemente largo para ocupar todo el mosaico.txt",
+        );
+
+        let short_padding = wrapped_rename_horizontal_padding(&short, 210.0, 14.0, true);
+        let long_padding = wrapped_rename_horizontal_padding(&long, 210.0, 14.0, true);
+
+        assert!(short_padding > 6.0);
+        assert_eq!(long_padding, 6.0);
+        assert_eq!(
+            wrapped_rename_horizontal_padding(&short, 210.0, 14.0, false),
+            6.0
+        );
     }
 }

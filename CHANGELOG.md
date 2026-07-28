@@ -4,10 +4,21 @@ All notable user-facing changes to BExplorer are documented here.
 
 ## Unreleased
 
+- Visible local folders now refresh from native filesystem notifications
+  instead of polling. BExplorer keeps one non-recursive watcher, observes at
+  most the two visible panes, coalesces write bursts, and preserves selection
+  and scroll position while updating.
+- The sidebar recycle bin now uses the active Linux icon theme or the native
+  Windows Shell icon, switches between empty and full states asynchronously,
+  and keeps the embedded icon only as a fallback.
 - Rename editors now prioritize text clipboard commands over file commands in
   every view. Copy, cut, paste, and select-all share one stateful editor,
   pasted text remains on one filename-safe line, and copying from rename or
   read-only text previews clears stale internal file-clipboard state.
+- Creating or renaming items in large icon views now keeps short names
+  centered beneath their icon while preserving wrapping for long names.
+- The Windows installer icon has been regenerated from the current canonical
+  application artwork, matching the icon embedded in the executable.
 
 ## 1.0.4 - 2026-07-27
 

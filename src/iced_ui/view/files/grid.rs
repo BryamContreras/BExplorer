@@ -188,6 +188,7 @@ impl BExplorerIced {
                         name_height,
                         font_size,
                         palette,
+                        false,
                     )
                 }
             } else {
@@ -287,6 +288,7 @@ impl BExplorerIced {
                     label_height,
                     font_size,
                     palette,
+                    true,
                 )
             } else {
                 container(

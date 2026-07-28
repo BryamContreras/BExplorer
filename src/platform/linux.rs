@@ -960,6 +960,22 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_trash_paths_resolve_to_native_theme_icon_names() {
+        let empty = icon_names_for_path(
+            Path::new(crate::app::thumbnail_data::TRASH_EMPTY_ICON_LOOKUP_PATH),
+            false,
+        );
+        let full = icon_names_for_path(
+            Path::new(crate::app::thumbnail_data::TRASH_FULL_ICON_LOOKUP_PATH),
+            false,
+        );
+
+        assert_eq!(empty.first().map(String::as_str), Some("user-trash"));
+        assert_eq!(full.first().map(String::as_str), Some("user-trash-full"));
+        assert!(full.iter().any(|name| name == "user-trash"));
+    }
+
+    #[test]
     fn only_the_removable_mount_root_uses_a_drive_icon() {
         let root = Path::new("/run/media/example/USB");
         let child = Path::new("/run/media/example/USB/Documents");
