@@ -45,10 +45,9 @@ impl BExplorerIced {
                     tasks.push(self.queue_sidebar_path_icon(destination));
                 }
                 ContextSendToTarget::Native(target) => {
-                    let Some((cache_key, path, is_directory)) = native_send_to_icon_request(
-                        target.icon(),
-                        thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
-                    ) else {
+                    let Some((cache_key, path, is_directory)) =
+                        native_send_to_icon_request(target, thumbnail_data::SMALL_ENTRY_IMAGE_SIZE)
+                    else {
                         continue;
                     };
                     if self.small_native_icon_cache.contains_key(&cache_key) {
@@ -89,8 +88,7 @@ impl BExplorerIced {
                 thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
             ),
             ContextSendToTarget::Native(target) => {
-                native_send_to_icon_request(target.icon(), thumbnail_data::SMALL_ENTRY_IMAGE_SIZE)?
-                    .0
+                native_send_to_icon_request(target, thumbnail_data::SMALL_ENTRY_IMAGE_SIZE)?.0
             }
         };
         match self.small_native_icon_cache.get(&cache_key) {
@@ -212,6 +210,7 @@ impl BExplorerIced {
         let has_virtual_portable_source = sources
             .iter()
             .any(|source| explorer::is_portable_path(source));
+        let spanish = self.is_spanish();
         self.sidebar_storage_entries
             .iter()
             .filter(|entry| {
@@ -227,7 +226,7 @@ impl BExplorerIced {
                 !(has_virtual_portable_source && entry.drive_kind == Some(DriveKind::Portable))
             })
             .map(|entry| ContextSendToTarget::Storage {
-                label: entry.name.clone(),
+                label: send_to_storage_label(&entry.name, &entry.path, entry.drive_kind, spanish),
                 destination: entry.path.clone(),
                 icon: send_to_storage_icon(entry.drive_kind),
             })
@@ -1045,26 +1044,87 @@ fn send_to_storage_icon(drive_kind: Option<DriveKind>) -> &'static str {
     }
 }
 
-fn native_send_to_icon_request(icon: &str, size: u32) -> Option<(PathBuf, PathBuf, bool)> {
+fn send_to_storage_label(
+    name: &str,
+    path: &Path,
+    drive_kind: Option<DriveKind>,
+    spanish: bool,
+) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        if !spanish {
+            return name.to_owned();
+        }
+        let Some(drive_kind @ (DriveKind::Usb | DriveKind::External)) = drive_kind else {
+            return name.to_owned();
+        };
+        let path_text = path.as_os_str().to_string_lossy();
+        let mut characters = path_text.chars();
+        let Some(letter) = characters.next().filter(char::is_ascii_alphabetic) else {
+            return name.to_owned();
+        };
+        if characters.next() != Some(':') {
+            return name.to_owned();
+        }
+        let generic_name = format!("{} ({letter}:)", drive_kind.label());
+        if !name.eq_ignore_ascii_case(&generic_name) {
+            return name.to_owned();
+        }
+        let localized_kind = match drive_kind {
+            DriveKind::Usb => "Unidad USB",
+            DriveKind::External => "Unidad externa",
+            _ => unreachable!("only removable drive kinds are matched above"),
+        };
+        format!("{localized_kind} ({letter}:)")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (path, drive_kind, spanish);
+        name.to_owned()
+    }
+}
+
+fn native_send_to_icon_request(
+    target: &shell::NativeSendToTarget,
+    size: u32,
+) -> Option<(PathBuf, PathBuf, bool)> {
     #[cfg(target_os = "linux")]
     {
-        let path = match icon {
-            "portable" => "bexplorer-portable-device",
-            "bluetooth" => "bexplorer-bluetooth",
-            "mail" => "bexplorer-mail",
-            _ => return None,
-        };
-        Some((
-            PathBuf::from(format!("__bexplorer_send_to_{icon}_icon_size_{size}")),
-            PathBuf::from(path),
-            false,
-        ))
+        linux_send_to_icon_request(target.icon(), size)
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
     {
-        let _ = (icon, size);
+        Some(windows_send_to_icon_request(target.icon_path(), size))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = (target, size);
         None
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_send_to_icon_request(icon: &str, size: u32) -> Option<(PathBuf, PathBuf, bool)> {
+    let path = match icon {
+        "portable" => "bexplorer-portable-device",
+        "bluetooth" => "bexplorer-bluetooth",
+        "mail" => "bexplorer-mail",
+        _ => return None,
+    };
+    Some((
+        PathBuf::from(format!("__bexplorer_send_to_{icon}_icon_size_{size}")),
+        PathBuf::from(path),
+        false,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_send_to_icon_request(path: &Path, size: u32) -> (PathBuf, PathBuf, bool) {
+    (
+        thumbnail_data::native_path_icon_cache_key(path, false, size),
+        path.to_path_buf(),
+        false,
+    )
 }
 
 #[cfg(test)]
@@ -1086,13 +1146,54 @@ mod tests {
     #[test]
     fn send_to_native_providers_request_desktop_theme_icons() {
         let (_, phone, _) =
-            native_send_to_icon_request("portable", 48).expect("portable native icon");
+            linux_send_to_icon_request("portable", 48).expect("portable native icon");
         let (_, bluetooth, _) =
-            native_send_to_icon_request("bluetooth", 48).expect("Bluetooth native icon");
-        let (_, mail, _) = native_send_to_icon_request("mail", 48).expect("mail native icon");
+            linux_send_to_icon_request("bluetooth", 48).expect("Bluetooth native icon");
+        let (_, mail, _) = linux_send_to_icon_request("mail", 48).expect("mail native icon");
 
         assert_eq!(phone, Path::new("bexplorer-portable-device"));
         assert_eq!(bluetooth, Path::new("bexplorer-bluetooth"));
         assert_eq!(mail, Path::new("bexplorer-mail"));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn send_to_windows_targets_request_their_shell_icons() {
+        let target = Path::new(r"C:\Users\Test\AppData\Roaming\Microsoft\Windows\SendTo\App.lnk");
+        let (cache_key, icon_path, is_directory) = windows_send_to_icon_request(target, 48);
+
+        assert_eq!(
+            cache_key,
+            thumbnail_data::native_path_icon_cache_key(target, false, 48)
+        );
+        assert_eq!(icon_path, target);
+        assert!(!is_directory);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn send_to_localizes_only_generic_windows_drive_names() {
+        assert_eq!(
+            send_to_storage_label(
+                "USB Drive (E:)",
+                Path::new(r"E:\"),
+                Some(DriveKind::Usb),
+                true,
+            ),
+            "Unidad USB (E:)"
+        );
+        assert_eq!(
+            send_to_storage_label("BACKUP (E:)", Path::new(r"E:\"), Some(DriveKind::Usb), true,),
+            "BACKUP (E:)"
+        );
+        assert_eq!(
+            send_to_storage_label(
+                "USB Drive (E:)",
+                Path::new(r"E:\"),
+                Some(DriveKind::Usb),
+                false,
+            ),
+            "USB Drive (E:)"
+        );
     }
 }
