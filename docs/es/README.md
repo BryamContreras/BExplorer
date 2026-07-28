@@ -319,6 +319,8 @@ licencia. El script valida automaticamente metadatos, arquitectura y ejecutable
 con `scripts/linux/validate-deb.sh` y `scripts/linux/validate-rpm.sh`. Ambos
 paquetes instalan el ejecutable en `/usr/bin/bexplorer`, registran la aplicacion
 en el menu del escritorio e instalan sus iconos escalados en el tema `hicolor`.
+Esos tamaños se generan desde `assets/icons/appicon.png`; despues de cambiar el
+icono canonico debe ejecutarse `scripts/linux/sync-icons.sh`.
 El `.deb` puede instalarse con `scripts/linux/install-deb.sh`.
 
 En Windows, `scripts/windows/package.ps1` crea un ZIP portable y un instalador

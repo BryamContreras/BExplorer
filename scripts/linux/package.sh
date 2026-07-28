@@ -11,6 +11,8 @@ TARBALL="$ROOT_DIR/dist/bexplorer-$VERSION-linux-$TARGET.tar.gz"
 DEBROOT="$ROOT_DIR/dist/bexplorer-deb"
 RPMBUILD="$ROOT_DIR/dist/rpmbuild"
 
+sh "$ROOT_DIR/scripts/linux/sync-icons.sh" --check
+
 case "$TARGET" in
   x86_64-*) DEB_ARCH=amd64; RPM_ARCH=x86_64 ;;
   aarch64-*) DEB_ARCH=arm64; RPM_ARCH=aarch64 ;;

@@ -6,6 +6,9 @@ All notable user-facing changes to BExplorer are documented here.
 
 ## 1.0.4 - 2026-07-27
 
+- Fixed KDE and GNOME launchers continuing to display the previous application
+  icon because the hicolor sizes had not been regenerated from the canonical
+  icon. Linux packaging now validates all installed sizes before building.
 - Added native Trash views on Windows and Linux with restore, delete, empty,
   grouping, preview, contextual actions, and localized status text.
 - Added Send to submenus for removable storage and desktop-provided Bluetooth

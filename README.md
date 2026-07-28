@@ -521,6 +521,9 @@ executable, and dependency classification are checked through
 packages contain the desktop entry, metainfo, Polkit policy, hicolor icons from
 16 to 512 pixels, license, third-party notices, and the original 7-Zip license
 texts.
+The hicolor files are generated from `assets/icons/appicon.png`; run
+`scripts/linux/sync-icons.sh` with ImageMagick available after replacing the
+canonical application icon.
 It installs the executable as `/usr/bin/bexplorer`, registers BExplorer as an
 available `inode/directory` handler, and uses `Exec=bexplorer %f` so a desktop
 invocation navigates to the requested folder. This makes BExplorer selectable
