@@ -665,10 +665,15 @@ async fn run_instance<P>(
                     }
                 }
 
+                // A newly-created Wayland window can have no per-window theme
+                // even when the desktop preference was already detected by
+                // mundy. Keep the known system value in that case; replacing
+                // it with `None` would broadcast a spurious light-theme
+                // transition every time an auxiliary window is opened.
                 let window_theme = window
                     .theme()
                     .map(conversion::theme_mode)
-                    .unwrap_or_default();
+                    .unwrap_or(system_theme);
 
                 if system_theme != window_theme {
                     system_theme = window_theme;

@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -74,11 +75,15 @@ pub fn classify_file_category(path: &Path) -> FileCategory {
     match ext.as_str() {
         "exe" | "msi" | "bat" | "cmd" | "ps1" | "sh" | "apk" | "ipa" | "appimage" | "deb"
         | "rpm" | "pkg" | "snap" | "flatpak" => FileCategory::Application,
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "svg" | "ico" | "tiff" | "tif"
-        | "heic" | "jxl" | "avif" => FileCategory::Image,
+        "png" | "jpg" | "jpeg" | "jpe" | "jfif" | "gif" | "bmp" | "dib" | "webp" | "svg"
+        | "ico" | "tiff" | "tif" | "dds" | "exr" | "ff" | "hdr" | "pnm" | "pbm" | "pgm" | "ppm"
+        | "pam" | "qoi" | "tga" | "heic" | "heif" | "heics" | "heifs" | "hif" | "jxl" | "avif" => {
+            FileCategory::Image
+        }
         "mp3" | "wav" | "flac" | "ogg" | "m4a" | "wma" | "aac" | "opus" | "mid" | "midi"
         | "aiff" => FileCategory::Audio,
-        "mp4" | "mkv" | "mov" | "avi" | "wmv" | "flv" | "webm" | "m4v" | "3gp" => {
+        "mp4" | "mkv" | "mov" | "avi" | "wmv" | "flv" | "webm" | "m4v" | "3gp" | "3g2" | "mpeg"
+        | "mpg" | "mpe" | "m2ts" | "mts" | "ogv" | "vob" | "asf" | "rm" | "rmvb" | "f4v" => {
             FileCategory::Video
         }
         _ if crate::fs::archive_listing::has_browsable_archive_extension(path) => {
@@ -244,7 +249,7 @@ struct NetworkCache {
 /// Loads the last known This PC entries without touching the system's storage
 /// APIs. A stale or unreadable cache is ignored and the normal asynchronous
 /// refresh will repopulate it.
-pub fn load_storage_cache() -> Vec<FileEntry> {
+pub fn load_storage_cache(show_hidden_system_drives: bool) -> Vec<FileEntry> {
     let Ok(path) = crate::utils::paths::storage_cache_file() else {
         return Vec::new();
     };
@@ -261,10 +266,13 @@ pub fn load_storage_cache() -> Vec<FileEntry> {
         .filter(|_entry| {
             #[cfg(all(unix, not(target_os = "macos")))]
             {
-                !linux_path_is_firmware_mount(&_entry.path, &_entry.file_system)
+                show_hidden_system_drives
+                    || _entry.path == Path::new("/")
+                    || !linux_mount_point_is_system(&_entry.path)
             }
             #[cfg(not(all(unix, not(target_os = "macos"))))]
             {
+                let _ = show_hidden_system_drives;
                 true
             }
         })
@@ -363,11 +371,16 @@ pub fn save_network_cache(entries: &[FileEntry]) -> Result<()> {
 
 impl FileEntry {
     pub fn type_label(&self) -> String {
+        let type_path = if is_virtual_path(&self.path) {
+            Path::new(&self.name)
+        } else {
+            &self.path
+        };
         self.drive_kind
             .map(DriveKind::label)
             .map(|l| l.to_string())
             .unwrap_or_else(|| match self.kind {
-                EntryKind::File | EntryKind::Other => self.category.label_with(&self.path),
+                EntryKind::File | EntryKind::Other => self.category.label_with(type_path),
                 _ => self.kind.label().to_string(),
             })
     }
@@ -400,6 +413,8 @@ pub struct PortableDevice {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum VirtualLocation {
+    TrashRoot,
+    TrashItem,
     NetworkRoot,
     NetworkHost {
         host: String,
@@ -411,6 +426,7 @@ pub enum VirtualLocation {
 }
 
 const VIRTUAL_ROOT: &str = "__bexplorer_virtual__";
+const VIRTUAL_TRASH: &str = "trash";
 const VIRTUAL_NETWORK: &str = "network";
 const VIRTUAL_PORTABLE: &str = "portable";
 const WPD_ROOT_OBJECT_ID: &str = "DEVICE";
@@ -447,7 +463,7 @@ pub fn list_entries(path: Option<&Path>, show_hidden: bool) -> Result<Vec<FileEn
         }
         Some(path) if is_unc_path(path) => list_unc_directory(path, show_hidden),
         Some(path) => list_directory(path, show_hidden),
-        None => list_this_pc_entries(),
+        None => list_this_pc_entries(false),
     }
 }
 
@@ -457,6 +473,21 @@ pub fn is_virtual_path(path: &Path) -> bool {
 
 pub fn is_network_root_path(path: &Path) -> bool {
     matches!(virtual_location(path), Some(VirtualLocation::NetworkRoot))
+}
+
+pub fn is_trash_root_path(path: &Path) -> bool {
+    matches!(virtual_location(path), Some(VirtualLocation::TrashRoot))
+}
+
+pub fn is_trash_item_path(path: &Path) -> bool {
+    matches!(virtual_location(path), Some(VirtualLocation::TrashItem))
+}
+
+pub fn is_trash_path(path: &Path) -> bool {
+    matches!(
+        virtual_location(path),
+        Some(VirtualLocation::TrashRoot | VirtualLocation::TrashItem)
+    )
 }
 
 pub fn is_portable_path(path: &Path) -> bool {
@@ -482,6 +513,7 @@ pub fn portable_object_from_path(path: &Path) -> Option<(String, String)> {
 
 pub fn virtual_display_name(path: &Path) -> Option<String> {
     match virtual_location(path)? {
+        VirtualLocation::TrashRoot | VirtualLocation::TrashItem => Some("Papelera".into()),
         VirtualLocation::NetworkRoot => Some("Red".into()),
         VirtualLocation::NetworkHost { host } => Some(host),
         VirtualLocation::PortableObject { .. } => virtual_components(path)
@@ -489,6 +521,14 @@ pub fn virtual_display_name(path: &Path) -> Option<String> {
             .and_then(|segment| segment_label(segment))
             .or_else(|| Some("Dispositivo".into())),
     }
+}
+
+pub fn trash_root_path() -> PathBuf {
+    PathBuf::from(VIRTUAL_ROOT).join(VIRTUAL_TRASH)
+}
+
+pub(crate) fn trash_item_path(id: &OsStr) -> PathBuf {
+    trash_root_path().join(hex_encode_bytes(&trash_id_bytes(id)))
 }
 
 pub fn network_root_path() -> PathBuf {
@@ -507,6 +547,7 @@ pub fn portable_device_path(device_id: &str, name: &str) -> PathBuf {
 
 pub fn virtual_title(path: &Path) -> Option<String> {
     match virtual_location(path)? {
+        VirtualLocation::TrashRoot | VirtualLocation::TrashItem => Some("Papelera".into()),
         VirtualLocation::NetworkRoot => Some("Red".into()),
         VirtualLocation::NetworkHost { host } => Some(host),
         VirtualLocation::PortableObject { .. } => virtual_components(path)
@@ -518,6 +559,10 @@ pub fn virtual_title(path: &Path) -> Option<String> {
 
 pub fn virtual_breadcrumbs(path: &Path) -> Option<Vec<(String, Option<PathBuf>)>> {
     match virtual_location(path)? {
+        VirtualLocation::TrashRoot | VirtualLocation::TrashItem => Some(vec![
+            ("This PC".into(), None),
+            ("Papelera".into(), Some(trash_root_path())),
+        ]),
         VirtualLocation::NetworkRoot => Some(vec![
             ("This PC".into(), None),
             ("Red".into(), Some(network_root_path())),
@@ -585,10 +630,10 @@ pub fn list_portable_devices_for_storage(storage_entries: &[FileEntry]) -> Vec<P
         .collect()
 }
 
-pub fn list_storage_entries() -> Result<Vec<FileEntry>> {
+pub fn list_storage_entries(show_hidden_system_drives: bool) -> Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
 
-    for device in storage_devices() {
+    for device in storage_devices(show_hidden_system_drives) {
         let total = fs2::total_space(&device.path).ok();
         let free = free_space(&device.path).ok();
         let percent_full = match (total, free) {
@@ -618,8 +663,8 @@ pub fn list_storage_entries() -> Result<Vec<FileEntry>> {
     Ok(entries)
 }
 
-pub fn list_this_pc_entries() -> Result<Vec<FileEntry>> {
-    let storage = list_storage_entries()?;
+pub fn list_this_pc_entries(show_hidden_system_drives: bool) -> Result<Vec<FileEntry>> {
+    let storage = list_storage_entries(show_hidden_system_drives)?;
     let portable = list_portable_devices_for_storage(&storage);
     Ok(combine_storage_and_portable_entries(&storage, &portable))
 }
@@ -747,6 +792,8 @@ fn list_virtual_entries(path: &Path) -> Result<Vec<FileEntry>> {
     };
 
     let mut entries = match location {
+        VirtualLocation::TrashRoot => crate::fs::trash::list_entries()?,
+        VirtualLocation::TrashItem => Vec::new(),
         VirtualLocation::NetworkRoot => list_network_computers(),
         VirtualLocation::NetworkHost { host } => list_network_shares(&host),
         VirtualLocation::PortableObject {
@@ -1193,6 +1240,8 @@ fn virtual_location(path: &Path) -> Option<VirtualLocation> {
     }
 
     match components.get(1).map(String::as_str) {
+        Some(VIRTUAL_TRASH) if components.len() == 2 => Some(VirtualLocation::TrashRoot),
+        Some(VIRTUAL_TRASH) if components.len() == 3 => Some(VirtualLocation::TrashItem),
         Some(VIRTUAL_NETWORK) if components.len() == 2 => Some(VirtualLocation::NetworkRoot),
         Some(VIRTUAL_NETWORK) => {
             let host = components.get(2).and_then(|segment| segment_id(segment))?;
@@ -1241,13 +1290,38 @@ fn segment_label(segment: &str) -> Option<String> {
 }
 
 fn hex_encode(value: &str) -> String {
+    hex_encode_bytes(value.as_bytes())
+}
+
+fn hex_encode_bytes(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(value.len() * 2);
-    for byte in value.as_bytes() {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
         output.push(HEX[(byte >> 4) as usize] as char);
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
+}
+
+#[cfg(unix)]
+fn trash_id_bytes(id: &OsStr) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+
+    id.as_bytes().to_vec()
+}
+
+#[cfg(windows)]
+fn trash_id_bytes(id: &OsStr) -> Vec<u8> {
+    use std::os::windows::ffi::OsStrExt;
+
+    id.encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn trash_id_bytes(id: &OsStr) -> Vec<u8> {
+    id.to_string_lossy().into_owned().into_bytes()
 }
 
 fn hex_decode(value: &str) -> Option<String> {
@@ -1309,6 +1383,49 @@ mod tests {
         assert!(EntryKind::SymlinkFile.is_file());
         assert!(!EntryKind::SymlinkFolder.is_file());
         assert!(!EntryKind::Symlink.is_file());
+    }
+
+    #[test]
+    fn trash_virtual_paths_are_stable_and_distinguish_items() {
+        let root = trash_root_path();
+        let first = trash_item_path(OsStr::new("native-trash-id-one"));
+        let first_again = trash_item_path(OsStr::new("native-trash-id-one"));
+        let second = trash_item_path(OsStr::new("native-trash-id-two"));
+
+        assert!(is_virtual_path(&root));
+        assert!(is_trash_root_path(&root));
+        assert!(is_trash_item_path(&first));
+        assert!(is_trash_path(&first));
+        assert_eq!(first, first_again);
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), Some(root.as_path()));
+    }
+
+    #[test]
+    fn classifies_portable_image_and_video_extensions() {
+        for extension in [
+            "jpg", "webp", "tiff", "svg", "dds", "exr", "qoi", "tga", "avif", "heic", "jxl",
+        ] {
+            assert_eq!(
+                classify_file_category(Path::new(&format!("preview.{extension}"))),
+                FileCategory::Image,
+                "image extension {extension}"
+            );
+        }
+        for extension in [
+            "mp4", "mkv", "webm", "mpeg", "m2ts", "mts", "ogv", "vob", "rmvb",
+        ] {
+            assert_eq!(
+                classify_file_category(Path::new(&format!("preview.{extension}"))),
+                FileCategory::Video,
+                "video extension {extension}"
+            );
+        }
+        assert_eq!(
+            classify_file_category(Path::new("source.ts")),
+            FileCategory::Code,
+            "TypeScript keeps precedence over the ambiguous transport-stream extension"
+        );
     }
 
     #[cfg(unix)]
@@ -1482,6 +1599,43 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
+    fn linux_storage_name_prefers_partition_metadata_over_uuid_mount_path() {
+        let name = linux_storage_display_name(
+            Path::new("/run/media/example/F6208DAA208D7303"),
+            Some("Ventoy"),
+            Some("F6208DAA208D7303"),
+            Some("KINGSTON SKC600/256G"),
+            DriveKind::External,
+        );
+
+        assert_eq!(name, "Ventoy");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_storage_name_uses_model_when_only_the_uuid_names_the_mount() {
+        let name = linux_storage_display_name(
+            Path::new("/run/media/example/F6208DAA208D7303"),
+            None,
+            Some("F6208DAA208D7303"),
+            Some("KINGSTON SKC600/256G"),
+            DriveKind::External,
+        );
+
+        assert_eq!(name, "KINGSTON SKC600/256G");
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn linux_udev_device_names_decode_escaped_characters() {
+        assert_eq!(
+            clean_linux_device_name(r"KINGSTON\x20SKC600\x2f256G"),
+            Some("KINGSTON SKC600/256G".into())
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
     fn filters_linux_virtual_mounts_but_keeps_network_mounts() {
         let proc_mount = LinuxMount {
             major_minor: "0:4".into(),
@@ -1496,8 +1650,8 @@ mod tests {
             source: "//server/share".into(),
         };
 
-        assert!(!linux_mount_is_storage_candidate(&proc_mount));
-        assert!(linux_mount_is_storage_candidate(&smb_mount));
+        assert!(!linux_mount_is_storage_candidate(&proc_mount, false));
+        assert!(linux_mount_is_storage_candidate(&smb_mount, false));
         assert_eq!(linux_drive_kind(&smb_mount), DriveKind::Network);
     }
 
@@ -1525,7 +1679,71 @@ mod tests {
 
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn filters_linux_firmware_partitions_but_keeps_regular_vfat_storage() {
+    fn filters_linux_system_mounts_but_keeps_user_mounted_storage() {
+        let root = LinuxMount {
+            major_minor: "0:36".into(),
+            mount_point: PathBuf::from("/"),
+            fs_type: "btrfs".into(),
+            source: "/dev/nvme0n1p3".into(),
+        };
+        let fedora_home = LinuxMount {
+            major_minor: "0:36".into(),
+            mount_point: PathBuf::from("/home"),
+            fs_type: "btrfs".into(),
+            source: "/dev/nvme0n1p3".into(),
+        };
+        let separate_var = LinuxMount {
+            major_minor: "253:0".into(),
+            mount_point: PathBuf::from("/var"),
+            fs_type: "ext4".into(),
+            source: "/dev/mapper/system-var".into(),
+        };
+        let user_storage = LinuxMount {
+            major_minor: "8:17".into(),
+            mount_point: PathBuf::from("/mnt/DATA"),
+            fs_type: "ext4".into(),
+            source: "/dev/sdb1".into(),
+        };
+
+        assert!(linux_mount_is_storage_candidate_with_partition_type(
+            &root, None, false,
+        ));
+        assert!(!linux_mount_is_storage_candidate_with_partition_type(
+            &fedora_home,
+            None,
+            false,
+        ));
+        assert!(!linux_mount_is_storage_candidate_with_partition_type(
+            &separate_var,
+            None,
+            false,
+        ));
+        assert!(linux_mount_is_storage_candidate_with_partition_type(
+            &user_storage,
+            None,
+            false,
+        ));
+        assert!(linux_mount_is_storage_candidate_with_partition_type(
+            &fedora_home,
+            None,
+            true,
+        ));
+        assert!(linux_mount_is_storage_candidate_with_partition_type(
+            &separate_var,
+            None,
+            true,
+        ));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn filters_linux_boot_partitions_but_keeps_regular_vfat_storage() {
+        let fedora_boot = LinuxMount {
+            major_minor: "259:2".into(),
+            mount_point: PathBuf::from("/boot"),
+            fs_type: "ext4".into(),
+            source: "/dev/nvme0n1p2".into(),
+        };
         let mounted_esp = LinuxMount {
             major_minor: "259:1".into(),
             mount_point: PathBuf::from("/boot/efi"),
@@ -1552,20 +1770,39 @@ mod tests {
         };
 
         assert!(!linux_mount_is_storage_candidate_with_partition_type(
+            &fedora_boot,
+            None,
+            false,
+        ));
+        assert!(!linux_mount_is_storage_candidate_with_partition_type(
             &mounted_esp,
             None,
+            false,
         ));
         assert!(!linux_mount_is_storage_candidate_with_partition_type(
             &auto_mounted_esp,
             Some("c12a7328-f81f-11d2-ba4b-00a0c93ec93b"),
+            false,
         ));
         assert!(!linux_mount_is_storage_candidate_with_partition_type(
             &ubuntu_firmware,
             None,
+            false,
         ));
         assert!(linux_mount_is_storage_candidate_with_partition_type(
             &usb,
             Some("0x0c"),
+            false,
+        ));
+        assert!(linux_mount_is_storage_candidate_with_partition_type(
+            &fedora_boot,
+            None,
+            true,
+        ));
+        assert!(linux_mount_is_storage_candidate_with_partition_type(
+            &auto_mounted_esp,
+            Some("c12a7328-f81f-11d2-ba4b-00a0c93ec93b"),
+            true,
         ));
     }
 

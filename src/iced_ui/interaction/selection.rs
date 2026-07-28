@@ -240,6 +240,9 @@ impl BExplorerIced {
         permanent: bool,
     ) -> Task<Message> {
         self.focus_pane(pane);
+        if self.is_trash_pane(pane) {
+            return self.request_trash_selection_purge(pane);
+        }
         self.context_delete(pane, ContextTarget::Background, permanent)
     }
 }

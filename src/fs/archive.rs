@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crc32fast::Hasher;
 use flate2::Compression;
-use flate2::read::DeflateDecoder;
+use flate2::read::{DeflateDecoder, MultiGzDecoder};
 use flate2::write::DeflateEncoder;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -602,7 +602,7 @@ fn run_archive_helper(request_path: &Path) -> Result<()> {
             if is_zip(&job.archive_path) && !job.has_password() {
                 extract_zip_archive(&job.archive_path, &destination, &cancel_flag)
             } else {
-                extract_with_7zip(
+                extract_layered_with_7zip(
                     &job.archive_path,
                     &destination,
                     job.password.as_deref(),
@@ -615,7 +615,12 @@ fn run_archive_helper(request_path: &Path) -> Result<()> {
 
 fn run_archive_list_helper(archive_path: &Path) -> Result<()> {
     let cancel_flag = AtomicU32::new(0);
-    run_7zip_list_to_stdout(archive_path, &cancel_flag)
+    if is_gzip_compressed_tar(archive_path) {
+        let materialized = materialize_gzip_compressed_tar(archive_path, &cancel_flag)?;
+        run_7zip_list_to_stdout(materialized.archive_path(), &cancel_flag)
+    } else {
+        run_7zip_list_to_stdout(archive_path, &cancel_flag)
+    }
 }
 
 fn cleanup_partial_archive_destination(job: &ArchiveJob) {
@@ -697,7 +702,7 @@ pub fn extract(archive: &Path, mode: ExtractMode) -> Result<PathBuf> {
     if is_zip(archive) {
         extract_zip_archive(archive, &destination, &dummy_cancel)?;
     } else {
-        extract_with_7zip(archive, &destination, None, &dummy_cancel)?;
+        extract_layered_with_7zip(archive, &destination, None, &dummy_cancel)?;
     }
 
     Ok(destination)
@@ -734,12 +739,28 @@ pub fn extract_virtual_paths_to_destination(
     let cancel_flag = AtomicU32::new(0);
     let mut extracted_items = 0;
     for (archive_path, internal_paths) in grouped {
-        let selection = archive_selection_entries(&archive_path, &internal_paths)?;
-        if selection.extract_entries.is_empty() || selection.output_roots.is_empty() {
-            continue;
+        if is_gzip_compressed_tar(&archive_path) {
+            let materialized = materialize_gzip_compressed_tar(&archive_path, &cancel_flag)?;
+            let selection =
+                archive_selection_entries(materialized.archive_path(), &internal_paths)?;
+            if selection.extract_entries.is_empty() || selection.output_roots.is_empty() {
+                continue;
+            }
+            extracted_items += selection.output_roots.len();
+            extract_selected_with_7zip(
+                materialized.archive_path(),
+                &selection,
+                destination,
+                &cancel_flag,
+            )?;
+        } else {
+            let selection = archive_selection_entries(&archive_path, &internal_paths)?;
+            if selection.extract_entries.is_empty() || selection.output_roots.is_empty() {
+                continue;
+            }
+            extracted_items += selection.output_roots.len();
+            extract_selected_with_7zip(&archive_path, &selection, destination, &cancel_flag)?;
         }
-        extracted_items += selection.output_roots.len();
-        extract_selected_with_7zip(&archive_path, &selection, destination, &cancel_flag)?;
     }
 
     Ok(extracted_items)
@@ -767,7 +788,7 @@ pub fn extract_with_progress(
         let mut fallback = ArchiveProgressEmitter::new(tx.clone(), total, "Extract");
         fallback.emit(&display_name, true);
         let _progress_registration = register_progress_callback(tx);
-        let result = extract_with_7zip(archive, &destination, password, cancel_flag);
+        let result = extract_layered_with_7zip(archive, &destination, password, cancel_flag);
         if result.is_ok() {
             fallback.finish(&display_name);
         }
@@ -863,6 +884,80 @@ fn create_temp_extract_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+struct MaterializedTarArchive {
+    temp_dir: PathBuf,
+    archive_path: PathBuf,
+}
+
+impl MaterializedTarArchive {
+    fn archive_path(&self) -> &Path {
+        &self.archive_path
+    }
+}
+
+impl Drop for MaterializedTarArchive {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.temp_dir)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            crate::utils::log::error(format!(
+                "Could not clean temporary TAR folder {}: {error}",
+                self.temp_dir.display()
+            ));
+        }
+    }
+}
+
+fn materialize_gzip_compressed_tar(
+    archive: &Path,
+    cancel_flag: &AtomicU32,
+) -> Result<MaterializedTarArchive> {
+    check_archive_cancelled(cancel_flag)?;
+
+    let temp_dir = create_temp_extract_dir()?;
+    let materialized = MaterializedTarArchive {
+        archive_path: temp_dir.join("payload.tar"),
+        temp_dir,
+    };
+    let source = BufReader::new(File::open(archive)?);
+    let mut decoder = MultiGzDecoder::new(source);
+    let mut output = BufWriter::new(File::create(materialized.archive_path())?);
+    let mut buffer = [0_u8; 128 * 1024];
+
+    loop {
+        check_archive_cancelled(cancel_flag)?;
+        let read = decoder.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..read])?;
+    }
+    output.flush()?;
+    drop(output);
+    check_archive_cancelled(cancel_flag)?;
+
+    Ok(materialized)
+}
+
+fn extract_layered_with_7zip(
+    archive: &Path,
+    destination: &Path,
+    password: Option<&str>,
+    cancel_flag: &AtomicU32,
+) -> Result<()> {
+    if is_gzip_compressed_tar(archive) {
+        let materialized = materialize_gzip_compressed_tar(archive, cancel_flag)?;
+        extract_with_7zip(
+            materialized.archive_path(),
+            destination,
+            password,
+            cancel_flag,
+        )
+    } else {
+        extract_with_7zip(archive, destination, password, cancel_flag)
+    }
+}
+
 fn extract_destination(archive: &Path, mode: ExtractMode) -> Result<PathBuf> {
     let parent = archive
         .parent()
@@ -871,9 +966,7 @@ fn extract_destination(archive: &Path, mode: ExtractMode) -> Result<PathBuf> {
     match mode {
         ExtractMode::Here => Ok(parent.to_path_buf()),
         ExtractMode::ToNamedFolder => {
-            let stem = archive
-                .file_stem()
-                .and_then(|name| name.to_str())
+            let stem = archive_extract_stem(archive)
                 .filter(|name| !name.trim().is_empty())
                 .unwrap_or("Extracted");
             Ok(unique_path(&parent.join(stem), true))
@@ -905,6 +998,19 @@ fn archive_name(path: &Path, is_dir: bool) -> Result<String> {
         name.push('/');
     }
     Ok(name)
+}
+
+pub(crate) fn normalize_archive_item_name(name: &str) -> String {
+    let mut normalized = name.replace('\\', "/");
+    while let Some(without_current_dir) = normalized.strip_prefix("./") {
+        normalized = without_current_dir.to_string();
+    }
+    let normalized = normalized.trim_matches('/');
+    if normalized == "." {
+        String::new()
+    } else {
+        normalized.to_string()
+    }
 }
 
 fn safe_output_path(destination: &Path, name: &str) -> Result<PathBuf> {
@@ -1018,9 +1124,29 @@ fn is_zip(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
 }
 
+fn is_gzip_compressed_tar(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".tar.gz") || lower.ends_with(".tar.gzip") || lower.ends_with(".tgz")
+}
+
+fn archive_extract_stem(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?;
+    let lower = name.to_ascii_lowercase();
+    for suffix in [".tar.gzip", ".tar.gz", ".tgz"] {
+        if lower.ends_with(suffix) {
+            return name.get(..name.len().saturating_sub(suffix.len()));
+        }
+    }
+    path.file_stem()?.to_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::write::GzEncoder;
     use std::io::BufWriter;
     use std::sync::mpsc;
     use std::thread;
@@ -1058,6 +1184,52 @@ mod tests {
             remaining -= len;
         }
         writer.flush().expect("flush pattern file");
+    }
+
+    fn write_tar_octal(field: &mut [u8], value: u64) {
+        field.fill(b'0');
+        let value = format!("{value:o}");
+        let start = field
+            .len()
+            .checked_sub(value.len() + 1)
+            .expect("TAR value should fit its field");
+        field[start..start + value.len()].copy_from_slice(value.as_bytes());
+        field[field.len() - 1] = 0;
+    }
+
+    fn append_tar_file<W: Write>(writer: &mut W, name: &str, contents: &[u8]) {
+        assert!(name.len() <= 100, "test TAR path should fit the name field");
+        let mut header = [0_u8; 512];
+        header[..name.len()].copy_from_slice(name.as_bytes());
+        write_tar_octal(&mut header[100..108], 0o644);
+        write_tar_octal(&mut header[108..116], 0);
+        write_tar_octal(&mut header[116..124], 0);
+        write_tar_octal(&mut header[124..136], contents.len() as u64);
+        write_tar_octal(&mut header[136..148], 0);
+        header[148..156].fill(b' ');
+        header[156] = b'0';
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        let checksum = header.iter().map(|byte| u64::from(*byte)).sum::<u64>();
+        let checksum = format!("{checksum:06o}\0 ");
+        header[148..156].copy_from_slice(checksum.as_bytes());
+
+        writer.write_all(&header).expect("write TAR header");
+        writer.write_all(contents).expect("write TAR contents");
+        let padding = (512 - contents.len() % 512) % 512;
+        writer
+            .write_all(&vec![0_u8; padding])
+            .expect("write TAR padding");
+    }
+
+    fn write_tar_gzip_fixture(path: &Path) {
+        let file = File::create(path).expect("create TAR.GZ fixture");
+        let mut gzip = GzEncoder::new(file, Compression::default());
+        append_tar_file(&mut gzip, "hello.txt", b"hello from tar gzip");
+        append_tar_file(&mut gzip, "nested/deep.txt", b"nested tar gzip");
+        gzip.write_all(&[0_u8; 1024])
+            .expect("write TAR end markers");
+        gzip.finish().expect("finish TAR.GZ fixture");
     }
 
     #[test]
@@ -1158,6 +1330,79 @@ Folder = -
         assert!(!entries[1].is_dir);
         assert_eq!(entries[1].size, Some(42));
         assert_eq!(entries[1].pack_size, Some(21));
+    }
+
+    #[test]
+    fn parses_single_gzip_payload_without_attribute_fields() {
+        let output = r#"
+Path = payload.tar.gz
+Type = gzip
+Headers Size = 10
+
+----------
+Path = payload.tar
+Size = 4096
+Packed Size = 512
+Modified =
+CRC = 12345678
+"#;
+
+        let entries = parse_7z_slt_entries(output);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "payload.tar");
+        assert!(!entries[0].is_dir);
+        assert_eq!(entries[0].size, Some(4096));
+        assert_eq!(entries[0].pack_size, Some(512));
+    }
+
+    #[test]
+    fn recognizes_and_names_gzip_compressed_tar_archives() {
+        for name in ["payload.tar.gz", "payload.TAR.GZIP", "payload.tgz"] {
+            let path = Path::new(name);
+            assert!(is_gzip_compressed_tar(path), "{name} should be layered");
+            assert_eq!(archive_extract_stem(path), Some("payload"));
+        }
+        assert!(!is_gzip_compressed_tar(Path::new("payload.gz")));
+        assert!(!is_gzip_compressed_tar(Path::new("payload.tar")));
+    }
+
+    #[test]
+    fn normalizes_tar_current_directory_prefixes() {
+        assert_eq!(normalize_archive_item_name("."), "");
+        assert_eq!(normalize_archive_item_name("./"), "");
+        assert_eq!(
+            normalize_archive_item_name("./nested/./file.txt"),
+            "nested/./file.txt"
+        );
+        assert_eq!(
+            normalize_archive_item_name(r".\nested\file.txt"),
+            "nested/file.txt"
+        );
+    }
+
+    #[test]
+    fn extracts_tar_gzip_contents_without_leaving_the_intermediate_tar() {
+        let root = temp_test_dir("tar-gzip");
+        let archive = root.join("Payload.tar.gz");
+        write_tar_gzip_fixture(&archive);
+
+        let extracted =
+            extract(&archive, ExtractMode::ToNamedFolder).expect("extract TAR.GZ archive");
+        assert_eq!(extracted, root.join("Payload"));
+        assert_eq!(
+            fs::read(extracted.join("hello.txt")).expect("read root TAR entry"),
+            b"hello from tar gzip"
+        );
+        assert_eq!(
+            fs::read(extracted.join("nested").join("deep.txt")).expect("read nested TAR entry"),
+            b"nested tar gzip"
+        );
+        assert!(
+            !extracted.join("Payload.tar").exists(),
+            "the intermediate TAR should not be exposed"
+        );
+
+        fs::remove_dir_all(root).expect("cleanup temp test dir");
     }
 
     #[test]

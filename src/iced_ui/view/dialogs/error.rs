@@ -7,13 +7,17 @@ impl BExplorerIced {
             return Space::new().into();
         };
         let font_size = self.font_size();
+        let surface_width = self.modal_text_surface_width(500.0);
+        let error_icon_size = self
+            .ui_metric(32.0)
+            .max(ui_text_line_height(font_size + 4.0));
         let error_color = Color::from_rgb8(210, 76, 76);
         let panel = column![
             row![
                 container(text("!").size(font_size + 4.0).color(Color::WHITE),)
-                    .width(32)
-                    .height(32)
-                    .center(32)
+                    .width(error_icon_size)
+                    .height(error_icon_size)
+                    .center(error_icon_size)
                     .style(move |_| {
                         container::Style::default()
                             .background(error_color)
@@ -23,7 +27,13 @@ impl BExplorerIced {
                     .size(font_size + 2.0)
                     .color(palette.text)
                     .width(Length::Fill),
-                icon_button("x", Message::DismissErrorDialog, palette, false),
+                icon_button(
+                    "x",
+                    Message::DismissErrorDialog,
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -41,7 +51,7 @@ impl BExplorerIced {
         ]
         .spacing(18)
         .padding(18);
-        let surface = container(panel).width(500).style(move |_| {
+        let surface = container(panel).width(surface_width).style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
                 .border(border::rounded(8).color(palette.strong_border).width(1))
@@ -51,8 +61,12 @@ impl BExplorerIced {
                     blur_radius: 24.0,
                 })
         });
-        let surface =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), surface.into(), 500.0, 270.0);
+        let surface = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            surface.into(),
+            surface_width,
+            270.0,
+        );
         container(surface)
             .width(Length::Fill)
             .height(Length::Fill)

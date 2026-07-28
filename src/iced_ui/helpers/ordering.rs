@@ -257,6 +257,14 @@ pub(in crate::iced_ui) fn visual_min_cell_width(mode: ViewMode) -> f32 {
     }
 }
 
+pub(in crate::iced_ui) fn visual_cell_width_for_font(mode: ViewMode, font_size: f32) -> f32 {
+    adaptive_text_surface_width(visual_view_metrics(mode).cell_width, font_size)
+}
+
+pub(in crate::iced_ui) fn visual_min_cell_width_for_font(mode: ViewMode, font_size: f32) -> f32 {
+    adaptive_text_surface_width(visual_min_cell_width(mode), font_size)
+}
+
 pub(in crate::iced_ui) fn visual_label_height(font_size: f32) -> f32 {
     (font_size * 2.55).ceil()
 }
@@ -381,12 +389,28 @@ pub(in crate::iced_ui) fn estimated_column_width(
     (chars as f32 * estimated_char_width + extra).clamp(min_width, max_width)
 }
 
-pub(in crate::iced_ui) fn clamp_detail_column_width(column: TableColumn, width: f32) -> f32 {
+pub(in crate::iced_ui) fn clamp_detail_column_width(
+    column: TableColumn,
+    width: f32,
+    font_size: f32,
+) -> f32 {
     match column {
-        TableColumn::Name => width.clamp(DETAIL_NAME_MIN_WIDTH, DETAIL_NAME_MAX_WIDTH),
-        TableColumn::Type => width.clamp(DETAIL_TYPE_MIN_WIDTH, DETAIL_TYPE_MAX_WIDTH),
-        TableColumn::Size => width.clamp(DETAIL_SIZE_MIN_WIDTH, DETAIL_SIZE_MAX_WIDTH),
-        TableColumn::Modified => width.clamp(DETAIL_DATE_MIN_WIDTH, DETAIL_DATE_MAX_WIDTH),
+        TableColumn::Name => width.clamp(
+            scaled_ui_metric(DETAIL_NAME_MIN_WIDTH, font_size),
+            scaled_ui_metric(DETAIL_NAME_MAX_WIDTH, font_size),
+        ),
+        TableColumn::Type => width.clamp(
+            scaled_ui_metric(DETAIL_TYPE_MIN_WIDTH, font_size),
+            scaled_ui_metric(DETAIL_TYPE_MAX_WIDTH, font_size),
+        ),
+        TableColumn::Size => width.clamp(
+            scaled_ui_metric(DETAIL_SIZE_MIN_WIDTH, font_size),
+            scaled_ui_metric(DETAIL_SIZE_MAX_WIDTH, font_size),
+        ),
+        TableColumn::Modified => width.clamp(
+            scaled_ui_metric(DETAIL_DATE_MIN_WIDTH, font_size),
+            scaled_ui_metric(DETAIL_DATE_MAX_WIDTH, font_size),
+        ),
         TableColumn::Created => width,
     }
 }

@@ -193,6 +193,9 @@ enum Message {
     CopySelection(PaneId),
     CutSelection(PaneId),
     DeleteSelected(PaneId),
+    RestoreTrashSelected(PaneId),
+    DeleteTrashSelected(PaneId),
+    EmptyTrash(PaneId),
     OpenArchiveDialog(PaneId),
     ArchiveNameChanged(String),
     SetArchiveFormat(ArchiveFormat),
@@ -219,6 +222,16 @@ enum Message {
     DismissErrorDialog,
     CancelArchive(u64),
     TrashFinished(PaneId, Vec<PathBuf>, Result<operations::TrashDeleteOutcome, String>),
+    TrashRestoreFinished(
+        PaneId,
+        Vec<PathBuf>,
+        Result<trash_fs::TrashMutationOutcome, String>,
+    ),
+    TrashPurgeFinished(
+        PaneId,
+        Vec<PathBuf>,
+        Result<trash_fs::TrashMutationOutcome, String>,
+    ),
     UndoLastAction,
     UndoFinished(UndoAction, Result<usize, String>),
     VirtualArchiveExtractFinished(PaneId, PaneId, PathBuf, Result<usize, String>),
@@ -250,7 +263,12 @@ enum Message {
     FileDragSidebarTargetExit(PathBuf),
     OpenBackgroundContext(PaneId),
     OpenEntryContext(PaneId, usize),
-    ContextMenuDataResolved(ContextMenuState, bool, Vec<shell::OpenWithApplication>),
+    ContextMenuDataResolved(
+        ContextMenuState,
+        bool,
+        Vec<shell::OpenWithApplication>,
+        Vec<shell::NativeSendToTarget>,
+    ),
     ContextBackdropCaptured(ContextMenuState, window::Screenshot),
     ContextBackdropPrepared(ContextMenuState, Option<iced_image::Handle>),
     ContextSubmenuBackdropCaptured(u64, ContextSubmenuKind, window::Screenshot),
@@ -265,6 +283,11 @@ enum Message {
     ContextOpenWithSubmenuEnter,
     ContextOpenWithSubmenuExit,
     CloseContextOpenWithSubmenuIfUnhovered,
+    ContextSendToParentEnter,
+    ContextSendToParentExit,
+    ContextSendToSubmenuEnter,
+    ContextSendToSubmenuExit,
+    CloseContextSendToSubmenuIfUnhovered,
     ContextExtractParentEnter,
     ContextNewParentEnter,
     ContextArchiveParentExit,
@@ -295,6 +318,34 @@ enum Message {
     DiskImageMounted(PaneId, PathBuf, Result<PathBuf, String>),
     DriveEjected(PaneId, PathBuf, Result<(), String>),
     OpenWithChooserFinished(PaneId, Result<(), String>),
+    SendToFinished(PaneId, String, Result<(), String>),
+    DuplicateCleanupWindowOpened(window::Id),
+    ToggleDuplicateSelection(PathBuf, bool),
+    SelectAllDuplicateCandidates(bool),
+    DuplicatePointerMoved(Point),
+    DuplicateResizePointerMoved(window::Id, Point),
+    DuplicateResizeReleased(window::Id),
+    DuplicateRowSelected(PathBuf),
+    OpenDuplicateRowContext(PathBuf),
+    CloseDuplicateRowContext,
+    OpenDuplicateFileLocation,
+    DuplicateTableScrolled {
+        offset_x: f32,
+        relative_y: f32,
+    },
+    StartDuplicateColumnResize(usize),
+    StopDuplicateColumnResize,
+    RequestDuplicateDelete,
+    CancelDuplicateDelete,
+    ConfirmDuplicateDelete,
+    DuplicateDeleteFinished(Vec<PathBuf>, Result<operations::TrashDeleteOutcome, String>),
+    CancelDuplicateScan,
+    CloseDuplicateCleanup,
+    DuplicateWindowDrag,
+    DuplicateWindowMinimize,
+    DuplicateWindowMaximize,
+    DuplicateWindowMaximizedState(window::Id, bool),
+    DuplicateWindowResize(window::Direction),
     CancelDefenderScan,
     CloseDefenderPanel,
     RemediateDefenderThreats,
@@ -363,6 +414,7 @@ enum Message {
     VibrancyApplied(bool),
     ToggleShowExtensions,
     ToggleShowHidden,
+    ToggleShowHiddenSystemDrives,
     WindowDrag,
     WindowResize(window::Direction),
     WindowMinimize,
@@ -445,6 +497,33 @@ struct ContextMenuState {
     submenu_backdrop_kind: Option<ContextSubmenuKind>,
     paste_available: bool,
     open_with_applications: Vec<shell::OpenWithApplication>,
+    send_to_targets: Vec<ContextSendToTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ContextSendToTarget {
+    Storage {
+        label: String,
+        destination: PathBuf,
+        icon: &'static str,
+    },
+    Native(shell::NativeSendToTarget),
+}
+
+impl ContextSendToTarget {
+    fn label(&self) -> &str {
+        match self {
+            Self::Storage { label, .. } => label,
+            Self::Native(target) => target.label(),
+        }
+    }
+
+    fn icon(&self) -> &'static str {
+        match self {
+            Self::Storage { icon, .. } => icon,
+            Self::Native(target) => target.icon(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -479,6 +558,9 @@ struct SidebarSectionDragState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ContextCommand {
+    RestoreTrash,
+    DeleteTrash,
+    EmptyTrash,
     Paste,
     Copy,
     Cut,
@@ -492,6 +574,8 @@ enum ContextCommand {
     OpenWith,
     OpenWithMenu,
     OpenWithApplication(usize),
+    SendToMenu,
+    SendToTarget(usize),
     OpenFileLocation,
     CompressMenu,
     ExtractMenu,
@@ -505,6 +589,7 @@ enum ContextCommand {
     EjectDrive,
     FormatDrive,
     ScanWithDefender,
+    DuplicateCleanup,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -519,6 +604,52 @@ enum ContextSubmenuKind {
     Extract,
     New,
     OpenWith,
+    SendTo,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DuplicateCleanupPhase {
+    Counting,
+    Scanning,
+    Complete,
+    Cancelled,
+    Failed,
+}
+
+struct DuplicateCleanupState {
+    pane: PaneId,
+    root: PathBuf,
+    entries: Vec<DuplicateFile>,
+    extension_counts: HashMap<String, usize>,
+    render_limit: usize,
+    selected: HashSet<PathBuf>,
+    all_candidates_selected: bool,
+    highlighted: Option<PathBuf>,
+    pointer: Point,
+    context_path: Option<PathBuf>,
+    context_position: Point,
+    window_size: Size,
+    window_maximized: bool,
+    column_widths: [f32; 6],
+    column_resize: Option<DuplicateColumnResize>,
+    scanned: usize,
+    total: usize,
+    files_found: usize,
+    skipped: usize,
+    current_path: Option<PathBuf>,
+    phase: DuplicateCleanupPhase,
+    error: Option<String>,
+    confirm_delete: bool,
+    deleting: bool,
+    receiver: Receiver<DuplicateScanEvent>,
+    cancel: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Copy)]
+struct DuplicateColumnResize {
+    column: usize,
+    start_x: f32,
+    start_width: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -550,6 +681,7 @@ enum KeyboardMenu {
     New(PaneId),
     Context,
     ContextOpenWith,
+    ContextSendTo,
     ContextArchive,
     ContextExtract,
     ContextNew,
@@ -599,6 +731,7 @@ struct DetailColumnWidths {
     type_label: f32,
     size: f32,
     modified: f32,
+    created: f32,
 }
 
 impl DetailColumnWidths {
@@ -608,12 +741,12 @@ impl DetailColumnWidths {
             TableColumn::Type => self.type_label,
             TableColumn::Size => self.size,
             TableColumn::Modified => self.modified,
-            TableColumn::Created => DETAIL_DATE_MIN_WIDTH,
+            TableColumn::Created => self.created,
         }
     }
 
     fn total_width(self) -> f32 {
-        self.name + self.type_label + self.size + self.modified + DETAIL_DATE_MIN_WIDTH
+        self.name + self.type_label + self.size + self.modified + self.created
     }
 }
 
@@ -643,6 +776,23 @@ impl ColumnWidthOverrides {
             TableColumn::Size => self.size = Some(width),
             TableColumn::Modified => self.modified = Some(width),
             TableColumn::Created => {}
+        }
+    }
+
+    fn adjust_for_density_change(&mut self, delta: f32) {
+        if delta.abs() <= f32::EPSILON {
+            return;
+        }
+        for width in [
+            &mut self.name,
+            &mut self.type_label,
+            &mut self.size,
+            &mut self.modified,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *width = (*width + delta).max(1.0);
         }
     }
 }
@@ -683,6 +833,14 @@ struct RenameState {
 struct PendingPermanentDelete {
     pane: PaneId,
     paths: Vec<PathBuf>,
+    target: PermanentDeleteTarget,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermanentDeleteTarget {
+    Filesystem,
+    TrashItems,
+    EmptyTrash,
 }
 
 /// A transfer waits here until the user chooses how all detected top-level
@@ -726,7 +884,15 @@ struct ActiveDeleteState {
     id: u64,
     pane: PaneId,
     paths: Vec<PathBuf>,
-    permanent: bool,
+    kind: ActiveDeleteKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveDeleteKind {
+    MoveToTrash,
+    PermanentDelete,
+    RestoreTrash,
+    PurgeTrash,
 }
 
 #[derive(Clone, Debug)]
@@ -1032,6 +1198,8 @@ enum TransferDisplayKind {
     Move,
     Trash,
     PermanentDelete,
+    RestoreTrash,
+    PurgeTrash,
 }
 
 impl TransferDisplayState {

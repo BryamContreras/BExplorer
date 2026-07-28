@@ -25,6 +25,17 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.4" date="2026-07-27">
+      <description>
+        <p>Cross-platform storage, media, background operations, and interface refinement update.</p>
+        <ul>
+          <li>Added native trash, duplicate cleanup, persistent operations, and improved transfer progress.</li>
+          <li>Added shared image and video thumbnail caching on Windows and Linux.</li>
+          <li>Improved Linux MTP, removable storage, Send to, TAR.GZ, and modern and legacy KWin blur support.</li>
+          <li>Improved scalable layouts, properties, tabs, split panes, icons, menus, and accessibility.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.3" date="2026-07-24">
       <description>
         <p>Compact-image, rename, scrolling, and release-packaging update.</p>

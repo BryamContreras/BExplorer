@@ -32,6 +32,15 @@ impl BExplorerIced {
             self.pane_mut(pane).status = "No selected items".into();
             return Task::none();
         }
+        if paths.iter().any(|path| explorer::is_trash_item_path(path)) {
+            self.pane_mut(pane).status = self
+                .localized(
+                    "Copiar y cortar no están disponibles en la papelera.",
+                    "Copy and cut are not available in the Recycle Bin.",
+                )
+                .into();
+            return Task::none();
+        }
         let includes_drive = self
             .context_entry(pane, target)
             .is_some_and(|entry| entry.kind == EntryKind::Drive)
@@ -527,6 +536,7 @@ impl BExplorerIced {
                                 job: active.job.clone(),
                                 error,
                             });
+                            tasks.push(self.ensure_main_window_for_attention_task());
                         } else {
                             tasks.push(self.report_error(active.pane, error));
                         }
@@ -595,20 +605,28 @@ impl BExplorerIced {
         for deletion in self.active_deletes.values() {
             let total_files = deletion.paths.len();
             let current_name = if total_files == 1 {
-                deletion.paths[0]
-                    .file_name()
-                    .and_then(|name| name.to_str())
+                self.pane(deletion.pane)
+                    .entries
+                    .iter()
+                    .find(|entry| entry.path == deletion.paths[0])
+                    .map(|entry| entry.name.clone())
+                    .or_else(|| {
+                        deletion.paths[0]
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .map(str::to_owned)
+                    })
                     .unwrap_or_default()
-                    .to_owned()
             } else {
                 format!("{total_files} elementos")
             };
             items.push(TransferDisplayState {
                 id: deletion.id,
-                kind: if deletion.permanent {
-                    TransferDisplayKind::PermanentDelete
-                } else {
-                    TransferDisplayKind::Trash
+                kind: match deletion.kind {
+                    ActiveDeleteKind::MoveToTrash => TransferDisplayKind::Trash,
+                    ActiveDeleteKind::PermanentDelete => TransferDisplayKind::PermanentDelete,
+                    ActiveDeleteKind::RestoreTrash => TransferDisplayKind::RestoreTrash,
+                    ActiveDeleteKind::PurgeTrash => TransferDisplayKind::PurgeTrash,
                 },
                 state: TransferState::Copying,
                 current_name,
@@ -637,7 +655,7 @@ impl BExplorerIced {
     }
 
     pub(super) fn transfer_window_size(&self) -> Size {
-        transfer_window_size_for_item_count(self.transfer_items().len())
+        transfer_window_size_for_item_count(self.transfer_items().len(), self.font_size())
     }
 
     pub(super) fn transfer_in_progress_for(&self, pane: PaneId) -> bool {
@@ -723,6 +741,15 @@ impl BExplorerIced {
         let Some(entry) = self.context_entry(pane, target) else {
             return Task::none();
         };
+        if explorer::is_trash_item_path(&entry.path) {
+            self.pane_mut(pane).status = self
+                .localized(
+                    "Restaura el elemento para poder abrirlo.",
+                    "Restore the item before opening it.",
+                )
+                .into();
+            return Task::none();
+        }
         if entry.kind == EntryKind::Symlink {
             return self.report_error(
                 pane,
@@ -1061,12 +1088,18 @@ impl BExplorerIced {
             return Task::none();
         };
 
-        if !self.begin_file_operation(pending.pane, "Deleting permanently...") {
+        let operation_status = match pending.target {
+            PermanentDeleteTarget::Filesystem => "Deleting permanently...",
+            PermanentDeleteTarget::TrashItems => "Deleting from Recycle Bin...",
+            PermanentDeleteTarget::EmptyTrash => "Emptying Recycle Bin...",
+        };
+        if !self.begin_file_operation(pending.pane, operation_status) {
             self.permanent_delete_dialog = Some(pending);
             return Task::none();
         }
         let pane = pending.pane;
         let paths = pending.paths;
+        let target = pending.target;
         self.next_transfer_id = self.next_transfer_id.saturating_add(1);
         let transfer_id = self.next_transfer_id;
         self.active_deletes.insert(
@@ -1075,15 +1108,137 @@ impl BExplorerIced {
                 id: transfer_id,
                 pane,
                 paths: paths.clone(),
-                permanent: true,
+                kind: match target {
+                    PermanentDeleteTarget::Filesystem => ActiveDeleteKind::PermanentDelete,
+                    PermanentDeleteTarget::TrashItems | PermanentDeleteTarget::EmptyTrash => {
+                        ActiveDeleteKind::PurgeTrash
+                    }
+                },
             },
         );
         let worker_paths = paths.clone();
-        let delete_task = Task::perform(
-            run_blocking_file_operation(move || operations::delete_permanently(&worker_paths)),
-            move |result| Message::PermanentDeleteFinished(pane, paths, result),
-        );
+        let delete_task = match target {
+            PermanentDeleteTarget::Filesystem => Task::perform(
+                run_blocking_file_operation(move || operations::delete_permanently(&worker_paths)),
+                move |result| Message::PermanentDeleteFinished(pane, paths, result),
+            ),
+            PermanentDeleteTarget::TrashItems => Task::perform(
+                run_blocking_file_operation(move || trash_fs::purge_items(&worker_paths)),
+                move |result| Message::TrashPurgeFinished(pane, paths, result),
+            ),
+            PermanentDeleteTarget::EmptyTrash => Task::perform(
+                run_blocking_file_operation(trash_fs::empty),
+                move |result| Message::TrashPurgeFinished(pane, paths, result),
+            ),
+        };
         Task::batch([self.ensure_transfer_window_task(), delete_task])
+    }
+
+    pub(super) fn restore_trash_paths(
+        &mut self,
+        pane: PaneId,
+        paths: Vec<PathBuf>,
+    ) -> Task<Message> {
+        if paths.is_empty() {
+            self.pane_mut(pane).status = self
+                .localized(
+                    "Selecciona uno o más elementos para restaurar.",
+                    "Select one or more items to restore.",
+                )
+                .into();
+            return Task::none();
+        }
+        if paths.iter().any(|path| !explorer::is_trash_item_path(path)) {
+            return self.report_error(
+                pane,
+                self.localized(
+                    "La selección contiene elementos que no pertenecen a la papelera.",
+                    "The selection contains items that are not in the Recycle Bin.",
+                ),
+            );
+        }
+        if !self.begin_file_operation(pane, "Restoring from Recycle Bin...") {
+            return Task::none();
+        }
+
+        self.last_undo_action = None;
+        self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        let transfer_id = self.next_transfer_id;
+        self.active_deletes.insert(
+            transfer_id,
+            ActiveDeleteState {
+                id: transfer_id,
+                pane,
+                paths: paths.clone(),
+                kind: ActiveDeleteKind::RestoreTrash,
+            },
+        );
+        let worker_paths = paths.clone();
+        let restore_task = Task::perform(
+            run_blocking_file_operation(move || trash_fs::restore_items(&worker_paths)),
+            move |result| Message::TrashRestoreFinished(pane, paths, result),
+        );
+        Task::batch([self.ensure_transfer_window_task(), restore_task])
+    }
+
+    pub(super) fn restore_trash_selection(&mut self, pane: PaneId) -> Task<Message> {
+        let paths = self.pane(pane).selected.iter().cloned().collect();
+        self.restore_trash_paths(pane, paths)
+    }
+
+    pub(super) fn request_trash_purge(
+        &mut self,
+        pane: PaneId,
+        paths: Vec<PathBuf>,
+        target: PermanentDeleteTarget,
+    ) -> Task<Message> {
+        if paths.is_empty() {
+            self.pane_mut(pane).status = match target {
+                PermanentDeleteTarget::TrashItems => self
+                    .localized(
+                        "Selecciona uno o más elementos para eliminar.",
+                        "Select one or more items to delete.",
+                    )
+                    .into(),
+                PermanentDeleteTarget::EmptyTrash | PermanentDeleteTarget::Filesystem => self
+                    .localized("La papelera está vacía.", "The Recycle Bin is empty.")
+                    .into(),
+            };
+            return Task::none();
+        }
+        if paths.iter().any(|path| !explorer::is_trash_item_path(path)) {
+            return self.report_error(
+                pane,
+                self.localized(
+                    "La selección contiene elementos que no pertenecen a la papelera.",
+                    "The selection contains items that are not in the Recycle Bin.",
+                ),
+            );
+        }
+        self.last_undo_action = None;
+        self.request_popup_backdrop(PopupBackdropTarget::PermanentDelete(
+            PendingPermanentDelete {
+                pane,
+                paths,
+                target,
+            },
+        ))
+    }
+
+    pub(super) fn request_trash_selection_purge(&mut self, pane: PaneId) -> Task<Message> {
+        let paths = self.pane(pane).selected.iter().cloned().collect();
+        self.request_trash_purge(pane, paths, PermanentDeleteTarget::TrashItems)
+    }
+
+    pub(super) fn request_empty_trash(&mut self, pane: PaneId) -> Task<Message> {
+        let paths = self
+            .pane(pane)
+            .entries
+            .iter()
+            .filter(|entry| explorer::is_trash_item_path(&entry.path))
+            .map(|entry| entry.path.clone())
+            .collect();
+        self.request_trash_purge(pane, paths, PermanentDeleteTarget::EmptyTrash)
     }
 
     pub(super) fn context_begin_rename(
@@ -1142,7 +1297,11 @@ impl BExplorerIced {
         if permanent {
             self.last_undo_action = None;
             return self.request_popup_backdrop(PopupBackdropTarget::PermanentDelete(
-                PendingPermanentDelete { pane, paths },
+                PendingPermanentDelete {
+                    pane,
+                    paths,
+                    target: PermanentDeleteTarget::Filesystem,
+                },
             ));
         }
         if !self.begin_file_operation(pane, "Moving to trash...") {
@@ -1157,7 +1316,7 @@ impl BExplorerIced {
                 id: transfer_id,
                 pane,
                 paths: paths.clone(),
-                permanent: false,
+                kind: ActiveDeleteKind::MoveToTrash,
             },
         );
         let worker_paths = paths.clone();
@@ -1639,7 +1798,7 @@ impl BExplorerIced {
     }
 
     pub(super) fn archive_window_size(&self) -> Size {
-        transfer_window_size_for_item_count(self.archive_items().len())
+        transfer_window_size_for_item_count(self.archive_items().len(), self.font_size())
     }
 
     pub(super) fn cancel_archive(&mut self, id: u64) {
@@ -1666,10 +1825,8 @@ fn parse_allocation_unit_size(value: &str) -> Option<u64> {
     }
     let (number, multiplier) = if let Some(number) = value.strip_suffix("kb") {
         (number.trim(), 1024_u64)
-    } else if let Some(number) = value.strip_suffix("bytes") {
-        (number.trim(), 1_u64)
     } else {
-        return None;
+        (value.strip_suffix("bytes")?.trim(), 1_u64)
     };
     number
         .parse::<u64>()

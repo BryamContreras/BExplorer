@@ -385,7 +385,7 @@ pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome
             not(target_os = "android")
         )
     ))]
-    let previous_ids = trash::os_limited::list()
+    let previous_ids = crate::fs::trash::native_items()
         .unwrap_or_default()
         .into_iter()
         .map(|item| item.id)
@@ -404,7 +404,7 @@ pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome
     ))]
     {
         let originals = paths.iter().cloned().collect::<HashSet<_>>();
-        let undo_records = trash::os_limited::list()
+        let undo_records = crate::fs::trash::native_items()
             .unwrap_or_default()
             .into_iter()
             .filter(|item| !previous_ids.contains(&item.id))
@@ -464,10 +464,7 @@ pub fn restore_from_trash(records: &[TrashUndoRecord]) -> Result<usize> {
             .iter()
             .map(|record| record.id.clone())
             .collect::<HashSet<_>>();
-        let items = trash::os_limited::list()
-            .map_err(|error| {
-                BExplorerError::Operation(format!("No se pudo leer la papelera: {error}"))
-            })?
+        let items = crate::fs::trash::native_items()?
             .into_iter()
             .filter(|item| ids.contains(&item.id))
             .collect::<Vec<_>>();

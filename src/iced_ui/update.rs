@@ -382,6 +382,12 @@ impl BExplorerIced {
                 self.new_menu_open = None;
                 self.context_menu = None;
                 self.context_archive_submenu = false;
+                self.context_open_with_submenu = false;
+                self.context_open_with_parent_hovered = false;
+                self.context_open_with_submenu_hovered = false;
+                self.context_send_to_submenu = false;
+                self.context_send_to_parent_hovered = false;
+                self.context_send_to_submenu_hovered = false;
                 self.context_extract_submenu = false;
                 self.context_new_submenu = false;
                 self.context_archive_parent_hovered = false;
@@ -688,9 +694,12 @@ impl BExplorerIced {
                 }
                 let sidebar_icon_task = path
                     .as_ref()
+                    .filter(|path| !explorer::is_virtual_path(path))
                     .map(|path| self.queue_sidebar_path_icon(path))
                     .unwrap_or_else(Task::none);
-                if let Some(path) = path {
+                if let Some(path) = path
+                    && !explorer::is_virtual_path(&path)
+                {
                     self.config.remember_recent(path);
                     save_config(&self.config);
                 }
@@ -703,7 +712,13 @@ impl BExplorerIced {
                     .tab_for_pane(pane)
                     .path
                     .as_ref()
-                    .map(|path| path_label(Some(path)))
+                    .map(|path| {
+                        if explorer::is_trash_root_path(path) {
+                            self.localized("Papelera", "Recycle Bin").to_owned()
+                        } else {
+                            path_label(Some(path))
+                        }
+                    })
                     .unwrap_or_else(|| self.localized("Este equipo", "This PC").to_owned());
                 let select_end = value.chars().count();
                 self.address_edit = Some(AddressEditState {
@@ -865,6 +880,9 @@ impl BExplorerIced {
             }
             Message::Up(pane) => {
                 let current = self.tab_for_pane(pane).path.clone();
+                if current.as_deref().is_some_and(explorer::is_trash_root_path) {
+                    return self.update(Message::Navigate(pane, None));
+                }
                 let Some(parent) = current.and_then(|path| path.parent().map(Path::to_path_buf))
                 else {
                     return Task::none();
@@ -876,6 +894,15 @@ impl BExplorerIced {
                 let Some(path) = self.tab_for_pane(pane).path.clone() else {
                     return Task::none();
                 };
+                if explorer::is_trash_path(&path) {
+                    self.pane_mut(pane).status = self
+                        .localized(
+                            "La papelera no se puede añadir a favoritos.",
+                            "The Recycle Bin cannot be added to favorites.",
+                        )
+                        .into();
+                    return Task::none();
+                }
 
                 let added = if let Some(index) = self
                     .config
@@ -902,7 +929,7 @@ impl BExplorerIced {
                     // Loading This PC already refreshes the shared storage
                     // result and the sidebar. Starting a second enumeration
                     // here makes refresh unnecessarily slow, especially when
-                    // Windows is probing portable devices.
+                    // the platform is probing portable devices.
                     self.start_load(pane)
                 } else {
                     Task::batch([self.start_load(pane), self.refresh_sidebar_storage()])
@@ -1034,6 +1061,9 @@ impl BExplorerIced {
             }
             Message::CutSelection(pane) => self.context_copy(pane, ContextTarget::Background, true),
             Message::DeleteSelected(pane) => self.delete_selection(pane, false),
+            Message::RestoreTrashSelected(pane) => self.restore_trash_selection(pane),
+            Message::DeleteTrashSelected(pane) => self.request_trash_selection_purge(pane),
+            Message::EmptyTrash(pane) => self.request_empty_trash(pane),
             Message::OpenArchiveDialog(pane) => self.open_archive_dialog(pane),
             Message::ArchiveNameChanged(value) => {
                 if let Some(dialog) = &mut self.archive_dialog {
@@ -1227,7 +1257,7 @@ impl BExplorerIced {
                             });
                         }
                         self.pane_mut(pane).status = format!("Deleted {} item(s)", outcome.count);
-                        self.start_load(pane)
+                        self.refresh_after_trash_change(pane, &[])
                     }
                     Err(error) => {
                         if operations::error_message_is_permission_denied(&error)
@@ -1245,7 +1275,7 @@ impl BExplorerIced {
                                 transfer_id,
                                 error,
                             });
-                            Task::none()
+                            self.ensure_main_window_for_attention_task()
                         } else {
                             let error_task = self.report_error(pane, error);
                             Task::batch([error_task, self.start_load(pane)])
@@ -1254,14 +1284,83 @@ impl BExplorerIced {
                 };
                 Task::batch([completion_task, self.close_transfer_window_if_idle_task()])
             }
+            Message::TrashRestoreFinished(pane, paths, result) => {
+                self.pending_file_operations.remove(&pane);
+                let transfer_id = self
+                    .active_deletes
+                    .iter()
+                    .find(|(_, deletion)| {
+                        deletion.pane == pane
+                            && deletion.paths == paths
+                            && deletion.kind == ActiveDeleteKind::RestoreTrash
+                    })
+                    .map(|(id, _)| *id)
+                    .unwrap_or_default();
+                self.active_deletes.remove(&transfer_id);
+                let completion_task = match result {
+                    Ok(outcome) => {
+                        self.pane_mut(pane).status = if self.is_spanish() {
+                            format!("Restaurados {} elemento(s)", outcome.count)
+                        } else {
+                            format!("Restored {} item(s)", outcome.count)
+                        };
+                        self.refresh_after_trash_change(pane, &outcome.original_paths)
+                    }
+                    Err(error) => {
+                        Task::batch([self.report_error(pane, error), self.start_load(pane)])
+                    }
+                };
+                Task::batch([completion_task, self.close_transfer_window_if_idle_task()])
+            }
+            Message::TrashPurgeFinished(pane, paths, result) => {
+                self.pending_file_operations.remove(&pane);
+                let transfer_id = self
+                    .active_deletes
+                    .iter()
+                    .find(|(_, deletion)| {
+                        deletion.pane == pane
+                            && deletion.paths == paths
+                            && deletion.kind == ActiveDeleteKind::PurgeTrash
+                    })
+                    .map(|(id, _)| *id)
+                    .unwrap_or_default();
+                self.active_deletes.remove(&transfer_id);
+                let completion_task = match result {
+                    Ok(outcome) => {
+                        self.pane_mut(pane).status = if self.is_spanish() {
+                            format!("Eliminados permanentemente {} elemento(s)", outcome.count)
+                        } else {
+                            format!("Permanently deleted {} item(s)", outcome.count)
+                        };
+                        self.refresh_after_trash_change(pane, &[])
+                    }
+                    Err(error) => {
+                        Task::batch([self.report_error(pane, error), self.start_load(pane)])
+                    }
+                };
+                Task::batch([completion_task, self.close_transfer_window_if_idle_task()])
+            }
             Message::UndoLastAction => self.undo_last_action(),
             Message::UndoFinished(action, result) => {
                 let pane = action.pane();
+                let restored_trash_paths = match &action {
+                    UndoAction::Trash { records, .. } => Some(
+                        records
+                            .iter()
+                            .map(|record| record.original_path.clone())
+                            .collect::<Vec<_>>(),
+                    ),
+                    UndoAction::Copy { .. } | UndoAction::Move { .. } => None,
+                };
                 match result {
                     Ok(count) => {
                         self.pane_mut(pane).status = format!("Se deshicieron {count} elemento(s)");
-                        let directories = action.refresh_directories();
-                        self.refresh_panes_for_directories(pane, &directories)
+                        if let Some(paths) = restored_trash_paths {
+                            self.refresh_after_trash_change(pane, &paths)
+                        } else {
+                            let directories = action.refresh_directories();
+                            self.refresh_panes_for_directories(pane, &directories)
+                        }
                     }
                     Err(error) => {
                         let error_task = self.report_error(pane, error);
@@ -1742,18 +1841,38 @@ impl BExplorerIced {
                 let Some(entry) = self.sidebar_storage_entries.get(index) else {
                     return Task::none();
                 };
-                if !entry.drive_kind.is_some_and(DriveKind::is_ejectable) {
+                let has_context_action = entry.drive_kind.is_some_and(DriveKind::is_ejectable)
+                    || entry.drive_kind.is_some_and(DriveKind::is_formatable)
+                    || super::duplicate_cleanup::duplicate_cleanup_available_for_entry(entry);
+                if !has_context_action {
                     return Task::none();
                 }
                 self.request_context_menu(pane, ContextTarget::SidebarDrive(index))
             }
-            Message::ContextMenuDataResolved(mut menu, paste_available, open_with_applications) => {
+            Message::ContextMenuDataResolved(
+                mut menu,
+                paste_available,
+                open_with_applications,
+                native_send_to_targets,
+            ) => {
                 if menu.request_id != self.context_menu_request_id {
                     return Task::none();
                 }
                 menu.paste_available = paste_available;
                 menu.open_with_applications = open_with_applications;
-                self.capture_context_menu_backdrop(menu)
+                menu.send_to_targets.extend(
+                    native_send_to_targets
+                        .into_iter()
+                        .map(ContextSendToTarget::Native),
+                );
+                let send_to_icons = self.queue_send_to_target_icons(&menu.send_to_targets);
+                // Native discovery can add the parent row after the initial
+                // pointer-based placement was calculated. Recompute the
+                // origin so bottom-edge clamping and the blurred backdrop use
+                // the same final menu rectangle.
+                let (x, y) = self.context_menu_window_position(&menu);
+                menu.backdrop_origin = Point::new(x, y);
+                Task::batch([self.capture_context_menu_backdrop(menu), send_to_icons])
             }
             Message::ContextBackdropCaptured(menu, screenshot) => {
                 if menu.request_id != self.context_menu_request_id {
@@ -1764,13 +1883,14 @@ impl BExplorerIced {
                 Task::perform(
                     {
                         let backdrop_height = self.context_menu_height(&menu);
+                        let backdrop_width = context_menu_width(self.font_size());
                         async move {
                             run_blocking_file_operation(move || {
                                 Ok(blurred_screenshot_region(
                                     screenshot,
                                     Rectangle::new(
                                         menu.backdrop_origin,
-                                        Size::new(258.0, backdrop_height),
+                                        Size::new(backdrop_width, backdrop_height),
                                     ),
                                 ))
                             })
@@ -1851,6 +1971,31 @@ impl BExplorerIced {
                     );
                 }
                 if matches!(target, PopupBackdropTarget::TitleMenu) {
+                    let density = self.ui_density();
+                    let menu_width = self.ui_metric(220.0);
+                    let menu_height = 151.0 + density * 4.0;
+                    let submenu_width = self.ui_metric(286.0);
+                    let submenu_labels = [
+                        self.localized("Barra de acciones", "Action bar"),
+                        self.localized("Barra de marcadores", "Bookmarks bar"),
+                        self.localized(
+                            "Menu lateral en pantalla dividida",
+                            "Sidebar in split view",
+                        ),
+                        self.localized(
+                            "Panel de vista previa en pantalla dividida",
+                            "Preview panel in split view",
+                        ),
+                    ];
+                    let submenu_height = adaptive_menu_list_height(
+                        &submenu_labels,
+                        self.font_size(),
+                        submenu_width,
+                        3.0,
+                        7.0,
+                    );
+                    let submenu_origin =
+                        Point::new(menu_width - 2.0, TITLE_HEIGHT + self.ui_metric(41.0));
                     let menu_screenshot = screenshot.clone();
                     return Task::perform(
                         async move {
@@ -1859,14 +2004,14 @@ impl BExplorerIced {
                                     menu_screenshot,
                                     Rectangle::new(
                                         Point::new(0.0, TITLE_HEIGHT),
-                                        Size::new(220.0, 116.0),
+                                        Size::new(menu_width, menu_height),
                                     ),
                                 );
                                 let submenu = blurred_screenshot_region(
                                     screenshot,
                                     Rectangle::new(
-                                        Point::new(218.0, TITLE_HEIGHT + 41.0),
-                                        Size::new(286.0, 151.0),
+                                        submenu_origin,
+                                        Size::new(submenu_width, submenu_height),
                                     ),
                                 );
                                 Ok::<_, BExplorerError>((menu, submenu))
@@ -1879,12 +2024,14 @@ impl BExplorerIced {
                     );
                 }
                 let region_target = target.clone();
+                let font_size = self.font_size();
                 Task::perform(
                     async move {
                         let region = popup_backdrop_region_for_screenshot(
                             &region_target,
                             screenshot.size,
                             screenshot.scale_factor,
+                            font_size,
                         );
                         run_blocking_file_operation(move || {
                             Ok(blurred_screenshot_region(screenshot, region))
@@ -1919,6 +2066,9 @@ impl BExplorerIced {
             Message::ContextArchiveParentEnter => {
                 self.context_archive_submenu = true;
                 self.context_open_with_submenu = false;
+                self.context_send_to_submenu = false;
+                self.context_send_to_parent_hovered = false;
+                self.context_send_to_submenu_hovered = false;
                 self.context_extract_submenu = false;
                 self.context_archive_parent_hovered = true;
                 self.context_new_submenu = false;
@@ -1927,6 +2077,9 @@ impl BExplorerIced {
             Message::ContextExtractParentEnter => {
                 self.context_archive_submenu = true;
                 self.context_open_with_submenu = false;
+                self.context_send_to_submenu = false;
+                self.context_send_to_parent_hovered = false;
+                self.context_send_to_submenu_hovered = false;
                 self.context_extract_submenu = true;
                 self.context_archive_parent_hovered = true;
                 self.context_new_submenu = false;
@@ -1935,6 +2088,9 @@ impl BExplorerIced {
             Message::ContextNewParentEnter => {
                 self.context_new_submenu = true;
                 self.context_open_with_submenu = false;
+                self.context_send_to_submenu = false;
+                self.context_send_to_parent_hovered = false;
+                self.context_send_to_submenu_hovered = false;
                 self.context_new_parent_hovered = true;
                 self.context_archive_submenu = false;
                 self.context_extract_submenu = false;
@@ -1948,6 +2104,9 @@ impl BExplorerIced {
                 let target = menu.target;
                 self.context_open_with_submenu = true;
                 self.context_open_with_parent_hovered = true;
+                self.context_send_to_submenu = false;
+                self.context_send_to_parent_hovered = false;
+                self.context_send_to_submenu_hovered = false;
                 self.context_archive_submenu = false;
                 self.context_extract_submenu = false;
                 self.context_new_submenu = false;
@@ -1975,6 +2134,43 @@ impl BExplorerIced {
                 if !self.context_open_with_parent_hovered && !self.context_open_with_submenu_hovered
                 {
                     self.context_open_with_submenu = false;
+                }
+                Task::none()
+            }
+            Message::ContextSendToParentEnter => {
+                self.context_send_to_submenu = true;
+                self.context_send_to_parent_hovered = true;
+                self.context_open_with_submenu = false;
+                self.context_open_with_parent_hovered = false;
+                self.context_open_with_submenu_hovered = false;
+                self.context_archive_submenu = false;
+                self.context_extract_submenu = false;
+                self.context_new_submenu = false;
+                Task::batch([
+                    self.request_context_submenu_backdrop(ContextSubmenuKind::SendTo),
+                    self.queue_current_send_to_target_icons(),
+                ])
+            }
+            Message::ContextSendToParentExit => {
+                self.context_send_to_parent_hovered = false;
+                Task::perform(delay(Duration::from_millis(140)), |_| {
+                    Message::CloseContextSendToSubmenuIfUnhovered
+                })
+            }
+            Message::ContextSendToSubmenuEnter => {
+                self.context_send_to_submenu = true;
+                self.context_send_to_submenu_hovered = true;
+                Task::none()
+            }
+            Message::ContextSendToSubmenuExit => {
+                self.context_send_to_submenu_hovered = false;
+                Task::perform(delay(Duration::from_millis(140)), |_| {
+                    Message::CloseContextSendToSubmenuIfUnhovered
+                })
+            }
+            Message::CloseContextSendToSubmenuIfUnhovered => {
+                if !self.context_send_to_parent_hovered && !self.context_send_to_submenu_hovered {
+                    self.context_send_to_submenu = false;
                 }
                 Task::none()
             }
@@ -2113,6 +2309,7 @@ impl BExplorerIced {
                                 active_menu,
                                 KeyboardMenu::Context
                                     | KeyboardMenu::ContextOpenWith
+                                    | KeyboardMenu::ContextSendTo
                                     | KeyboardMenu::ContextArchive
                                     | KeyboardMenu::ContextExtract
                                     | KeyboardMenu::ContextNew
@@ -2305,7 +2502,7 @@ impl BExplorerIced {
                                 transfer_id,
                                 error,
                             });
-                            Task::none()
+                            self.ensure_main_window_for_attention_task()
                         } else {
                             Task::batch([self.report_error(pane, error), self.start_load(pane)])
                         }
@@ -2360,6 +2557,16 @@ impl BExplorerIced {
                         )
                         .to_owned();
                     self.pane_mut(pane).status = status;
+                    Task::none()
+                }
+                Err(error) => self.report_error(pane, error),
+            },
+            Message::SendToFinished(pane, label, result) => match result {
+                Ok(()) => {
+                    self.pane_mut(pane).status = format!(
+                        "{} {label}",
+                        self.localized("Envío iniciado con", "Send started with")
+                    );
                     Task::none()
                 }
                 Err(error) => self.report_error(pane, error),
@@ -2565,7 +2772,11 @@ impl BExplorerIced {
                         id: transfer_id,
                         pane,
                         paths: pending.paths.clone(),
-                        permanent,
+                        kind: if permanent {
+                            ActiveDeleteKind::PermanentDelete
+                        } else {
+                            ActiveDeleteKind::MoveToTrash
+                        },
                     },
                 );
                 let kind = if permanent {
@@ -2609,10 +2820,12 @@ impl BExplorerIced {
                         ]);
                     }
                 }
-                Task::batch([
-                    self.start_load(pane),
-                    self.close_transfer_window_if_idle_task(),
-                ])
+                let refresh_task = if permanent {
+                    self.start_load(pane)
+                } else {
+                    self.refresh_after_trash_change(pane, &[])
+                };
+                Task::batch([refresh_task, self.close_transfer_window_if_idle_task()])
             }
             Message::ConfirmElevatedFileAction => {
                 let Some(pending) = self.elevated_file_action_dialog.take() else {
@@ -2715,14 +2928,58 @@ impl BExplorerIced {
                 self.request_popup_backdrop(PopupBackdropTarget::ColorPicker)
             }
             Message::FontDown => {
+                let previous_density = self.ui_density();
                 self.config.font_size = (self.config.font_size.round() - 1.0).clamp(10.0, 18.0);
+                let density_delta = self.ui_density() - previous_density;
+                self.primary
+                    .column_widths
+                    .adjust_for_density_change(density_delta);
+                self.secondary
+                    .column_widths
+                    .adjust_for_density_change(density_delta);
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    for width in &mut state.column_widths {
+                        *width = (*width + density_delta).max(0.0);
+                    }
+                }
                 save_config(&self.config);
-                Task::none()
+                #[cfg(target_os = "linux")]
+                let properties_task = self.sync_properties_window_size_task();
+                #[cfg(not(target_os = "linux"))]
+                let properties_task = Task::none();
+                Task::batch([
+                    self.sync_transfer_window_size_task(),
+                    self.sync_archive_window_size_task(),
+                    self.sync_duplicate_window_size_task(),
+                    properties_task,
+                ])
             }
             Message::FontUp => {
+                let previous_density = self.ui_density();
                 self.config.font_size = (self.config.font_size.round() + 1.0).clamp(10.0, 18.0);
+                let density_delta = self.ui_density() - previous_density;
+                self.primary
+                    .column_widths
+                    .adjust_for_density_change(density_delta);
+                self.secondary
+                    .column_widths
+                    .adjust_for_density_change(density_delta);
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    for width in &mut state.column_widths {
+                        *width = (*width + density_delta).max(0.0);
+                    }
+                }
                 save_config(&self.config);
-                Task::none()
+                #[cfg(target_os = "linux")]
+                let properties_task = self.sync_properties_window_size_task();
+                #[cfg(not(target_os = "linux"))]
+                let properties_task = Task::none();
+                Task::batch([
+                    self.sync_transfer_window_size_task(),
+                    self.sync_archive_window_size_task(),
+                    self.sync_duplicate_window_size_task(),
+                    properties_task,
+                ])
             }
             Message::AccentRgbChanged(channel, value) => {
                 if channel < self.color_rgb_inputs.len() {
@@ -2810,6 +3067,9 @@ impl BExplorerIced {
             }
             Message::SetVibrancyIntensity(intensity) => {
                 self.config.vibrancy_intensity = intensity.min(100);
+                // KWin Settings opens directly over the live compositor
+                // surface, so this redraw previews every linear alpha step
+                // without swapping backdrops partway through the drag.
                 Task::none()
             }
             Message::VibrancyIntensityReleased => {
@@ -2833,6 +3093,11 @@ impl BExplorerIced {
                     tasks.push(self.start_load(PaneId::Secondary));
                 }
                 Task::batch(tasks)
+            }
+            Message::ToggleShowHiddenSystemDrives => {
+                self.config.show_hidden_system_drives = !self.config.show_hidden_system_drives;
+                save_config(&self.config);
+                self.refresh_sidebar_storage()
             }
             Message::StartSidebarResize => {
                 self.resize_drag = Some(ResizeDrag::Sidebar {
@@ -2859,7 +3124,7 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::StartColumnResize(pane, column) => {
-                let widths = self.detail_column_widths(pane, self.font_size());
+                let widths = self.detail_column_widths(pane, (self.font_size() - 0.5).max(11.0));
                 self.resize_drag = Some(ResizeDrag::Column {
                     pane,
                     column,
@@ -2898,6 +3163,9 @@ impl BExplorerIced {
                     save_config(&self.config);
                 }
                 self.resize_drag = None;
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    state.column_resize = None;
+                }
                 self.tab_drag = None;
                 self.rubber_band = None;
                 if tab_drag_dirty || split_resize_dirty {
@@ -3003,12 +3271,184 @@ impl BExplorerIced {
             }
             #[cfg(target_os = "linux")]
             Message::Properties(message) => self.update_properties(message),
+            Message::ToggleDuplicateSelection(path, selected) => {
+                if let Some(state) = self.duplicate_cleanup.as_mut()
+                    && state.entries.iter().any(|entry| entry.path == path)
+                {
+                    if selected {
+                        state.selected.insert(path);
+                    } else {
+                        state.selected.remove(&path);
+                    }
+                    super::duplicate_cleanup::refresh_all_duplicate_candidates_selected(state);
+                }
+                Task::none()
+            }
+            Message::SelectAllDuplicateCandidates(selected) => {
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    let candidates = state
+                        .entries
+                        .iter()
+                        .filter(|entry| {
+                            entry.kind != crate::fs::duplicates::DuplicateKind::Original
+                        })
+                        .map(|entry| entry.path.clone())
+                        .collect::<Vec<_>>();
+                    if selected {
+                        state.selected.extend(candidates);
+                    } else {
+                        for path in candidates {
+                            state.selected.remove(&path);
+                        }
+                    }
+                    state.all_candidates_selected = selected
+                        && state.entries.iter().any(|entry| {
+                            entry.kind != crate::fs::duplicates::DuplicateKind::Original
+                        });
+                }
+                Task::none()
+            }
+            Message::DuplicatePointerMoved(point) => {
+                let font_size = self.font_size();
+                let spanish = self.is_spanish();
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    state.pointer = point;
+                    if let Some(resize) = state.column_resize
+                        && let Some(width) = state.column_widths.get_mut(resize.column)
+                    {
+                        let minimum =
+                            duplicate_table_column_min_width(resize.column, font_size, spanish);
+                        *width = (resize.start_width + point.x - resize.start_x).max(minimum);
+                    }
+                }
+                Task::none()
+            }
+            Message::DuplicateResizePointerMoved(id, point) => {
+                if self.duplicate_window_id == Some(id) {
+                    self.update(Message::DuplicatePointerMoved(point))
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DuplicateResizeReleased(id) => {
+                if self.duplicate_window_id == Some(id) {
+                    self.update(Message::StopDuplicateColumnResize)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DuplicateRowSelected(path) => {
+                if let Some(state) = self.duplicate_cleanup.as_mut()
+                    && state.entries.iter().any(|entry| entry.path == path)
+                {
+                    state.highlighted = Some(path);
+                    state.context_path = None;
+                    state.context_position = Point::ORIGIN;
+                }
+                Task::none()
+            }
+            Message::OpenDuplicateRowContext(path) => {
+                if let Some(state) = self.duplicate_cleanup.as_mut()
+                    && state.entries.iter().any(|entry| entry.path == path)
+                {
+                    state.highlighted = Some(path.clone());
+                    state.context_path = Some(path);
+                    state.context_position = state.pointer;
+                }
+                Task::none()
+            }
+            Message::CloseDuplicateRowContext => {
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    state.context_path = None;
+                    state.context_position = Point::ORIGIN;
+                }
+                Task::none()
+            }
+            Message::OpenDuplicateFileLocation => self.open_duplicate_file_location_task(),
+            Message::DuplicateTableScrolled {
+                offset_x,
+                relative_y,
+            } => {
+                if relative_y >= 0.9
+                    && let Some(state) = self.duplicate_cleanup.as_mut()
+                    && state.render_limit < state.entries.len()
+                {
+                    state.render_limit =
+                        expanded_render_limit(state.render_limit, state.entries.len());
+                }
+                iced::widget::operation::scroll_to(
+                    duplicate_table_header_scroll_id(),
+                    iced::widget::operation::AbsoluteOffset {
+                        x: Some(offset_x),
+                        y: None,
+                    },
+                )
+            }
+            Message::StartDuplicateColumnResize(column) => {
+                if let Some(state) = self.duplicate_cleanup.as_mut()
+                    && let Some(width) = state.column_widths.get(column).copied()
+                {
+                    state.column_resize = Some(DuplicateColumnResize {
+                        column,
+                        start_x: state.pointer.x,
+                        start_width: width,
+                    });
+                }
+                Task::none()
+            }
+            Message::StopDuplicateColumnResize => {
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    state.column_resize = None;
+                }
+                Task::none()
+            }
+            Message::RequestDuplicateDelete => {
+                if let Some(state) = self.duplicate_cleanup.as_mut()
+                    && state.phase == DuplicateCleanupPhase::Complete
+                    && !state.deleting
+                    && !state.selected.is_empty()
+                {
+                    state.confirm_delete = true;
+                }
+                Task::none()
+            }
+            Message::CancelDuplicateDelete => {
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    state.confirm_delete = false;
+                }
+                Task::none()
+            }
+            Message::ConfirmDuplicateDelete => self.confirm_duplicate_delete_task(),
+            Message::DuplicateDeleteFinished(paths, result) => {
+                self.duplicate_delete_finished(paths, result)
+            }
+            Message::CancelDuplicateScan => {
+                if let Some(state) = self.duplicate_cleanup.as_ref() {
+                    state.cancel.store(true, AtomicOrdering::Relaxed);
+                }
+                Task::none()
+            }
+            Message::CloseDuplicateCleanup => {
+                if self
+                    .duplicate_cleanup
+                    .as_ref()
+                    .is_some_and(|state| state.deleting)
+                {
+                    Task::none()
+                } else {
+                    self.close_duplicate_cleanup_task()
+                }
+            }
             Message::MainWindowOpened(id) => {
                 self.main_window_id = Some(id);
+                self.main_window_detached_for_operations = false;
+                self.pending_main_window_reactivation = false;
                 Task::batch([
                     self.apply_window_corners_task_for(id),
                     self.prepare_native_file_drag_task_for(id),
                     self.sync_main_window_maximized_task(id),
+                    window::minimize(id, false),
+                    window::gain_focus(id),
                 ])
             }
             Message::TransferWindowOpened(id) => {
@@ -3058,6 +3498,15 @@ impl BExplorerIced {
                     window::gain_focus(id),
                 ])
             }
+            Message::DuplicateCleanupWindowOpened(id) => {
+                self.duplicate_window_id = Some(id);
+                Task::batch([
+                    self.apply_window_corners_task_for(id),
+                    sync_duplicate_cleanup_window_constraints_task(id, self.font_size()),
+                    window::minimize(id, false),
+                    window::gain_focus(id),
+                ])
+            }
             Message::ReopenTransferWindow(old_id, position) => {
                 if self.transfer_window_id == Some(old_id) {
                     self.reopen_transfer_window_task(old_id, self.transfer_items().len(), position)
@@ -3079,6 +3528,7 @@ impl BExplorerIced {
                     || self.archive_window_id == Some(id)
                     || self.defender_window_id == Some(id)
                     || self.defender_threats_window_id == Some(id)
+                    || self.duplicate_window_id == Some(id)
                 {
                     self.close_window_task(id)
                 } else if self.is_properties_window(id) {
@@ -3096,7 +3546,24 @@ impl BExplorerIced {
                     self.save_session();
                     save_config(&self.config);
                     self.main_window_id = None;
-                    iced::exit()
+                    if self.pending_main_window_reactivation {
+                        return self.reactivate_main_window_task(None);
+                    }
+                    if keep_process_after_main_window_closes(
+                        self.main_window_detached_for_operations,
+                        self.detachable_operations_in_progress(),
+                    ) {
+                        self.main_window_detached_for_operations = true;
+                        self.publish_operation_host();
+                        Task::batch([
+                            self.ensure_detached_operation_windows_task(),
+                            self.finish_detached_operation_host_task(),
+                        ])
+                    } else {
+                        self.main_window_detached_for_operations = false;
+                        self.retire_operation_host();
+                        iced::exit()
+                    }
                 } else {
                     if self.transfer_window_id == Some(id) {
                         self.transfer_window_id = None;
@@ -3117,20 +3584,35 @@ impl BExplorerIced {
                     if self.defender_threats_window_id == Some(id) {
                         self.defender_threats_window_id = None;
                     }
+                    if self.duplicate_window_id == Some(id) {
+                        self.duplicate_window_id = None;
+                        if let Some(state) = self.duplicate_cleanup.take() {
+                            state.cancel.store(true, AtomicOrdering::Relaxed);
+                        }
+                    }
                     #[cfg(target_os = "linux")]
                     self.properties_window_closed(id);
-                    Task::none()
+                    self.finish_detached_operation_host_task()
                 }
             }
             Message::PollTransfers => {
                 self.transfer_progress_phase = (self.transfer_progress_phase + 0.025) % 1.0;
                 let defender_task = self.poll_defender_messages();
+                self.poll_duplicate_cleanup_messages();
                 let mut tasks = vec![
                     defender_task,
                     self.poll_transfer_messages(),
                     self.poll_archive_messages(),
                     self.sync_defender_window_size_task(),
+                    self.poll_operation_host_activations_task(),
                 ];
+                if self.main_window_id.is_some() && !self.detachable_operations_in_progress() {
+                    self.retire_operation_host();
+                }
+                if self.detached_operation_host_ready_to_exit() {
+                    tasks.push(self.finish_detached_operation_host_task());
+                    return Task::batch(tasks);
+                }
                 if !self.transfer_active()
                     && let Some(id) = self.transfer_window_id.take()
                 {
@@ -3201,6 +3683,62 @@ impl BExplorerIced {
             Message::DefenderThreatsWindowMinimize => {
                 if let Some(id) = self.defender_threats_window_id {
                     window::minimize(id, true)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DuplicateWindowDrag => {
+                if let Some(id) = self.duplicate_window_id {
+                    window::drag(id)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DuplicateWindowMinimize => {
+                if let Some(id) = self.duplicate_window_id {
+                    window::minimize(id, true)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DuplicateWindowMaximize => {
+                let Some(id) = self.duplicate_window_id else {
+                    return Task::none();
+                };
+                let Some(state) = self.duplicate_cleanup.as_mut() else {
+                    return Task::none();
+                };
+                state.window_maximized = !state.window_maximized;
+                Task::batch([
+                    window::maximize(id, state.window_maximized),
+                    self.apply_window_corners_task_for(id),
+                ])
+            }
+            Message::DuplicateWindowMaximizedState(id, maximized) => {
+                if self.duplicate_window_id != Some(id) {
+                    return Task::none();
+                }
+                let changed = self
+                    .duplicate_cleanup
+                    .as_ref()
+                    .is_some_and(|state| state.window_maximized != maximized);
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    state.window_maximized = maximized;
+                }
+                if changed {
+                    self.apply_window_corners_task_for(id)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DuplicateWindowResize(direction) => {
+                if let Some(id) = self.duplicate_window_id
+                    && self
+                        .duplicate_cleanup
+                        .as_ref()
+                        .is_some_and(|state| !state.window_maximized)
+                {
+                    window::drag_resize(id, direction)
                 } else {
                     Task::none()
                 }
@@ -3284,10 +3822,20 @@ impl BExplorerIced {
                     } else {
                         self.apply_window_corners_only_task_for(id)
                     }
+                } else if self.duplicate_window_id == Some(id) {
+                    if let Some(state) = self.duplicate_cleanup.as_mut() {
+                        state.window_size = size;
+                    }
+                    Task::batch([
+                        self.apply_window_corners_only_task_for(id),
+                        window::is_maximized(id).map(move |maximized| {
+                            Message::DuplicateWindowMaximizedState(id, maximized)
+                        }),
+                    ])
                 } else if self.is_properties_window(id) {
                     #[cfg(target_os = "linux")]
                     {
-                        let expected = properties_window_size();
+                        let expected = properties_window_size(self.font_size());
                         if progress_window_needs_resize(size, expected) {
                             sync_fixed_progress_window_size_task(id, expected)
                         } else {
@@ -3301,6 +3849,7 @@ impl BExplorerIced {
                 } else if self.transfer_window_id == Some(id)
                     || self.archive_window_id == Some(id)
                     || self.defender_window_id == Some(id)
+                    || self.duplicate_window_id == Some(id)
                 {
                     self.apply_window_corners_only_task_for(id)
                 } else {
@@ -3389,6 +3938,19 @@ impl BExplorerIced {
                 }
                 self.save_session();
                 save_config(&self.config);
+                if self.detachable_operations_in_progress() {
+                    self.main_window_detached_for_operations = true;
+                    self.publish_operation_host();
+                    if let Some(id) = self.main_window_id {
+                        return Task::batch([
+                            self.ensure_detached_operation_windows_task(),
+                            self.close_window_task(id),
+                        ]);
+                    }
+                    return self.ensure_detached_operation_windows_task();
+                }
+                self.main_window_detached_for_operations = false;
+                self.retire_operation_host();
                 if let Some(id) = self.main_window_id {
                     self.close_application_task(id)
                 } else {

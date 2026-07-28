@@ -17,15 +17,20 @@ impl BExplorerIced {
         let title = self
             .tabs
             .get(tab_index)
-            .map(|tab| {
-                if tab.path.is_none() {
-                    self.localized("Este equipo", "This PC").to_owned()
-                } else {
-                    ellipsize_text(&tab.title, 22)
+            .map(|tab| match tab.path.as_deref() {
+                None => self.localized("Este equipo", "This PC").to_owned(),
+                Some(path) if explorer::is_trash_root_path(path) => {
+                    self.localized("Papelera", "Recycle Bin").to_owned()
                 }
+                Some(path) => ellipsize_text(
+                    self.storage_display_name_for_path(path)
+                        .unwrap_or(&tab.title),
+                    22,
+                ),
             })
             .unwrap_or_else(|| self.localized("esta pestaña", "this tab").into());
         let suggested_side = self.tab_split_drop_side(self.cursor_position)?;
+        let chooser_width = self.ui_metric(284.0);
 
         let chooser = container(
             column![
@@ -50,17 +55,17 @@ impl BExplorerIced {
                         palette,
                     ),
                 ]
-                .spacing(10)
+                .spacing(self.ui_metric(10.0))
                 .align_y(Alignment::Center),
             ]
-            .spacing(7)
+            .spacing(self.ui_metric(7.0))
             .align_x(Alignment::Center),
         )
-        .width(284)
-        .padding([10, 12])
+        .width(chooser_width)
+        .padding([self.ui_vertical_padding(10.0), self.ui_metric(12.0)])
         .style(move |_| elevated_panel_style(palette));
-        let x = ((self.window_size.width - 284.0) * 0.5).max(8.0);
-        let y = TITLE_HEIGHT + 8.0;
+        let x = ((self.window_size.width - chooser_width) * 0.5).max(8.0);
+        let y = TITLE_HEIGHT + self.ui_metric(8.0);
         let chooser: Element<'_, Message> = float(chooser)
             .translate(move |_, _| Vector::new(x, y))
             .into();
@@ -74,10 +79,12 @@ impl BExplorerIced {
         palette: Palette,
     ) -> Element<'_, Message> {
         let active_left = side == SplitSide::Left;
+        let pane_width = self.ui_metric(48.0);
+        let pane_height = self.ui_metric(42.0);
         let pane = |active: bool| {
             container(Space::new())
-                .width(48)
-                .height(42)
+                .width(pane_width)
+                .height(pane_height)
                 .style(move |_| {
                     let background: Background = if active {
                         translucent_accent_gradient(palette, 0.86).into()
@@ -91,10 +98,10 @@ impl BExplorerIced {
         };
         let preview = container(
             row![pane(active_left), pane(!active_left)]
-                .spacing(2)
+                .spacing(self.ui_metric(2.0))
                 .align_y(Alignment::Center),
         )
-        .padding(5)
+        .padding(self.ui_vertical_padding(5.0))
         .style(move |_| {
             container::Style::default()
                 .background(palette.header_bg)
@@ -115,11 +122,11 @@ impl BExplorerIced {
                         palette.muted_text
                     }),
             ]
-            .spacing(4)
+            .spacing(self.ui_metric(4.0))
             .align_x(Alignment::Center),
         )
-        .width(122)
-        .padding(5)
+        .width(self.ui_metric(122.0))
+        .padding(self.ui_vertical_padding(5.0))
         .style(move |_| {
             let background: Background = if suggested {
                 translucent_accent_gradient(palette, 0.9).into()
@@ -227,8 +234,10 @@ impl BExplorerIced {
                     .into(),
             )
         };
-        let message = ellipsize_to_width(&message, 236.0, self.font_size());
-        let hint = ellipsize_to_width(&hint, 236.0, (self.font_size() - 1.0).max(10.0));
+        let text_width = self.ui_metric(236.0);
+        let card_width = self.ui_metric(296.0);
+        let message = ellipsize_to_width(&message, text_width, self.font_size());
+        let hint = ellipsize_to_width(&hint, text_width, (self.font_size() - 1.0).max(10.0));
         let preview_stack = self.file_drag_preview_stack(drag, palette, fade);
         let card = container(
             row![
@@ -242,15 +251,15 @@ impl BExplorerIced {
                         .size((self.font_size() - 1.0).max(10.0))
                         .color(palette.muted_text),
                 ]
-                .spacing(2)
+                .spacing(self.ui_metric(2.0))
                 .width(Length::Fill),
             ]
-            .spacing(9)
+            .spacing(self.ui_metric(9.0))
             .align_y(Alignment::Center)
             .width(Length::Fill),
         )
-        .width(296)
-        .padding([8, 10])
+        .width(card_width)
+        .padding([self.ui_vertical_padding(8.0), self.ui_metric(10.0)])
         .clip(true);
         let card = container(card).clip(true).style(move |_| {
             container::Style::default()
@@ -266,10 +275,12 @@ impl BExplorerIced {
                     blur_radius: 12.0,
                 })
         });
-        let x =
-            (self.cursor_position.x + 18.0).clamp(8.0, (self.window_size.width - 306.0).max(8.0));
-        let y =
-            (self.cursor_position.y + 20.0).clamp(8.0, (self.window_size.height - 62.0).max(8.0));
+        let x = (self.cursor_position.x + self.ui_metric(18.0))
+            .clamp(8.0, (self.window_size.width - card_width - 10.0).max(8.0));
+        let y = (self.cursor_position.y + self.ui_metric(20.0)).clamp(
+            8.0,
+            (self.window_size.height - self.ui_metric(62.0)).max(8.0),
+        );
 
         Some(float(card).translate(move |_, _| Vector::new(x, y)).into())
     }
@@ -298,11 +309,12 @@ impl BExplorerIced {
             .collect::<Vec<_>>();
         let count = entries.len().max(1);
         let preview_size = if count == 1 {
-            SINGLE_PREVIEW_SIZE
+            self.ui_metric(SINGLE_PREVIEW_SIZE)
         } else {
-            GROUP_PREVIEW_SIZE
+            self.ui_metric(GROUP_PREVIEW_SIZE)
         };
-        let stack_size = preview_size + PREVIEW_OFFSET * (count.saturating_sub(1)) as f32;
+        let preview_offset = self.ui_metric(PREVIEW_OFFSET);
+        let stack_size = preview_size + preview_offset * (count.saturating_sub(1)) as f32;
         let mut layers = Vec::with_capacity(count);
 
         for (index, entry) in entries.into_iter().enumerate() {
@@ -318,14 +330,14 @@ impl BExplorerIced {
                 container(inline_icon(
                     fallback_icon_label(entry),
                     icon_color(fallback_icon_label(entry), palette, false),
-                    20.0,
+                    self.ui_metric(20.0),
                 ))
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .center(Length::Fill)
                 .into()
             };
-            let offset = (count - index - 1) as f32 * PREVIEW_OFFSET;
+            let offset = (count - index - 1) as f32 * preview_offset;
             let preview = container(visual)
                 .width(preview_size)
                 .height(preview_size)
@@ -355,7 +367,7 @@ impl BExplorerIced {
 
         if layers.is_empty() {
             layers.push(
-                container(inline_icon("file", palette.accent, 20.0))
+                container(inline_icon("file", palette.accent, self.ui_metric(20.0)))
                     .width(preview_size)
                     .height(preview_size)
                     .center(Length::Fill)

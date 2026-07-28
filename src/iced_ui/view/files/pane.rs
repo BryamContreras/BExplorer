@@ -14,23 +14,47 @@ impl BExplorerIced {
             .path
             .as_ref()
             .is_some_and(|path| self.config.favorites.contains(path));
+        let toolbar_height = self.toolbar_height();
+        let action_bar_height = self.action_bar_height();
+        let status_bar_height = self.status_bar_height();
+        let filter_height = self.filter_control_height();
+        let trash_view = self.is_trash_pane(pane);
         let toolbar = row![
-            icon_button("back", Message::Back(pane), palette, false),
-            icon_button("next", Message::Forward(pane), palette, false),
-            icon_button("up", Message::Up(pane), palette, false),
+            icon_button(
+                "back",
+                Message::Back(pane),
+                palette,
+                false,
+                self.font_size(),
+            ),
+            icon_button(
+                "next",
+                Message::Forward(pane),
+                palette,
+                false,
+                self.font_size(),
+            ),
+            icon_button("up", Message::Up(pane), palette, false, self.font_size(),),
             icon_button(
                 "bookmark",
                 Message::ToggleFavorite(pane),
                 palette,
-                favorite_active
+                favorite_active,
+                self.font_size(),
             ),
             self.address_bar(pane, palette),
-            icon_button("refresh", Message::Refresh(pane), palette, false),
+            icon_button(
+                "refresh",
+                Message::Refresh(pane),
+                palette,
+                false,
+                self.font_size(),
+            ),
         ]
-        .height(42)
-        .spacing(4)
+        .height(toolbar_height)
+        .spacing(self.ui_metric(4.0))
         .align_y(Alignment::Center)
-        .padding([4, 10]);
+        .padding([4.0, self.ui_metric(10.0)]);
 
         let undo_action: Element<'_, Message> = if self.last_undo_action.is_some() {
             tool_button(
@@ -39,86 +63,149 @@ impl BExplorerIced {
                 palette,
                 false,
                 false,
+                self.font_size(),
             )
             .into()
         } else {
             Space::new().width(0).into()
         };
-        let action_bar_content = row![
-            tool_button(
-                self.localized("Nuevo", "New"),
-                Message::ToggleNewMenu(pane),
-                palette,
-                self.new_menu_open == Some(pane),
-                false,
-            ),
-            undo_action,
-            tool_button(
-                self.localized("Pegar", "Paste"),
-                Message::PasteIntoPane(pane),
-                palette,
-                false,
-                false,
-            ),
-            tool_button(
-                self.localized("Copiar", "Copy"),
-                Message::CopySelection(pane),
-                palette,
-                false,
-                false,
-            ),
-            tool_button(
-                self.localized("Cortar", "Cut"),
-                Message::CutSelection(pane),
-                palette,
-                false,
-                false,
-            ),
-            tool_button(
-                self.localized("Renombrar", "Rename"),
-                Message::RenameSelected(pane),
-                palette,
-                false,
-                false,
-            ),
-            tool_button(
-                self.localized("Eliminar", "Delete"),
-                Message::DeleteSelected(pane),
-                palette,
-                false,
-                false,
-            ),
-            tool_button(
-                self.localized("Comprimir", "Compress"),
-                Message::OpenArchiveDialog(pane),
-                palette,
-                false,
-                false,
-            ),
-            Space::new().width(Length::Fill),
-            tool_button(
-                self.localized("Agrupar", "Group"),
-                Message::ToggleGroupMenu(pane),
-                palette,
-                self.group_menu_open == Some(pane),
-                self.split.is_some(),
-            ),
-            tool_button(
-                self.localized("Vista previa", "Preview"),
-                Message::TogglePreviewPanel(pane),
-                palette,
-                self.preview_panel_visible(pane),
-                self.split.is_some(),
-            ),
-        ]
-        .height(46)
-        .spacing(4)
-        .padding([5, 12])
-        .align_y(Alignment::Center)
-        .width(Length::Fill);
+        let action_bar_content: Element<'_, Message> = if trash_view {
+            row![
+                tool_button(
+                    self.localized("Restaurar", "Restore"),
+                    Message::RestoreTrashSelected(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Eliminar", "Delete"),
+                    Message::DeleteTrashSelected(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Vaciar papelera", "Empty Recycle Bin"),
+                    Message::EmptyTrash(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                Space::new().width(Length::Fill),
+                tool_button(
+                    self.localized("Agrupar", "Group"),
+                    Message::ToggleGroupMenu(pane),
+                    palette,
+                    self.group_menu_open == Some(pane),
+                    self.split.is_some(),
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Vista previa", "Preview"),
+                    Message::TogglePreviewPanel(pane),
+                    palette,
+                    self.preview_panel_visible(pane),
+                    self.split.is_some(),
+                    self.font_size(),
+                ),
+            ]
+            .height(action_bar_height)
+            .spacing(self.ui_metric(4.0))
+            .padding([5.0, self.ui_metric(12.0)])
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+        } else {
+            row![
+                tool_button(
+                    self.localized("Nuevo", "New"),
+                    Message::ToggleNewMenu(pane),
+                    palette,
+                    self.new_menu_open == Some(pane),
+                    false,
+                    self.font_size(),
+                ),
+                undo_action,
+                tool_button(
+                    self.localized("Pegar", "Paste"),
+                    Message::PasteIntoPane(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Copiar", "Copy"),
+                    Message::CopySelection(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Cortar", "Cut"),
+                    Message::CutSelection(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Renombrar", "Rename"),
+                    Message::RenameSelected(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Eliminar", "Delete"),
+                    Message::DeleteSelected(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Comprimir", "Compress"),
+                    Message::OpenArchiveDialog(pane),
+                    palette,
+                    false,
+                    false,
+                    self.font_size(),
+                ),
+                Space::new().width(Length::Fill),
+                tool_button(
+                    self.localized("Agrupar", "Group"),
+                    Message::ToggleGroupMenu(pane),
+                    palette,
+                    self.group_menu_open == Some(pane),
+                    self.split.is_some(),
+                    self.font_size(),
+                ),
+                tool_button(
+                    self.localized("Vista previa", "Preview"),
+                    Message::TogglePreviewPanel(pane),
+                    palette,
+                    self.preview_panel_visible(pane),
+                    self.split.is_some(),
+                    self.font_size(),
+                ),
+            ]
+            .height(action_bar_height)
+            .spacing(self.ui_metric(4.0))
+            .padding([5.0, self.ui_metric(12.0)])
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .into()
+        };
         let action_bar: Element<'_, Message> = container(action_bar_content)
             .width(Length::Fill)
-            .height(46)
+            .height(action_bar_height)
             .clip(true)
             .into();
         let action_bar: Element<'_, Message> = if self.config.show_action_bar {
@@ -163,7 +250,11 @@ impl BExplorerIced {
         .id(search_input_id(pane))
         .on_input(move |value| Message::SearchChanged(pane, value))
         .size(self.font_size())
-        .padding(Padding::new(6.0).left(9.0).right(38.0))
+        .padding(
+            Padding::new(6.0)
+                .left(self.ui_metric(9.0))
+                .right(self.ui_metric(38.0)),
+        )
         .width(Length::Fill)
         .style(move |_, status| {
             let border_color = if matches!(status, iced::widget::text_input::Status::Focused { .. })
@@ -189,20 +280,20 @@ impl BExplorerIced {
                 } else {
                     palette.muted_text
                 },
-                17.0,
+                self.ui_metric(17.0),
             ))
             .width(Length::Fill)
             .height(Length::Fill)
             .center(Length::Fill),
         )
-        .width(28)
-        .height(26)
+        .width(self.ui_metric(28.0))
+        .height(self.ui_metric(26.0))
         .padding(0)
         .on_press(Message::ToggleSearchModeMenu(pane))
         .style(move |_, status| {
             selected_button_style(palette, self.search_mode_menu_open == Some(pane), status)
         });
-        let filter_width = if self.split.is_some() { 210 } else { 260 };
+        let filter_width = if self.split.is_some() { 210.0 } else { 260.0 };
         let filter = stack(vec![
             search_input.into(),
             container(search_mode_button)
@@ -210,11 +301,11 @@ impl BExplorerIced {
                 .height(Length::Fill)
                 .align_right(Length::Fill)
                 .center_y(Length::Fill)
-                .padding([0, 3])
+                .padding([0.0, self.ui_metric(3.0)])
                 .into(),
         ])
-        .width(filter_width)
-        .height(32);
+        .width(self.ui_metric(filter_width))
+        .height(filter_height);
 
         let (selected_count, selected_size) = self.selection_status_metrics(pane);
         let selected_label = if selected_count == 1 {
@@ -226,10 +317,18 @@ impl BExplorerIced {
             )
         };
         let selection_status = format!("· {selected_label} · {}", format_size(Some(selected_size)));
+        let pane_status = {
+            let state = self.pane(pane);
+            if is_entry_count_status(&state.status, state.entries.len()) {
+                localized_entry_count(state.entries.len(), self.is_spanish())
+            } else {
+                state.status.clone()
+            }
+        };
 
         let status_content = row![
             filter,
-            text(self.pane(pane).status.as_str())
+            text(pane_status)
                 .size(self.font_size())
                 .color(palette.muted_text),
             text(selection_status)
@@ -241,9 +340,9 @@ impl BExplorerIced {
                 .color(palette.muted_text),
             self.view_selector_button(pane, palette),
         ]
-        .height(36)
-        .spacing(8)
-        .padding([4, 14])
+        .height(status_bar_height)
+        .spacing(self.ui_metric(8.0))
+        .padding([2.0, self.ui_metric(14.0)])
         .align_y(Alignment::Center);
 
         let transfer_active = self.transfer_in_progress_for(pane);
@@ -252,9 +351,10 @@ impl BExplorerIced {
         let loading_active = self.pane(pane).loading || self.pane(pane).mounting_disk_image;
         let progress_bar: Element<'_, Message> = if transfer_active {
             let progress = self.transfer_progress_fraction_for(pane).unwrap_or(0.0);
+            let progress_height = self.ui_metric(2.0);
             row![
                 iced::widget::progress_bar(0.0..=1.0, progress)
-                    .girth(2.0)
+                    .girth(progress_height)
                     .style(move |_| iced::widget::progress_bar::Style {
                         background: translucent_color(palette.border, 0.72).into(),
                         bar: accent_gradient(palette).into(),
@@ -262,16 +362,17 @@ impl BExplorerIced {
                     }),
             ]
             .width(Length::Fill)
-            .height(Length::Fixed(2.0))
+            .height(Length::Fixed(progress_height))
             .into()
         } else if !formatting && (search_active || loading_active) {
+            let progress_height = self.ui_metric(2.0);
             row![indeterminate_progress_bar(
                 self.pane(pane).search_progress_phase,
                 palette,
-                2.0
+                progress_height
             )]
             .width(Length::Fill)
-            .height(Length::Fixed(2.0))
+            .height(Length::Fixed(progress_height))
             .into()
         } else {
             row![].width(Length::Fill).height(Length::Fixed(0.0)).into()
@@ -371,8 +472,10 @@ impl BExplorerIced {
         palette: Palette,
         include_storage_shortcuts: bool,
     ) -> Element<'_, Message> {
+        let icon_size = self.ui_metric(18.0);
+        let button_height = bookmark_button_height(self.font_size());
         let mut bookmarks = row![]
-            .spacing(6)
+            .spacing(self.ui_metric(6.0))
             .align_y(Alignment::Center)
             .height(Length::Fill);
         if include_storage_shortcuts {
@@ -424,16 +527,21 @@ impl BExplorerIced {
             let target = path.clone();
             bookmarks = bookmarks.push(
                 Button::new(
-                    row![
-                        inline_icon("folder", palette.folder, 18.0),
-                        text(ellipsize_text(&label, 18))
-                            .size(self.font_size())
-                            .color(palette.text),
-                    ]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
+                    container(
+                        row![
+                            inline_icon("folder", palette.folder, icon_size),
+                            text(ellipsize_text(&label, 18))
+                                .size(self.font_size())
+                                .color(palette.text)
+                                .wrapping(iced::widget::text::Wrapping::None),
+                        ]
+                        .spacing(self.ui_metric(6.0))
+                        .align_y(Alignment::Center),
+                    )
+                    .center_y(Length::Fill),
                 )
-                .padding([7, 10])
+                .height(button_height)
+                .padding([0.0, self.ui_metric(10.0)])
                 .on_press(Message::Navigate(pane, Some(target)))
                 .style(move |_, status| button_style(palette, false, status)),
             );
@@ -449,8 +557,8 @@ impl BExplorerIced {
 
         container(bookmarks)
             .width(Length::Fill)
-            .height(46)
-            .padding([5, 12])
+            .height(self.bookmark_bar_height())
+            .padding([5.0, self.ui_metric(12.0)])
             .clip(true)
             .style(move |_| {
                 container::Style::default()
@@ -469,32 +577,39 @@ impl BExplorerIced {
         fallback_icon: &'static str,
     ) -> Element<'_, Message> {
         let active = self.tab_for_pane(pane).path.as_ref() == Some(&path);
+        let icon_size = self.ui_metric(18.0);
+        let icon_layout_size = rendered_inline_icon_size(icon_size);
         let storage_icon: Element<'_, Message> = self
             .sidebar_directory_icon_handle(&path)
             .map(|handle| {
                 iced_image::Image::new(handle)
-                    .width(18)
-                    .height(18)
+                    .width(icon_layout_size)
+                    .height(icon_layout_size)
                     .content_fit(ContentFit::Contain)
                     .into()
             })
-            .unwrap_or_else(|| inline_icon(fallback_icon, palette.accent, 18.0));
+            .unwrap_or_else(|| inline_icon(fallback_icon, palette.accent, icon_size));
 
         Button::new(
-            row![
-                storage_icon,
-                text(ellipsize_text(&label, 22))
-                    .size(self.font_size())
-                    .color(if active {
-                        palette.accent_text
-                    } else {
-                        palette.text
-                    }),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center),
+            container(
+                row![
+                    storage_icon,
+                    text(ellipsize_text(&label, 22))
+                        .size(self.font_size())
+                        .color(if active {
+                            palette.accent_text
+                        } else {
+                            palette.text
+                        })
+                        .wrapping(iced::widget::text::Wrapping::None),
+                ]
+                .spacing(self.ui_metric(6.0))
+                .align_y(Alignment::Center),
+            )
+            .center_y(Length::Fill),
         )
-        .padding([7, 10])
+        .height(bookmark_button_height(self.font_size()))
+        .padding([0.0, self.ui_metric(10.0)])
         .on_press(Message::Navigate(pane, Some(path)))
         .style(move |_, status| selected_button_style(palette, active, status))
         .into()
@@ -574,7 +689,7 @@ impl BExplorerIced {
                             // are discarded in `TextPreviewAction`.
                             .key_binding(text_editor::Binding::from_key_press)
                             .size(self.font_size())
-                            .padding(8)
+                            .padding(self.ui_vertical_padding(8.0))
                             .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
                             .height(Length::Fill)
                             .style(move |_, _| text_editor::Style {
@@ -614,20 +729,29 @@ impl BExplorerIced {
                         .content_fit(ContentFit::Contain)
                         .into()
                 } else {
-                    container(self.detail_file_entry_icon(&entry, palette, false, 72.0))
-                        .width(Length::Fill)
-                        .height(preview_height)
-                        .center(Length::Fill)
-                        .into()
+                    container(self.detail_file_entry_icon(
+                        &entry,
+                        palette,
+                        false,
+                        self.ui_metric(72.0),
+                    ))
+                    .width(Length::Fill)
+                    .height(preview_height)
+                    .center(Length::Fill)
+                    .into()
                 };
                 let preview_surface = container(preview)
                     .width(Length::Fill)
                     .height(if is_pdf_document || is_text_document {
                         Length::Fill
                     } else {
-                        Length::Fixed(318.0)
+                        Length::Fixed(self.ui_metric(318.0))
                     })
-                    .padding(if is_text_document { 0 } else { 4 })
+                    .padding(if is_text_document {
+                        0.0
+                    } else {
+                        self.ui_vertical_padding(4.0)
+                    })
                     .style(move |_| {
                         container::Style::default()
                             .background(palette.input_bg)
@@ -651,14 +775,14 @@ impl BExplorerIced {
                             .size(self.font_size())
                             .color(palette.muted_text),
                     ]
-                    .spacing(8)
+                    .spacing(self.ui_metric(8.0))
                     .into()
                 }
             }
         } else {
             container(
                 column![
-                    inline_icon("preview", palette.muted_text, 42.0),
+                    inline_icon("preview", palette.muted_text, self.ui_metric(42.0)),
                     text(self.localized(
                         "Selecciona un archivo para ver su vista previa",
                         "Select a file to preview it",
@@ -668,7 +792,7 @@ impl BExplorerIced {
                     .align_x(Horizontal::Center)
                     .wrapping(iced::widget::text::Wrapping::Word),
                 ]
-                .spacing(12)
+                .spacing(self.ui_metric(12.0))
                 .align_x(Alignment::Center),
             )
             .width(Length::Fill)
@@ -685,11 +809,17 @@ impl BExplorerIced {
                             .size(self.font_size() + 1.0)
                             .color(palette.text)
                             .width(Length::Fill),
-                        icon_button("x", Message::TogglePreviewPanel(pane), palette, false),
+                        icon_button(
+                            "x",
+                            Message::TogglePreviewPanel(pane),
+                            palette,
+                            false,
+                            self.font_size(),
+                        ),
                     ]
                     .align_y(Alignment::Center),
                 )
-                .padding([8, 10])
+                .padding([self.ui_vertical_padding(8.0), self.ui_metric(10.0),])
                 .style(move |_| {
                     container::Style::default()
                         .background(palette.header_bg)
@@ -698,7 +828,11 @@ impl BExplorerIced {
                 container(body)
                     .width(Length::Fill)
                     .height(Length::Fill)
-                    .padding(if full_size_document_preview { 4 } else { 8 }),
+                    .padding(self.ui_vertical_padding(if full_size_document_preview {
+                        4.0
+                    } else {
+                        8.0
+                    })),
             ]
             .height(Length::Fill),
         )
@@ -727,7 +861,7 @@ impl BExplorerIced {
         let page_count = state.and_then(|state| state.page_count);
         let current_page = state.map(|state| state.current_page).unwrap_or(0);
         let loading = state.is_none_or(|state| state.loading);
-        let mut pages = column![].spacing(14);
+        let mut pages = column![].spacing(self.ui_metric(14.0));
 
         if let Some(state) = state {
             for page in &state.pages {
@@ -740,8 +874,8 @@ impl BExplorerIced {
                             .content_fit(ContentFit::Contain),
                     )
                     .width(Length::Fill)
-                    .height(Length::Fixed(page_height + 16.0))
-                    .padding(8)
+                    .height(Length::Fixed(page_height + self.ui_metric(16.0)))
+                    .padding(self.ui_vertical_padding(8.0))
                     .style(move |_| {
                         container::Style::default()
                             .background(palette.input_bg)
@@ -768,7 +902,7 @@ impl BExplorerIced {
             pages = pages.push(
                 container(text(label).size(self.font_size()).color(palette.muted_text))
                     .width(Length::Fill)
-                    .padding(12)
+                    .padding(self.ui_vertical_padding(12.0))
                     .center_x(Length::Fill),
             );
         }
@@ -784,7 +918,7 @@ impl BExplorerIced {
                     .color(palette.muted_text),
                 )
                 .width(Length::Fill)
-                .padding(12)
+                .padding(self.ui_vertical_padding(12.0))
                 .center_x(Length::Fill),
             );
         }
@@ -808,11 +942,11 @@ impl BExplorerIced {
                     .color(palette.muted_text)
             )
             .width(Length::Fill)
-            .padding([8, 0])
+            .padding([self.ui_vertical_padding(8.0), 0.0])
             .center_x(Length::Fill),
         ]
         .height(Length::Fill)
-        .spacing(4)
+        .spacing(self.ui_metric(4.0))
         .into()
     }
 }

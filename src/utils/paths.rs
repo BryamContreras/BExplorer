@@ -16,6 +16,15 @@ pub fn config_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn cache_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from(QUALIFIER, ORGANIZATION, APPLICATION)
+        .ok_or_else(|| BExplorerError::Operation("Could not resolve cache directory".into()))?;
+    let dir = dirs.cache_dir().to_path_buf();
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 pub fn config_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.json"))
 }
@@ -30,6 +39,18 @@ pub fn storage_cache_file() -> Result<PathBuf> {
 
 pub fn network_cache_file() -> Result<PathBuf> {
     Ok(config_dir()?.join("network-cache.json"))
+}
+
+pub fn operation_hosts_dir() -> Result<PathBuf> {
+    let dir = config_dir()?.join("operation-hosts");
+    std::fs::create_dir_all(&dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(dir)
 }
 
 pub fn log_file() -> Result<PathBuf> {

@@ -16,6 +16,7 @@ use crate::utils::errors::{BExplorerError, Result};
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
+const PROGRESS_BYTE_INTERVAL: u64 = 8 * 1024 * 1024;
 static RESERVED_TARGETS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 static TRANSFER_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -148,6 +149,7 @@ struct TransferRuntime {
     total_files: usize,
     started: Instant,
     last_emit: Instant,
+    last_emitted_bytes: u64,
     created_targets: Vec<PathBuf>,
     tracked_targets: HashSet<PathBuf>,
     reserved_targets: Vec<PathBuf>,
@@ -163,6 +165,7 @@ impl TransferRuntime {
             total_files,
             started: Instant::now(),
             last_emit: Instant::now() - Duration::from_secs(1),
+            last_emitted_bytes: 0,
             created_targets: Vec::new(),
             tracked_targets: HashSet::new(),
             reserved_targets: Vec::new(),
@@ -352,12 +355,12 @@ fn run_transfer_inner(
     let total_files = job.sources.iter().map(|path| path_file_count(path)).sum();
     let mut runtime = TransferRuntime::new(total_bytes, total_files);
 
-    emit_progress(job, "", TransferState::Copying, &runtime, tx);
+    emit_progress_checkpoint(job, "", TransferState::Copying, &mut runtime, tx);
 
     let result = (|| {
         for source in &job.sources {
             check_cancelled(control)?;
-            wait_if_paused(job, "", &runtime, tx, control)?;
+            wait_if_paused(job, "", &mut runtime, tx, control)?;
             if !source.exists() {
                 continue;
             }
@@ -459,7 +462,7 @@ fn run_portable_transfer(
         })
         .sum();
     let mut runtime = TransferRuntime::new(total_bytes, total_files);
-    emit_progress(job, "", TransferState::Copying, &runtime, tx);
+    emit_progress_checkpoint(job, "", TransferState::Copying, &mut runtime, tx);
 
     let result = if explorer::is_portable_path(&job.destination) {
         run_local_to_portable_transfer(job, tx, control, &mut runtime)
@@ -560,7 +563,12 @@ fn run_portable_to_local_transfer(
                     handle_portable_event(job, event, runtime, tx, control)
                 };
                 portable::export_to_local(source, &target, &mut event)?;
-                sync_copied_path(&target)?;
+            }
+            if job.kind == TransferKind::Move {
+                if !replacing {
+                    sync_copied_path(&target)?;
+                }
+                portable::delete_paths(std::slice::from_ref(source))?;
             }
             continue;
         }
@@ -618,20 +626,17 @@ fn handle_portable_event(
         portable::PortableTransferEvent::BeforeItem(name) => {
             check_cancelled(control)?;
             wait_if_paused(job, name, runtime, tx, control)?;
-            emit_progress(job, name, TransferState::Copying, runtime, tx);
+            emit_progress_checkpoint(job, name, TransferState::Copying, runtime, tx);
         }
         portable::PortableTransferEvent::Bytes(name, bytes) => {
             check_cancelled(control)?;
             wait_if_paused(job, name, runtime, tx, control)?;
             runtime.copied_bytes = runtime.copied_bytes.saturating_add(bytes);
-            if runtime.last_emit.elapsed() >= PROGRESS_INTERVAL {
-                emit_progress(job, name, TransferState::Copying, runtime, tx);
-                runtime.last_emit = Instant::now();
-            }
+            emit_progress_if_due(job, name, TransferState::Copying, runtime, tx);
         }
         portable::PortableTransferEvent::FileDone(name) => {
             runtime.files_done = runtime.files_done.saturating_add(1);
-            emit_progress(job, name, TransferState::Copying, runtime, tx);
+            emit_progress_checkpoint(job, name, TransferState::Copying, runtime, tx);
         }
     }
     Ok(())
@@ -655,7 +660,7 @@ fn move_path(
             .copied_bytes
             .saturating_add(path_total_bytes(target));
         runtime.files_done = runtime.files_done.saturating_add(path_file_count(target));
-        emit_progress(
+        emit_progress_checkpoint(
             job,
             current_name(target),
             TransferState::Copying,
@@ -666,6 +671,10 @@ fn move_path(
     }
 
     copy_path(job, source, target, tx, control, runtime)?;
+    // A cross-filesystem move must make the completed destination durable
+    // before deleting the only remaining source. Ordinary copies deliberately
+    // rely on the operating system's writeback and safe-eject path instead.
+    sync_copied_path(target)?;
     remove_source(source)?;
     Ok(())
 }
@@ -743,16 +752,15 @@ fn unused_transfer_sibling(target: &Path, purpose: &str) -> PathBuf {
 
 fn sync_copied_path(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
-    if metadata.is_dir() {
+    if metadata.is_file() {
+        fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
+    } else if metadata.is_dir() {
         for entry in fs::read_dir(path)? {
             sync_copied_path(&entry?.path())?;
         }
         #[cfg(unix)]
         fs::File::open(path)?.sync_all()?;
     }
-    // Regular files are already flushed through the writable output handle in
-    // `copy_path`. Reopening one with `File::open` and calling `sync_all` fails
-    // with ERROR_ACCESS_DENIED on Windows because that handle is read-only.
     Ok(())
 }
 
@@ -799,6 +807,7 @@ fn copy_path(
     }
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     let current_name = current_name(source).to_string();
+    emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
 
     loop {
         check_cancelled(control)?;
@@ -809,14 +818,18 @@ fn copy_path(
         }
         output.write_all(&buffer[..read])?;
         runtime.copied_bytes = runtime.copied_bytes.saturating_add(read as u64);
-        if runtime.last_emit.elapsed() >= PROGRESS_INTERVAL {
-            emit_progress(job, &current_name, TransferState::Copying, runtime, tx);
-            runtime.last_emit = Instant::now();
-        }
+        emit_progress_if_due(job, &current_name, TransferState::Copying, runtime, tx);
     }
-    output.sync_all()?;
+    // Publish the final partial byte interval before closing this file. Normal
+    // copies do not force a physical disk flush per file: safe eject performs
+    // that synchronization, while atomic replacements and cross-device moves
+    // call `sync_copied_path` before discarding the original.
+    if runtime.copied_bytes != runtime.last_emitted_bytes {
+        emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
+    }
+    output.flush()?;
     runtime.files_done = runtime.files_done.saturating_add(1);
-    emit_progress(job, &current_name, TransferState::Copying, runtime, tx);
+    emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
     Ok(())
 }
 
@@ -830,7 +843,7 @@ fn mark_source_skipped(
         .copied_bytes
         .saturating_add(path_total_bytes(source));
     runtime.files_done = runtime.files_done.saturating_add(path_file_count(source));
-    emit_progress(
+    emit_progress_checkpoint(
         job,
         current_name(source),
         TransferState::Copying,
@@ -851,7 +864,7 @@ fn mark_portable_source_skipped(
     runtime.files_done = runtime
         .files_done
         .saturating_add(portable::path_file_count(source));
-    emit_progress(
+    emit_progress_checkpoint(
         job,
         &portable::path_name(source),
         TransferState::Copying,
@@ -863,7 +876,7 @@ fn mark_portable_source_skipped(
 fn wait_if_paused(
     job: &TransferJob,
     current_name: &str,
-    runtime: &TransferRuntime,
+    runtime: &mut TransferRuntime,
     tx: &Sender<TransferMessage>,
     control: &TransferControl,
 ) -> Result<()> {
@@ -871,13 +884,41 @@ fn wait_if_paused(
         return Ok(());
     }
 
-    emit_progress(job, current_name, TransferState::Paused, runtime, tx);
+    emit_progress_checkpoint(job, current_name, TransferState::Paused, runtime, tx);
     while control.pause.load(Ordering::Relaxed) {
         check_cancelled(control)?;
         std::thread::sleep(Duration::from_millis(80));
     }
-    emit_progress(job, current_name, TransferState::Copying, runtime, tx);
+    emit_progress_checkpoint(job, current_name, TransferState::Copying, runtime, tx);
     Ok(())
+}
+
+fn emit_progress_if_due(
+    job: &TransferJob,
+    current_name: &str,
+    state: TransferState,
+    runtime: &mut TransferRuntime,
+    tx: &Sender<TransferMessage>,
+) {
+    let advanced_bytes = runtime
+        .copied_bytes
+        .saturating_sub(runtime.last_emitted_bytes);
+    if runtime.last_emit.elapsed() >= PROGRESS_INTERVAL || advanced_bytes >= PROGRESS_BYTE_INTERVAL
+    {
+        emit_progress_checkpoint(job, current_name, state, runtime, tx);
+    }
+}
+
+fn emit_progress_checkpoint(
+    job: &TransferJob,
+    current_name: &str,
+    state: TransferState,
+    runtime: &mut TransferRuntime,
+    tx: &Sender<TransferMessage>,
+) {
+    emit_progress(job, current_name, state, runtime, tx);
+    runtime.last_emit = Instant::now();
+    runtime.last_emitted_bytes = runtime.copied_bytes;
 }
 
 fn emit_progress(
@@ -1114,6 +1155,101 @@ mod tests {
             .map(|entry| entry.path())
             .collect::<Vec<_>>();
         assert!(artifacts.is_empty(), "temporary artifacts: {artifacts:?}");
+    }
+
+    #[test]
+    fn byte_progress_emits_even_before_the_time_interval_expires() {
+        let job = TransferJob {
+            id: 7,
+            sources: vec![PathBuf::from("one.bin"), PathBuf::from("two.bin")],
+            destination: PathBuf::from("destination"),
+            kind: TransferKind::Copy,
+            conflict_policy: ConflictPolicy::KeepBoth,
+        };
+        let mut runtime = TransferRuntime::new(2 * 1024 * 1024 * 1024, 2);
+        runtime.last_emit = Instant::now();
+        runtime.copied_bytes = PROGRESS_BYTE_INTERVAL;
+        let (tx, rx) = mpsc::channel();
+
+        emit_progress_if_due(&job, "one.bin", TransferState::Copying, &mut runtime, &tx);
+
+        let TransferMessage::Progress(progress) = rx.try_recv().expect("byte checkpoint progress")
+        else {
+            panic!("unexpected transfer message");
+        };
+        assert_eq!(progress.copied_bytes, runtime.copied_bytes);
+        assert_eq!(runtime.last_emitted_bytes, runtime.copied_bytes);
+    }
+
+    #[test]
+    fn byte_progress_uses_a_stable_eight_mebibyte_cadence() {
+        assert_eq!(PROGRESS_BYTE_INTERVAL, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn multi_file_copy_reports_progress_inside_each_file() {
+        let root = temp_transfer_dir("multi-file-progress");
+        let source_dir = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(&source_dir).expect("create source directory");
+        fs::create_dir_all(&destination).expect("create destination directory");
+        let first = source_dir.join("first.bin");
+        let second = source_dir.join("second.bin");
+        let file_size = 17 * 1024 * 1024_u64;
+        fs::File::create(&first)
+            .and_then(|file| file.set_len(file_size))
+            .expect("create first sparse source");
+        fs::File::create(&second)
+            .and_then(|file| file.set_len(file_size))
+            .expect("create second sparse source");
+        let job = TransferJob {
+            id: 11,
+            sources: vec![first, second],
+            destination: destination.clone(),
+            kind: TransferKind::Copy,
+            conflict_policy: ConflictPolicy::KeepBoth,
+        };
+        let (tx, rx) = mpsc::channel();
+
+        run_transfer_inner(&job, &tx, &TransferControl::new()).expect("copy two files");
+        let progress = rx
+            .try_iter()
+            .filter_map(|message| match message {
+                TransferMessage::Progress(progress) => Some(progress),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(progress.iter().any(|item| {
+            item.current_name == "first.bin"
+                && item.files_done == 0
+                && item.copied_bytes >= PROGRESS_BYTE_INTERVAL
+                && item.copied_bytes < file_size
+        }));
+        assert!(progress.iter().any(|item| {
+            item.current_name == "second.bin"
+                && item.files_done == 1
+                && item.copied_bytes >= file_size + PROGRESS_BYTE_INTERVAL
+                && item.copied_bytes < file_size * 2
+        }));
+        assert!(
+            progress
+                .windows(2)
+                .all(|items| items[0].copied_bytes <= items[1].copied_bytes)
+        );
+        assert_eq!(
+            fs::metadata(destination.join("first.bin"))
+                .expect("first destination metadata")
+                .len(),
+            file_size
+        );
+        assert_eq!(
+            fs::metadata(destination.join("second.bin"))
+                .expect("second destination metadata")
+                .len(),
+            file_size
+        );
+        fs::remove_dir_all(root).expect("cleanup progress test directory");
     }
 
     #[test]

@@ -15,7 +15,10 @@ impl BExplorerIced {
         };
         let is_delete = matches!(
             item.kind,
-            TransferDisplayKind::Trash | TransferDisplayKind::PermanentDelete
+            TransferDisplayKind::Trash
+                | TransferDisplayKind::PermanentDelete
+                | TransferDisplayKind::RestoreTrash
+                | TransferDisplayKind::PurgeTrash
         );
         let files = if item.total_files == 0 {
             self.localized("Preparando archivos", "Preparing files")
@@ -99,7 +102,8 @@ impl BExplorerIced {
             } else {
                 Space::new().into()
             };
-        let card_width = TRANSFER_WINDOW_WIDTH
+        let card_height = progress_card_height(self.font_size());
+        let card_width = transfer_window_width(self.font_size())
             - WINDOW_BORDER_WIDTH * 2.0
             - TRANSFER_WINDOW_CARD_PADDING_X * 2.0;
         let current_name =
@@ -158,7 +162,7 @@ impl BExplorerIced {
 
         container(body)
             .width(Length::Fill)
-            .center_y(Length::Fixed(TRANSFER_CARD_HEIGHT))
+            .center_y(Length::Fixed(card_height))
             .clip(true)
             .style(move |_| {
                 container::Style::default()
@@ -174,9 +178,11 @@ impl BExplorerIced {
     ) -> Element<'_, Message> {
         let (window_bg, window_title_bg) = palette.native_utility_backgrounds();
         let items = self.transfer_items();
-        let panel_height = transfer_window_size_for_item_count(items.len()).height;
+        let font_size = self.font_size();
+        let title_height = transfer_window_title_height(font_size);
+        let panel_height = transfer_window_size_for_item_count(items.len(), font_size).height;
         let inner_height = (panel_height - WINDOW_BORDER_WIDTH * 2.0).max(0.0);
-        let body_height = (inner_height - TRANSFER_WINDOW_TITLE_HEIGHT).max(0.0);
+        let body_height = (inner_height - title_height).max(0.0);
         let title_drag_area = mouse_area(
             container(
                 text(self.localized("Transferencias", "Transfers"))
@@ -185,7 +191,7 @@ impl BExplorerIced {
                     .align_x(Horizontal::Center)
                     .width(Length::Fill),
             )
-            .height(TRANSFER_WINDOW_TITLE_HEIGHT)
+            .height(title_height)
             .width(Length::Fill)
             .center_y(Length::Fill),
         )
@@ -193,11 +199,16 @@ impl BExplorerIced {
         let title_bar = container(
             row![
                 title_drag_area,
-                native_window_minimize_button(Message::TransferWindowMinimize, palette),
+                native_window_minimize_button(
+                    Message::TransferWindowMinimize,
+                    palette,
+                    title_height,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
         )
-        .height(TRANSFER_WINDOW_TITLE_HEIGHT)
+        .height(title_height)
         .width(Length::Fill)
         .style(move |_| {
             container::Style::default()
@@ -217,9 +228,9 @@ impl BExplorerIced {
             .into()
         } else {
             let item_count = items.len();
-            let cards_height = progress_card_list_height(item_count);
-            let visible_height = progress_visible_card_list_height(item_count);
-            let mut list = column![].spacing(TRANSFER_CARD_GAP);
+            let cards_height = progress_card_list_height(item_count, font_size);
+            let visible_height = progress_visible_card_list_height(item_count, font_size);
+            let mut list = column![].spacing(progress_card_gap(font_size));
             for item in items {
                 list = list.push(self.transfer_item_card(item, palette));
             }

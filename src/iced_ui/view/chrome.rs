@@ -24,7 +24,8 @@ impl BExplorerIced {
                 Space::new().width(SPLIT_DIVIDER_WIDTH).height(TITLE_HEIGHT),
                 container(row![
                     self.title_tabs(PaneId::Secondary, palette),
-                    self.title_drag_gap()
+                    self.title_drag_gap(),
+                    Space::new().width(self.title_controls_width()),
                 ])
                 .width(Length::FillPortion(secondary))
                 .height(TITLE_HEIGHT),
@@ -36,7 +37,8 @@ impl BExplorerIced {
 
         row![
             self.title_tabs(PaneId::Primary, palette),
-            self.title_drag_gap()
+            self.title_drag_gap(),
+            Space::new().width(self.title_controls_width()),
         ]
         .height(TITLE_HEIGHT)
         .width(Length::Fill)
@@ -54,7 +56,10 @@ impl BExplorerIced {
     }
 
     pub(super) fn title_tabs(&self, pane: PaneId, palette: Palette) -> Element<'_, Message> {
-        let mut tabs = row![].spacing(3).align_y(Alignment::Center);
+        let tab_width = self.tab_width_for_pane(pane);
+        let mut tabs = row![]
+            .spacing(self.tab_spacing())
+            .align_y(Alignment::Center);
         for (slot, tab_index) in self.tab_indices_for_pane(pane).into_iter().enumerate() {
             let Some(tab) = self.tabs.get(tab_index) else {
                 continue;
@@ -71,10 +76,15 @@ impl BExplorerIced {
                 .map(|drag| drag.offset_x)
                 .unwrap_or(0.0);
             let dragging = drag_offset.abs() > 0.1;
-            let title = if tab.path.is_none() {
-                self.localized("Este equipo", "This PC").to_owned()
-            } else {
-                tab.title.clone()
+            let title = match tab.path.as_deref() {
+                None => self.localized("Este equipo", "This PC").to_owned(),
+                Some(path) if explorer::is_trash_root_path(path) => {
+                    self.localized("Papelera", "Recycle Bin").to_owned()
+                }
+                Some(path) => self
+                    .storage_display_name_for_path(path)
+                    .unwrap_or(&tab.title)
+                    .to_owned(),
             };
             tabs = tabs.push(self.tab_button(
                 pane,
@@ -86,10 +96,17 @@ impl BExplorerIced {
                     dragging,
                     drag_offset,
                 },
+                tab_width,
                 palette,
             ));
         }
-        tabs = tabs.push(icon_button("add", Message::NewTab(pane), palette, false));
+        tabs = tabs.push(icon_button(
+            "add",
+            Message::NewTab(pane),
+            palette,
+            false,
+            self.font_size(),
+        ));
         container(
             column![Space::new().height(Length::Fill), tabs]
                 .spacing(0)
@@ -107,6 +124,7 @@ impl BExplorerIced {
         slot: usize,
         title: String,
         visual: TabVisualState,
+        tab_width: f32,
         palette: Palette,
     ) -> Element<'_, Message> {
         let TabVisualState {
@@ -115,51 +133,77 @@ impl BExplorerIced {
             dragging,
             drag_offset,
         } = visual;
-        let title_text = text(ellipsize_text(&title, 26))
-            .size(self.font_size())
-            .color(if active {
-                palette.text
-            } else {
-                palette.muted_text
-            });
+        let tab_height = self.ui_metric(TAB_HEIGHT);
+        let close_button_width = self.ui_metric(TAB_CLOSE_BUTTON_WIDTH);
+        let left_padding = self.ui_metric(TAB_LEFT_PADDING);
+        let right_padding = self.ui_metric(TAB_RIGHT_PADDING);
+        let icon_size = self.ui_metric(TAB_ICON_SIZE);
+        let icon_text_gap = self.ui_metric(TAB_ICON_TEXT_GAP);
+        let title_width = (tab_width
+            - left_padding
+            - right_padding
+            - close_button_width
+            - icon_size
+            - icon_text_gap)
+            .max(self.ui_metric(24.0));
+        let title_text = text(ellipsize_tab_title_to_width(
+            &title,
+            title_width,
+            self.font_size(),
+        ))
+        .size(self.font_size())
+        .color(if active {
+            palette.text
+        } else {
+            palette.muted_text
+        })
+        .wrapping(iced::widget::text::Wrapping::None)
+        .width(Length::Fill);
 
-        let leading = row![
-            inline_icon("folder", palette.folder, TAB_ICON_SIZE),
-            title_text,
-        ]
-        .spacing(5)
-        .align_y(Alignment::Center)
-        .width(Length::Shrink);
+        let leading = row![inline_icon("folder", palette.folder, icon_size), title_text,]
+            .spacing(icon_text_gap)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
 
         let label = row![
             container(leading)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_x(Horizontal::Left)
-                .center_y(Length::Fill),
+                .center_y(Length::Fill)
+                .clip(true),
             Button::new(
-                container(inline_icon("x", palette.muted_text, TAB_CLOSE_ICON_SIZE))
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
+                container(inline_icon(
+                    "x",
+                    palette.muted_text,
+                    self.ui_metric(TAB_CLOSE_ICON_SIZE),
+                ))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .center_x(Length::Fill)
+                .center_y(Length::Fill),
             )
-            .width(24)
-            .height(TAB_HEIGHT - TAB_UNDERLINE_HEIGHT)
+            .width(close_button_width)
+            .height(tab_height - TAB_UNDERLINE_HEIGHT)
             .padding(0)
             .on_press(Message::CloseTab(pane, slot))
             .style(move |_, status| button_style(palette, false, status)),
         ]
         .width(Length::Fill)
         .height(Length::Fill)
-        .padding([0, 8])
+        .padding(Padding {
+            top: 0.0,
+            right: right_padding,
+            bottom: 0.0,
+            left: left_padding,
+        })
         .spacing(0)
         .align_y(Alignment::Center);
 
         let tab_body = container(label)
             .padding(0)
             .width(Length::Fill)
-            .height(TAB_HEIGHT - TAB_UNDERLINE_HEIGHT)
+            .height(tab_height - TAB_UNDERLINE_HEIGHT)
             .align_x(Horizontal::Left)
             .center_y(Length::Fill)
             .style(move |_| tab_body_style(palette, active, focused_active, dragging));
@@ -184,8 +228,8 @@ impl BExplorerIced {
                 .width(Length::Fill)
                 .height(Length::Fill),
         )
-        .width(TAB_WIDTH)
-        .height(TAB_HEIGHT)
+        .width(tab_width)
+        .height(tab_height)
         .clip(true);
 
         if dragging {
@@ -208,7 +252,7 @@ impl BExplorerIced {
         }
         let sidebar_width = self.current_sidebar_width();
 
-        let mut content = column![].padding([8, 8]).spacing(1);
+        let mut content = column![].padding(self.ui_vertical_padding(8.0)).spacing(1);
         for section in self
             .config
             .normalized_sidebar_order()
@@ -218,7 +262,32 @@ impl BExplorerIced {
             content = content.push(self.sidebar_section(pane, section, palette));
         }
 
-        let panel = container(scrollable(content))
+        let trash_item = self.sidebar_item(
+            pane,
+            SidebarItem {
+                label: self.localized("Papelera", "Recycle Bin").to_owned(),
+                target: SidebarTarget::Navigate(Some(explorer::trash_root_path())),
+                icon: "trash",
+                context_drive_index: None,
+            },
+            palette,
+        );
+        let trash_footer = column![
+            container(Space::new())
+                .width(Length::Fill)
+                .height(1)
+                .style(move |_| container::Style::default().background(palette.border)),
+            container(trash_item).padding(Padding {
+                top: 4.0,
+                right: 0.0,
+                bottom: 8.0,
+                left: 0.0,
+            }),
+        ];
+        let panel_content =
+            column![scrollable(content).height(Length::Fill), trash_footer].height(Length::Fill);
+
+        let panel = container(panel_content)
             .width(sidebar_width)
             .height(Length::Fill)
             .clip(true)
@@ -270,7 +339,7 @@ impl BExplorerIced {
             .unwrap_or(0.0);
 
         if dragging {
-            let mut section_content = column![Space::new().height(SIDEBAR_SECTION_HEIGHT)]
+            let mut section_content = column![Space::new().height(self.sidebar_section_height())]
                 .spacing(1)
                 .width(Length::Fill);
             if expanded {
@@ -347,43 +416,54 @@ impl BExplorerIced {
         } else {
             palette.text
         };
+        let native_icon_size = self.ui_metric(18.0);
+        let fallback_icon_size = self.ui_metric(16.0);
+        let fallback_icon_color = if highlighted {
+            palette.accent_text
+        } else {
+            palette.accent
+        };
         let icon: Element<'static, Message> = match &item.target {
             SidebarTarget::Navigate(Some(path)) if !explorer::is_virtual_path(path) => self
                 .sidebar_directory_icon_handle(path)
                 .map(|handle| {
                     iced_image::Image::new(handle)
-                        .width(18)
-                        .height(18)
+                        .width(native_icon_size)
+                        .height(native_icon_size)
                         .content_fit(ContentFit::Contain)
                         .into()
                 })
-                .unwrap_or_else(|| inline_icon(item.icon, palette.accent, 16.0)),
-            _ => inline_icon(item.icon, palette.accent, 16.0),
+                .unwrap_or_else(|| inline_icon(item.icon, fallback_icon_color, fallback_icon_size)),
+            _ => inline_icon(item.icon, fallback_icon_color, fallback_icon_size),
         };
         let label = if matches!(&item.target, SidebarTarget::Navigate(None)) {
             self.localized("Este equipo", "This PC").to_owned()
         } else {
             item.label.clone()
         };
-        let row = row![
-            icon,
+        let label = container(
             text(label)
                 .size((self.font_size() - 0.5).max(11.0))
                 .color(color)
-                .wrapping(iced::widget::text::Wrapping::None)
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
+                .width(Length::Fill)
+                .wrapping(iced::widget::text::Wrapping::None),
+        )
+        .width(Length::Fill)
+        .clip(true);
+        let row = row![icon, label]
+            .spacing(self.ui_metric(10.0))
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
 
         let button = Button::new(row)
             .padding(Padding {
                 top: 6.0,
-                right: 14.0,
+                right: self.ui_metric(14.0),
                 bottom: 6.0,
-                left: 26.0,
+                left: self.ui_metric(26.0),
             })
             .width(Length::Fill)
-            .height(SIDEBAR_ITEM_HEIGHT)
+            .height(self.sidebar_item_height())
             .style(move |_, status| selected_button_style(palette, highlighted, status));
 
         match item.target {
@@ -554,7 +634,7 @@ impl BExplorerIced {
                 .on_input(Message::AddressChanged)
                 .on_submit(Message::SubmitAddress(pane))
                 .size(self.font_size())
-                .padding([5, 10])
+                .padding([5.0, self.ui_metric(10.0)])
                 .width(Length::Fill)
                 .style(move |_, status| {
                     let border_color =
@@ -574,7 +654,7 @@ impl BExplorerIced {
                 });
             return container(input)
                 .width(Length::Fill)
-                .height(30)
+                .height(self.ui_metric(30.0))
                 .center_y(Length::Fill)
                 .into();
         }
@@ -582,6 +662,16 @@ impl BExplorerIced {
         let mut breadcrumbs = address_breadcrumbs(self.tab_for_pane(pane).path.as_ref());
         if let Some((label, _)) = breadcrumbs.first_mut() {
             *label = self.localized("Este equipo", "This PC").to_owned();
+        }
+        for (label, target) in &mut breadcrumbs {
+            if target.as_deref().is_some_and(explorer::is_trash_root_path) {
+                *label = self.localized("Papelera", "Recycle Bin").to_owned();
+            } else if let Some(name) = target
+                .as_deref()
+                .and_then(|path| self.storage_display_name_for_path(path))
+            {
+                *label = name.to_owned();
+            }
         }
         let navigation_secondary =
             if palette.table_bg.r + palette.table_bg.g + palette.table_bg.b > 2.1 {
@@ -593,7 +683,9 @@ impl BExplorerIced {
                 // enough that they do not look faded beside the active path.
                 mix_color(palette.muted_text, Color::WHITE, 0.42)
             };
-        let mut trail = row![].spacing(1).align_y(Alignment::Center);
+        let mut trail = row![]
+            .spacing(self.ui_metric(1.0))
+            .align_y(Alignment::Center);
         let last = breadcrumbs.len().saturating_sub(1);
         for (index, (label, target)) in breadcrumbs.into_iter().enumerate() {
             let active = index == last;
@@ -607,20 +699,24 @@ impl BExplorerIced {
                     })
                     .wrapping(iced::widget::text::Wrapping::None),
             )
-            .padding([4, 6])
+            .padding([4.0, self.ui_metric(6.0)])
             .on_press(Message::Navigate(pane, target))
             .style(move |_, status| selected_button_style(palette, active, status));
             trail = trail.push(crumb);
             if index != last {
-                trail = trail.push(inline_icon("chev-right", navigation_secondary, 13.0));
+                trail = trail.push(inline_icon(
+                    "chev-right",
+                    navigation_secondary,
+                    self.ui_metric(13.0),
+                ));
             }
         }
 
         mouse_area(
             container(trail)
                 .width(Length::Fill)
-                .height(30)
-                .padding([0, 4])
+                .height(self.ui_metric(30.0))
+                .padding([0.0, self.ui_metric(4.0)])
                 .center_y(Length::Fill)
                 .clip(true)
                 .style(move |_| {

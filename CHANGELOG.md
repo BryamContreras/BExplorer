@@ -2,6 +2,97 @@
 
 All notable user-facing changes to BExplorer are documented here.
 
+## Unreleased
+
+## 1.0.4 - 2026-07-27
+
+- Fixed KDE and GNOME launchers continuing to display the previous application
+  icon because the hicolor sizes had not been regenerated from the canonical
+  icon. Linux packaging now validates all installed sizes before building.
+- Added native Trash views on Windows and Linux with restore, delete, empty,
+  grouping, preview, contextual actions, and localized status text.
+- Added Send to submenus for removable storage and desktop-provided Bluetooth
+  and mail destinations, using native themed icons and reliable submenu
+  positioning.
+- Added a setting to reveal normally hidden system units while filtering boot,
+  home, reserved, and implementation-specific mounts by default. Removable
+  media and portable devices now expose duplicate cleanup without offering it
+  on protected system units.
+- Made the interface scale its row, card, dialog, toolbar, sidebar, icon, and
+  control dimensions with the configured font size. Properties and Settings
+  gained responsive widths, clearer headers, aligned actions, and improved
+  long-text handling.
+- Made title-bar tabs single-line, ellipsized, and adaptively narrower as more
+  tabs open. Split panes retain independent tab areas aligned with their
+  content divider.
+- Added recursive duplicate cleanup for local folders. The new context-menu
+  action opens a live progress window with selectable, creation-date-sorted
+  results grouped by extension and classified as Original, Exact match, or
+  Possible match. Exact matches require the same name, extension, and size;
+  possible matches require a similar name and the same extension. Selected
+  candidates require confirmation and move to the native system trash, after
+  which the folder is scanned again automatically.
+- Multi-file transfers now publish cumulative byte progress every 8 MiB or
+  80 ms while each current file is being written. Normal copies no longer
+  force a blocking physical flush after every file, eliminating repeated
+  multi-second stalls on USB media; atomic replacements and cross-filesystem
+  moves retain the required durability before the original is discarded.
+- Fixed context submenus so they align with the row that opened them at every
+  configured font size. Send-to destinations now use the active desktop icon
+  theme, and Linux removable volumes prefer UDisks/udev labels and partition
+  names over UUID-based mount-directory names.
+- Portable-device icons now follow the native Linux backend: KDE/KIO uses its
+  `multimedia-player` theme icon, while GNOME/GVfs preserves the themed-icon
+  priority advertised by GIO. MTP, camera, and iOS fallbacks remain compatible
+  with Breeze, Adwaita, and other Freedesktop icon themes.
+- Added native Linux MTP discovery and file operations for phones and tablets
+  that are not already mounted as filesystem paths. KDE uses the stable
+  `org.kde.kmtpd5` D-Bus interfaces supplied by KIO Extras, while GNOME and
+  other desktops use GVfs/GIO and its FUSE mount. Connection changes refresh
+  automatically, and navigation, image thumbnails, search, copy, move, and delete
+  share the existing portable-device workflow used on Windows.
+- File transfers, moves, deletions, archive jobs, and Defender scans now keep
+  running when the main explorer window is closed. Their progress windows
+  remain independent, the temporary operation host exits after the final job,
+  and launching BExplorer again safely reopens the existing instance instead
+  of abandoning or duplicating its active work.
+- Added a scalable play icon and filmstrip side rails to video thumbnails so
+  video frames remain distinguishable from image files without modifying the
+  native or shared thumbnail cache. Compact views retain the play icon without
+  crowded film perforations.
+- Integrated Windows image and video thumbnails with the system-wide Shell
+  thumbnail cache. BExplorer performs cache-only reads first, invokes installed
+  native thumbnail providers only on a miss with bounded concurrency, and
+  retains its internal image decoder as a portable fallback. Internally decoded
+  images are persisted in a metadata-invalidated BExplorer cache with automatic
+  age and size cleanup, avoiding repeated source decoding without adding an
+  FFmpeg or desktop-specific dependency.
+- Unified local image and video thumbnails on Linux around the shared
+  Freedesktop XDG cache. BExplorer now generates and caches common image formats
+  internally with Exif orientation and bounded memory, invokes registered
+  `.thumbnailer` providers or XFCE Tumbler when useful, and falls back to
+  bounded `ffmpegthumbnailer`/`ffmpeg` frame extraction for media formats the
+  internal decoder cannot handle. Large image files are no longer rejected
+  solely by their compressed byte size. File URIs match GLib/KDE encoding for
+  names containing punctuation, and generated previews can be reused by other
+  compliant file managers.
+- Added direct TAR.GZ/TGZ browsing and layered extraction so BExplorer shows
+  the TAR contents instead of an empty GZip container or an intermediate
+  `.tar` file.
+- Fixed Fedora 44/Plasma 6.7 window blur by supporting the standardized
+  `ext-background-effect-v1` Wayland protocol while retaining the legacy KWin
+  protocol for older Plasma releases.
+- Fixed the abrupt opaque/translucent transition on newer KWin versions by
+  preferring an 8-bit alpha surface instead of KWin's 2-bit-alpha
+  `Rgb10a2Unorm` fallback, and by matching Iced's premultiplied renderer output
+  with a premultiplied Wayland surface. The KDE transparency curve is
+  continuous and redundant nested fills no longer mask the blur across the
+  explorer's content.
+- Transparency changes are previewed over the live KWin blur instead of a
+  frozen backdrop captured when Settings was opened.
+- Fixed dark system themes switching to the light fallback when file
+  operations opened a transfer or archive window on Wayland.
+
 ## 1.0.3 - 2026-07-24
 
 - Fixed the file view jumping to the top when Control was pressed while

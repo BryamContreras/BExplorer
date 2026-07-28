@@ -1,5 +1,9 @@
 use super::*;
 
+fn file_drag_source_allowed(is_this_pc_root: bool, is_trash_item: bool, kind: &EntryKind) -> bool {
+    !is_trash_item && !(is_this_pc_root && *kind == EntryKind::Drive)
+}
+
 impl BExplorerIced {
     pub(in crate::iced_ui) fn refresh_file_drag_fade_snapshot(&mut self) {
         let Some(drag) = self.file_drag.as_ref().filter(|drag| drag.dragging) else {
@@ -50,14 +54,15 @@ impl BExplorerIced {
         index: usize,
     ) -> Task<Message> {
         self.focus_pane(pane);
-        let Some(path) = self
-            .pane(pane)
-            .entries
-            .get(index)
-            .map(|entry| entry.path.clone())
-        else {
+        let Some(entry) = self.pane(pane).entries.get(index) else {
             return Task::none();
         };
+        let drag_allowed = file_drag_source_allowed(
+            self.is_this_pc_root(pane),
+            explorer::is_trash_item_path(&entry.path),
+            &entry.kind,
+        );
+        let path = entry.path.clone();
 
         if self
             .rename_dialog
@@ -80,6 +85,11 @@ impl BExplorerIced {
             }
             state.selection_anchor = Some(index);
             self.last_entry_click = None;
+            return Task::batch([commit_task, self.queue_selected_preview(pane)]);
+        }
+        if !drag_allowed {
+            self.select_single(pane, index);
+            self.rubber_band = None;
             return Task::batch([commit_task, self.queue_selected_preview(pane)]);
         }
         let collapse_selection_on_click =
@@ -229,11 +239,9 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn set_file_drag_target(&mut self, pane: PaneId, index: usize) {
-        let is_container = self
-            .pane(pane)
-            .entries
-            .get(index)
-            .is_some_and(|entry| entry.kind.is_container());
+        let is_container = self.pane(pane).entries.get(index).is_some_and(|entry| {
+            entry.kind.is_container() && !explorer::is_trash_item_path(&entry.path)
+        });
         let Some(drag) = self.file_drag.as_mut() else {
             return;
         };
@@ -328,6 +336,16 @@ impl BExplorerIced {
                 };
                 (target_pane, destination)
             };
+
+        if explorer::is_trash_path(&destination) {
+            self.pane_mut(drag.source_pane).status = self
+                .localized(
+                    "No se pueden soltar archivos dentro de la papelera.",
+                    "Files cannot be dropped inside the Recycle Bin.",
+                )
+                .into();
+            return Task::none();
+        }
 
         if drag
             .sources
@@ -450,7 +468,7 @@ impl BExplorerIced {
     ) -> Vec<usize> {
         let group_mode = self.effective_group_mode(pane);
         let mut current_group: Option<String> = None;
-        let mut y = DETAIL_HEADER_HEIGHT - self.pane(pane).scroll_offset_y;
+        let mut y = self.detail_header_height() - self.pane(pane).scroll_offset_y;
         // Rows end at the last visible table column. The remaining surface is
         // empty space, so a rubber-band drawn there must not select any row.
         let width = self
@@ -466,19 +484,19 @@ impl BExplorerIced {
                 let group = entry_group_label(entry, group_mode);
                 if current_group.as_ref() != Some(&group) {
                     current_group = Some(group);
-                    y += DETAIL_GROUP_HEIGHT;
+                    y += self.detail_group_height();
                 }
             }
             let row_rect = Rectangle {
                 x: 0.0,
                 y,
                 width,
-                height: DETAIL_ROW_HEIGHT,
+                height: self.detail_row_height(),
             };
             if rects_intersect(rect, row_rect) {
                 selected.push(index);
             }
-            y += DETAIL_ROW_HEIGHT;
+            y += self.detail_row_height();
         }
         selected
     }
@@ -514,7 +532,7 @@ impl BExplorerIced {
                         col = 0;
                     }
                     current_group = Some(group);
-                    y += DETAIL_GROUP_HEIGHT + metrics.spacing;
+                    y += self.detail_group_height() + metrics.spacing;
                 }
             }
 
@@ -570,5 +588,18 @@ impl BExplorerIced {
             0.0
         };
         (pane_width - pane_sidebar_width - preview_width).max(1.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn this_pc_drives_cannot_start_a_file_drag() {
+        assert!(!file_drag_source_allowed(true, false, &EntryKind::Drive));
+        assert!(file_drag_source_allowed(true, false, &EntryKind::Folder));
+        assert!(file_drag_source_allowed(false, false, &EntryKind::Drive));
+        assert!(!file_drag_source_allowed(false, true, &EntryKind::File));
     }
 }

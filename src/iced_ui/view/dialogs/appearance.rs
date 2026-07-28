@@ -133,7 +133,13 @@ impl BExplorerIced {
                 ]
                 .spacing(2)
                 .width(Length::Fill),
-                icon_button("x", Message::ToggleColorPicker, palette, false),
+                icon_button(
+                    "x",
+                    Message::ToggleColorPicker,
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
                 container(Space::new().width(30).height(30)).style(move |_| {
                     container::Style::default()
                         .background(accent_gradient(palette))

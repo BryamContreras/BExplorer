@@ -73,8 +73,12 @@ impl BExplorerIced {
                     FileCategory::DiskImage => "Imagen de disco",
                     FileCategory::Other => "Archivo",
                 };
-                entry
-                    .path
+                let type_path = if explorer::is_virtual_path(&entry.path) {
+                    Path::new(&entry.name)
+                } else {
+                    &entry.path
+                };
+                type_path
                     .extension()
                     .and_then(|extension| extension.to_str())
                     .filter(|extension| !extension.is_empty())
@@ -147,6 +151,8 @@ impl BExplorerIced {
                 TransferDisplayKind::Move => "Moving",
                 TransferDisplayKind::Trash => "Moving to recycle bin",
                 TransferDisplayKind::PermanentDelete => "Deleting permanently",
+                TransferDisplayKind::RestoreTrash => "Restoring from recycle bin",
+                TransferDisplayKind::PurgeTrash => "Deleting from recycle bin",
             },
         }
     }
@@ -163,6 +169,8 @@ impl BExplorerIced {
             TransferState::Copying => match item.kind {
                 TransferDisplayKind::Trash => "Moving items to recycle bin",
                 TransferDisplayKind::PermanentDelete => "Deleting items",
+                TransferDisplayKind::RestoreTrash => "Restoring items",
+                TransferDisplayKind::PurgeTrash => "Deleting items",
                 _ => "Copying files",
             },
             TransferState::Paused => "Paused",
@@ -182,6 +190,17 @@ impl BExplorerIced {
         let table_width = widths.total_width();
         let sort_column = self.pane(pane).sort_column;
         let sort_ascending = self.pane(pane).sort_ascending;
+        let trash_view = self.is_trash_pane(pane);
+        let modified_label = if trash_view {
+            self.localized("Ubicación original", "Original location")
+        } else {
+            self.localized("Modificado", "Modified")
+        };
+        let created_label = if trash_view {
+            self.localized("Fecha de eliminación", "Date deleted")
+        } else {
+            self.localized("Creado", "Created")
+        };
         let header_config = |column, resizable| TableHeaderConfig {
             pane,
             column,
@@ -195,38 +214,43 @@ impl BExplorerIced {
                 widths.name,
                 header_config(TableColumn::Name, true),
                 palette,
-                table_font_size
+                table_font_size,
+                self.detail_header_height(),
             ),
             table_header(
                 self.localized("Tipo", "Type"),
                 widths.type_label,
                 header_config(TableColumn::Type, true),
                 palette,
-                table_font_size
+                table_font_size,
+                self.detail_header_height(),
             ),
             table_header(
                 self.localized("Tamaño", "Size"),
                 widths.size,
                 header_config(TableColumn::Size, true),
                 palette,
-                table_font_size
+                table_font_size,
+                self.detail_header_height(),
             ),
             table_header(
-                self.localized("Modificado", "Modified"),
+                modified_label,
                 widths.modified,
                 header_config(TableColumn::Modified, true),
                 palette,
-                table_font_size
+                table_font_size,
+                self.detail_header_height(),
             ),
             table_header(
-                self.localized("Creado", "Created"),
-                DETAIL_DATE_MIN_WIDTH,
+                created_label,
+                widths.created,
                 header_config(TableColumn::Created, false),
                 palette,
-                table_font_size
+                table_font_size,
+                self.detail_header_height(),
             ),
         ]
-        .height(DETAIL_HEADER_HEIGHT)
+        .height(self.detail_header_height())
         .align_y(Alignment::Center)
         .width(Length::Fixed(table_width));
 
@@ -244,7 +268,12 @@ impl BExplorerIced {
                 let group = self.localized_entry_group_label(entry, group_mode);
                 if current_group.as_ref() != Some(&group) {
                     current_group = Some(group.clone());
-                    rows = rows.push(file_group_header(group, palette, self.font_size()));
+                    rows = rows.push(file_group_header(
+                        group,
+                        palette,
+                        self.font_size(),
+                        self.detail_group_height(),
+                    ));
                 }
             }
             rows = rows.push(self.file_row(pane, index, entry, palette, widths));
@@ -293,12 +322,13 @@ impl BExplorerIced {
         .width(Length::Fill)
         .height(Length::Fill)
         .into();
+        let content_background = self.file_content_background(palette);
         let base: Element<'_, Message> = container(content)
             .width(Length::Fill)
             .height(Length::Fill)
             .style(move |_| {
                 container::Style::default()
-                    .background(palette.table_bg)
+                    .background(content_background)
                     .border(border::color(palette.border).width(1))
             })
             .into();

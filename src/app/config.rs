@@ -227,6 +227,7 @@ pub struct AppConfig {
     pub favorites: Vec<PathBuf>,
     pub recent_paths: Vec<PathBuf>,
     pub show_hidden: bool,
+    pub show_hidden_system_drives: bool,
     pub show_extensions: bool,
     pub show_icon_borders: bool,
     pub show_action_bar: bool,
@@ -266,6 +267,7 @@ impl Default for AppConfig {
             favorites: Vec::new(),
             recent_paths: Vec::new(),
             show_hidden: true,
+            show_hidden_system_drives: false,
             show_extensions: true,
             show_icon_borders: true,
             show_action_bar: true,
@@ -398,5 +400,6 @@ mod tests {
         assert!(!config.window_maximized);
         assert!(config.show_extensions);
         assert!(config.show_hidden);
+        assert!(!config.show_hidden_system_drives);
     }
 }

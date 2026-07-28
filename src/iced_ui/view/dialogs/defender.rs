@@ -187,7 +187,12 @@ impl BExplorerIced {
         let title_bar = container(
             row![
                 title_drag_area,
-                native_window_minimize_button(Message::DefenderWindowMinimize, palette),
+                native_window_minimize_button(
+                    Message::DefenderWindowMinimize,
+                    palette,
+                    TRANSFER_WINDOW_TITLE_HEIGHT,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
         )
@@ -297,7 +302,12 @@ impl BExplorerIced {
         let title_bar = container(
             row![
                 title_drag_area,
-                native_window_minimize_button(Message::DefenderThreatsWindowMinimize, palette),
+                native_window_minimize_button(
+                    Message::DefenderThreatsWindowMinimize,
+                    palette,
+                    TRANSFER_WINDOW_TITLE_HEIGHT,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
         )

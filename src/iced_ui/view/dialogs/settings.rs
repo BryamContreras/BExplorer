@@ -4,16 +4,37 @@ use iced::widget::{column, row};
 impl BExplorerIced {
     pub(in crate::iced_ui) fn settings_modal(&self, palette: Palette) -> Element<'_, Message> {
         let font_size = self.config.font_size.round() as i32;
+        let density = self.ui_density();
+        let stacked_content_height = ui_text_line_height(self.font_size())
+            + ui_text_line_height(self.font_size() - 1.0)
+            + 3.0;
+        let stacked_row_padding =
+            ((self.stacked_text_control_height(44.0) - stacked_content_height) * 0.5).max(0.0);
+        let single_row_height = self.ui_metric(44.0);
+        let single_row_padding =
+            ((single_row_height - TITLE_BUTTON_HEIGHT) * 0.5).max(stacked_row_padding);
+        let panel_width = self.modal_text_surface_width(470.0);
+        let panel_height = settings_panel_height(self.font_size(), self.window_size.height);
         let dark = self.is_dark_theme();
         let spanish = self.is_spanish();
         let color_picker_open = self.color_picker_open;
-        let color_swatch = Button::new(container(Space::new().width(38).height(28)).style(
-            move |_| {
+        // KWin Settings opens without a frozen backdrop so the real window can
+        // be previewed underneath. Keep its modal veil light; otherwise it
+        // masks the opacity difference the user is trying to tune.
+        let live_vibrancy_preview = self.uses_linux_surface_blur() && self.popup_backdrop.is_none();
+        let modal_veil_alpha = if live_vibrancy_preview { 0.04 } else { 0.42 };
+        let color_swatch = Button::new(
+            container(
+                Space::new()
+                    .width(self.ui_metric(38.0))
+                    .height(self.ui_metric(28.0)),
+            )
+            .style(move |_| {
                 container::Style::default()
                     .background(accent_gradient(palette))
                     .border(border::rounded(5).color(palette.strong_border).width(1))
-            },
-        ))
+            }),
+        )
         .padding(2)
         .on_press(Message::ToggleColorPicker)
         .style(move |_, status| dialog_button_style(palette, color_picker_open, status));
@@ -33,11 +54,17 @@ impl BExplorerIced {
                 ]
                 .spacing(3)
                 .width(Length::Fill),
-                icon_button("x", Message::ToggleSettings, palette, false),
+                icon_button(
+                    "x",
+                    Message::ToggleSettings,
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
             ]
             .align_y(Alignment::Center),
         )
-        .padding([14, 16])
+        .padding([self.ui_vertical_padding(14.0), 16.0 + density])
         .style(move |_| {
             container::Style::default()
                 .background(mix_color(palette.title_bg, palette.menu_bg, 0.34))
@@ -64,16 +91,15 @@ impl BExplorerIced {
                     Message::SelectLanguage,
                 )
                 .text_size(self.font_size())
-                .padding([5, 8])
+                .padding([self.ui_vertical_padding(5.0), 8.0 + density])
                 .style(move |_, status| settings_pick_list_style(palette, status))
                 .menu_style(move |_| settings_pick_list_menu_style(palette))
-                .width(Length::Fixed(142.0)),
+                .width(Length::Fixed(self.ui_metric(142.0))),
             ]
             .align_y(Alignment::Center)
             .spacing(10),
         )
-        .height(44)
-        .padding([5, 9])
+        .padding([stacked_row_padding, 9.0 + density])
         .style(move |_| {
             container::Style::default()
                 .background(mix_color(palette.input_bg, palette.header_bg, 0.42))
@@ -112,27 +138,27 @@ impl BExplorerIced {
                     .size(self.font_size())
                     .color(palette.text)
                     .width(Length::Fill),
-                icon_button("min", Message::FontDown, palette, false),
+                icon_button("min", Message::FontDown, palette, false, self.font_size(),),
                 container(
                     text(format!("{font_size} px"))
                         .size(self.font_size())
                         .color(palette.text)
-                        .width(64)
+                        .width(self.ui_metric(64.0))
                         .align_x(Horizontal::Center),
                 )
-                .padding([5, 4])
+                .padding([stacked_row_padding, 4.0 + density])
                 .style(move |_| {
                     container::Style::default()
                         .background(palette.page_bg)
                         .border(border::rounded(4).color(palette.border).width(1))
                 }),
-                icon_button("add", Message::FontUp, palette, false),
+                icon_button("add", Message::FontUp, palette, false, self.font_size(),),
             ]
             .align_y(Alignment::Center)
             .spacing(8),
         )
-        .height(44)
-        .padding([5, 9])
+        .height(single_row_height)
+        .padding([single_row_padding, 9.0 + density])
         .style(move |_| {
             container::Style::default()
                 .background(mix_color(palette.input_bg, palette.header_bg, 0.42))
@@ -163,8 +189,7 @@ impl BExplorerIced {
             .align_y(Alignment::Center)
             .spacing(10),
         )
-        .height(44)
-        .padding([5, 9])
+        .padding([stacked_row_padding, 9.0 + density])
         .style(move |_| {
             container::Style::default()
                 .background(if color_picker_open {
@@ -204,15 +229,14 @@ impl BExplorerIced {
                 .width(Length::Fill),
                 pick_list(theme_options, Some(selected_theme), Message::SelectTheme)
                     .text_size(self.font_size())
-                    .padding([5, 8])
+                    .padding([self.ui_vertical_padding(5.0), 8.0 + density])
                     .style(move |_, status| settings_pick_list_style(palette, status))
                     .menu_style(move |_| settings_pick_list_menu_style(palette))
-                    .width(Length::Fixed(142.0)),
+                    .width(Length::Fixed(self.ui_metric(142.0))),
             ]
             .align_y(Alignment::Center),
         )
-        .height(44)
-        .padding([5, 9])
+        .padding([stacked_row_padding, 9.0 + density])
         .style(move |_| {
             container::Style::default()
                 .background(mix_color(palette.input_bg, palette.header_bg, 0.42))
@@ -310,16 +334,15 @@ impl BExplorerIced {
                     Message::SelectVibrancy,
                 )
                 .text_size(self.font_size())
-                .padding([5, 8])
+                .padding([self.ui_vertical_padding(5.0), 8.0 + density])
                 .style(move |_, status| settings_pick_list_style(palette, status))
                 .menu_style(move |_| settings_pick_list_menu_style(palette))
-                .width(Length::Fixed(142.0)),
+                .width(Length::Fixed(self.ui_metric(142.0))),
             ]
             .align_y(Alignment::Center)
             .spacing(10),
         )
-        .height(44)
-        .padding([5, 9])
+        .padding([stacked_row_padding, 9.0 + density])
         .style(move |_| {
             container::Style::default()
                 .background(mix_color(palette.input_bg, palette.header_bg, 0.42))
@@ -329,12 +352,19 @@ impl BExplorerIced {
         let vibrancy_intensity: Element<'_, Message> = if self.config.vibrancy != VibrancyMode::None
         {
             let intensity = self.config.vibrancy_intensity.min(100);
+            let intensity_label = if self.uses_linux_surface_blur() {
+                self.localized("Transparencia", "Transparency")
+            } else {
+                self.localized("Intensidad", "Intensity")
+            };
+            let intensity_label_width =
+                adaptive_text_slot_width(intensity_label, self.font_size(), 84.0);
             container(
                 row![
-                    text(self.localized("Intensidad", "Intensity"))
+                    text(intensity_label)
                         .size(self.font_size())
                         .color(palette.text)
-                        .width(Length::Fixed(84.0)),
+                        .width(Length::Fixed(intensity_label_width)),
                     slider(0..=100, intensity, Message::SetVibrancyIntensity)
                         .step(1)
                         .on_release(Message::VibrancyIntensityReleased)
@@ -342,14 +372,14 @@ impl BExplorerIced {
                     text(format!("{intensity}%"))
                         .size(self.font_size() - 1.0)
                         .color(palette.muted_text)
-                        .width(Length::Fixed(38.0))
+                        .width(Length::Fixed(self.ui_metric(38.0)))
                         .align_x(Horizontal::Right),
                 ]
                 .align_y(Alignment::Center)
                 .spacing(9),
             )
-            .height(40)
-            .padding([4, 9])
+            .height(self.ui_metric(40.0))
+            .padding([self.ui_vertical_padding(4.0), 9.0 + density])
             .style(move |_| {
                 container::Style::default()
                     .background(mix_color(palette.input_bg, palette.header_bg, 0.42))
@@ -384,33 +414,52 @@ impl BExplorerIced {
                 Message::ToggleShowHidden,
                 palette,
             ),
+            self.settings_file_option(
+                self.localized(
+                    "Mostrar unidades del sistema ocultas",
+                    "Show hidden system drives",
+                ),
+                self.localized(
+                    "Incluye particiones y montajes reservados para el sistema",
+                    "Includes partitions and mounts reserved for the system",
+                ),
+                self.config.show_hidden_system_drives,
+                Message::ToggleShowHiddenSystemDrives,
+                palette,
+            ),
         ]
         .spacing(6);
 
-        let panel = container(
+        let settings_body = scrollable(
             column![
-                header,
-                column![
-                    text(self.localized("GENERAL", "GENERAL"))
-                        .size(self.font_size() - 1.0)
-                        .color(palette.muted_text),
-                    language_row,
-                    theme_row,
-                    text(self.localized("PERSONALIZACIÓN", "PERSONALIZATION"))
-                        .size(self.font_size() - 1.0)
-                        .color(palette.muted_text),
-                    font_row,
-                    accent_row,
-                    vibrancy_row,
-                    vibrancy_intensity,
-                    files_section,
-                ]
-                .spacing(9)
-                .padding([14, 16]),
+                text(self.localized("GENERAL", "GENERAL"))
+                    .size(self.font_size() - 1.0)
+                    .color(palette.muted_text),
+                language_row,
+                theme_row,
+                text(self.localized("PERSONALIZACIÓN", "PERSONALIZATION"))
+                    .size(self.font_size() - 1.0)
+                    .color(palette.muted_text),
+                font_row,
+                accent_row,
+                vibrancy_row,
+                vibrancy_intensity,
+                files_section,
             ]
-            .spacing(0),
+            .spacing(9)
+            .padding([self.ui_vertical_padding(14.0), 16.0 + self.ui_density()]),
         )
-        .width(470)
+        .height(Length::Fill)
+        .style(move |theme, status| {
+            explorer_scrollable_style(palette, theme, status, self.ui_density())
+        });
+        let panel = container(
+            column![header, settings_body]
+                .spacing(0)
+                .height(Length::Fill),
+        )
+        .width(panel_width)
+        .height(panel_height)
         .style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
@@ -422,8 +471,12 @@ impl BExplorerIced {
                 })
         });
 
-        let panel =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), panel.into(), 470.0, 570.0);
+        let panel = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            panel.into(),
+            panel_width,
+            panel_height,
+        );
         let modal = container(panel)
             .width(Length::Fill)
             .height(Length::Fill)
@@ -433,7 +486,7 @@ impl BExplorerIced {
                     0,
                     0,
                     0,
-                    0.42 * palette.text.a,
+                    modal_veil_alpha * palette.text.a,
                 ))
             });
 
@@ -441,7 +494,8 @@ impl BExplorerIced {
             return modal.into();
         }
 
-        let picker_x = ((self.window_size.width - 470.0) * 0.5 + 136.0).max(8.0);
+        let picker_x =
+            ((self.window_size.width - panel_width) * 0.5 + self.ui_metric(136.0)).max(8.0);
         let picker_y = ((self.window_size.height - 310.0) * 0.5 + 158.0)
             .min((self.window_size.height - 330.0).max(8.0))
             .max(8.0);
@@ -463,6 +517,9 @@ impl BExplorerIced {
         message: Message,
         palette: Palette,
     ) -> Element<'_, Message> {
+        let check_size = self
+            .ui_metric(19.0)
+            .max(ui_text_line_height(self.font_size()));
         let check = container(
             text(if enabled { "✓" } else { "" })
                 .size(self.font_size())
@@ -472,9 +529,9 @@ impl BExplorerIced {
                     palette.muted_text
                 }),
         )
-        .width(Length::Fixed(19.0))
-        .height(Length::Fixed(19.0))
-        .center(Length::Fixed(19.0))
+        .width(Length::Fixed(check_size))
+        .height(Length::Fixed(check_size))
+        .center(Length::Fixed(check_size))
         .style(move |_| {
             let background: Background = if enabled {
                 accent_gradient(palette).into()
@@ -506,13 +563,12 @@ impl BExplorerIced {
         .align_y(Alignment::Center);
         container(
             Button::new(content)
-                .padding([7, 9])
+                .padding([self.ui_vertical_padding(7.0), 9.0 + self.ui_density()])
                 .width(Length::Fill)
                 .on_press(message)
                 .style(move |_, status| button_style(palette, false, status)),
         )
         .width(Length::Fill)
-        .height(44)
         .style(move |_| {
             container::Style::default()
                 .background(mix_color(palette.input_bg, palette.header_bg, 0.42))

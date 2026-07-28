@@ -1,9 +1,13 @@
-use std::io::Read;
+use std::io::{BufRead, BufReader, Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex, OnceLock};
 
 #[cfg(not(target_os = "windows"))]
 use directories::UserDirs;
+use image::ImageDecoder;
 
+#[cfg(not(target_os = "windows"))]
+use crate::fs::explorer::DriveKind;
 use crate::fs::explorer::{self, EntryKind, FileCategory, FileEntry};
 use crate::platform::NativeIconImage;
 
@@ -11,6 +15,11 @@ pub const NATIVE_ICON_SIZE: u32 = 256;
 pub const SMALL_ENTRY_IMAGE_SIZE: u32 = 48;
 const PREVIEW_MAX_EDGE: u32 = 1200;
 const MAX_PDF_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_DECODE_ALLOC_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_SVG_SOURCE_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_CONCURRENT_IMAGE_DECODERS: usize = 2;
+#[cfg(target_os = "windows")]
+const WINDOWS_PREVIEW_CACHE_EDGE: u32 = 1024;
 const PDF_PREVIEW_SCALE: f32 = 1.15;
 
 pub fn is_thumbnail_candidate(entry: &FileEntry) -> bool {
@@ -18,9 +27,8 @@ pub fn is_thumbnail_candidate(entry: &FileEntry) -> bool {
         return false;
     }
 
-    matches!(entry.category, FileCategory::Image)
+    matches!(entry.category, FileCategory::Image | FileCategory::Video)
         || is_pdf_preview_candidate(entry)
-        || (explorer::is_portable_path(&entry.path) && entry.category == FileCategory::Video)
 }
 
 pub fn is_visual_preview_candidate(entry: &FileEntry) -> bool {
@@ -110,13 +118,19 @@ pub fn virtual_native_icon_request(
     entry: &FileEntry,
     size: u32,
 ) -> Option<(PathBuf, PathBuf, bool)> {
-    if !explorer::is_portable_path(&entry.path) {
+    let virtual_kind = if explorer::is_portable_path(&entry.path) {
+        "portable"
+    } else if explorer::is_trash_item_path(&entry.path) {
+        "trash"
+    } else {
         return None;
-    }
+    };
 
     match entry.kind {
         EntryKind::Folder | EntryKind::SymlinkFolder => Some((
-            PathBuf::from(format!("__bexplorer_portable_folder_icon_size_{size}")),
+            PathBuf::from(format!(
+                "__bexplorer_{virtual_kind}_folder_icon_size_{size}"
+            )),
             PathBuf::from("bexplorer-folder"),
             true,
         )),
@@ -135,12 +149,41 @@ pub fn virtual_native_icon_request(
                 .filter(|extension| !extension.is_empty())
                 .unwrap_or_else(|| "file".into());
             Some((
-                PathBuf::from(format!("__bexplorer_portable_ext_{extension}_size_{size}")),
+                PathBuf::from(format!(
+                    "__bexplorer_{virtual_kind}_ext_{extension}_size_{size}"
+                )),
                 PathBuf::from(format!("bexplorer.{extension}")),
                 false,
             ))
         }
+        EntryKind::Drive if virtual_kind == "portable" => {
+            Some(portable_device_native_icon_request(entry, size))
+        }
         EntryKind::Drive => None,
+    }
+}
+
+pub fn portable_device_native_icon_request(
+    entry: &FileEntry,
+    size: u32,
+) -> (PathBuf, PathBuf, bool) {
+    #[cfg(target_os = "linux")]
+    {
+        let device_id =
+            explorer::portable_object_from_path(&entry.path).map(|(device_id, _)| device_id);
+        let lookup_path =
+            crate::platform::portable_device_icon_lookup_path(device_id.as_deref(), &entry.path);
+        let cache_key = PathBuf::from(format!("__{}_size_{size}", lookup_path.to_string_lossy()));
+        (cache_key, lookup_path, true)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = entry;
+        (
+            PathBuf::from(format!("__bexplorer_portable_device_icon_size_{size}")),
+            PathBuf::from("bexplorer-portable-device"),
+            true,
+        )
     }
 }
 
@@ -164,6 +207,9 @@ pub fn native_entry_icon_cache_key_at_size(entry: &FileEntry, _size: u32) -> Pat
 #[cfg(not(target_os = "windows"))]
 pub fn native_entry_icon_cache_key_at_size(entry: &FileEntry, size: u32) -> PathBuf {
     match entry.kind {
+        EntryKind::Drive if entry.drive_kind == Some(DriveKind::Portable) => {
+            portable_device_native_icon_request(entry, size).0
+        }
         EntryKind::Drive => PathBuf::from(format!(
             "__bexplorer_drive_{:?}_{}_size_{size}",
             entry.drive_kind,
@@ -199,7 +245,7 @@ pub fn native_path_icon_cache_key(path: &Path, is_directory: bool, size: u32) ->
 fn native_directory_icon_class(path: &Path) -> &'static str {
     if path == Path::new("/") {
         "root"
-    } else if path.starts_with("/media") || path.starts_with("/run/media") {
+    } else if standard_removable_mount_root(path) {
         "removable"
     } else if path.starts_with("/mnt") {
         "mnt"
@@ -208,6 +254,15 @@ fn native_directory_icon_class(path: &Path) -> &'static str {
     } else {
         "folder"
     }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn standard_removable_mount_root(path: &Path) -> bool {
+    path.strip_prefix("/run/media")
+        .is_ok_and(|relative| relative.components().count() == 2)
+        || path
+            .strip_prefix("/media")
+            .is_ok_and(|relative| matches!(relative.components().count(), 1 | 2))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -253,8 +308,10 @@ fn native_file_icon_cache_key(path: &Path, fallback_name: Option<&str>, size: u3
 }
 
 pub fn load_thumbnail_image(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
-    let bytes = std::fs::read(path).ok()?;
-    load_thumbnail_image_from_bytes(&bytes, max_edge).or_else(|| render_svg_image(path, max_edge))
+    let image = std::fs::File::open(path)
+        .ok()
+        .and_then(|file| load_image_from_reader(BufReader::new(file), max_edge));
+    image.or_else(|| render_svg_image(path, max_edge))
 }
 
 pub fn load_desktop_thumbnail_image(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
@@ -262,18 +319,53 @@ pub fn load_desktop_thumbnail_image(path: &Path, max_edge: u32) -> Option<Native
 }
 
 pub fn load_thumbnail_image_with_fallback(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
+    let category = explorer::classify_file_category(path);
+    if category == FileCategory::Video {
+        return load_desktop_thumbnail_image(path, max_edge)
+            .and_then(|image| resize_native_image(image, max_edge))
+            .or_else(|| {
+                crate::platform::video_thumbnail(path, NATIVE_ICON_SIZE)
+                    .and_then(|image| resize_native_image(image, max_edge))
+            });
+    }
     if path
         .extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"))
     {
-        return load_desktop_thumbnail_image(path, max_edge)
-            .or_else(|| render_pdf_first_page(path))
+        if let Some(image) = load_desktop_thumbnail_image(path, max_edge) {
+            return resize_native_image(image, max_edge);
+        }
+        return render_pdf_first_page(path)
+            .and_then(|image| resize_native_image(image, NATIVE_ICON_SIZE))
+            .and_then(|image| {
+                let _ = crate::platform::cache_desktop_thumbnail(path, NATIVE_ICON_SIZE, &image);
+                resize_native_image(image, max_edge)
+            });
+    }
+    if category == FileCategory::Image {
+        if let Some(image) = load_desktop_thumbnail_image(path, max_edge) {
+            return resize_native_image(image, max_edge);
+        }
+
+        // Windows owns a global thumbnail cache and invokes installed Shell
+        // providers for images and videos. Let it extract and persist a native
+        // thumbnail before using BExplorer's internal image decoder.
+        #[cfg(target_os = "windows")]
+        if let Some(image) = crate::platform::image_thumbnail(path, NATIVE_ICON_SIZE) {
+            return resize_native_image(image, max_edge);
+        }
+
+        if let Some(image) = load_thumbnail_image(path, NATIVE_ICON_SIZE) {
+            let _ = crate::platform::cache_desktop_thumbnail(path, NATIVE_ICON_SIZE, &image);
+            return resize_native_image(image, max_edge);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        return crate::platform::image_thumbnail(path, NATIVE_ICON_SIZE)
             .and_then(|image| resize_native_image(image, max_edge));
     }
-    load_desktop_thumbnail_image(path, max_edge)
-        .and_then(|image| resize_native_image(image, max_edge))
-        .or_else(|| load_thumbnail_image(path, max_edge))
+    None
 }
 
 /// Rendered only for the selected item in the preview panel. Keeping this separate
@@ -288,14 +380,32 @@ pub fn load_preview_image(path: &Path) -> Option<NativeIconImage> {
             .or_else(|| load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE));
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(image) = load_desktop_thumbnail_image(path, WINDOWS_PREVIEW_CACHE_EDGE) {
+            return Some(image);
+        }
+        if let Some(image) = crate::platform::image_thumbnail(path, WINDOWS_PREVIEW_CACHE_EDGE) {
+            return Some(image);
+        }
+        load_thumbnail_image(path, WINDOWS_PREVIEW_CACHE_EDGE).inspect(|image| {
+            let _ =
+                crate::platform::cache_desktop_thumbnail(path, WINDOWS_PREVIEW_CACHE_EDGE, image);
+        })
+    }
+
+    #[cfg(not(target_os = "windows"))]
     if std::fs::metadata(path).ok()?.len() > MAX_PDF_PREVIEW_BYTES {
         return load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE);
     }
 
-    let bytes = std::fs::read(path).ok()?;
-    load_image_from_bytes(&bytes, PREVIEW_MAX_EDGE)
-        .or_else(|| render_svg_image(path, PREVIEW_MAX_EDGE))
-        .or_else(|| load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE))
+    #[cfg(not(target_os = "windows"))]
+    {
+        let bytes = std::fs::read(path).ok()?;
+        load_image_from_bytes(&bytes, PREVIEW_MAX_EDGE)
+            .or_else(|| render_svg_image(path, PREVIEW_MAX_EDGE))
+            .or_else(|| load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE))
+    }
 }
 
 pub fn render_pdf_preview_page(path: &Path, page_index: usize) -> Option<(usize, NativeIconImage)> {
@@ -353,20 +463,77 @@ pub fn load_native_icon_image(
     }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn load_thumbnail_image_from_bytes(bytes: &[u8], max_edge: u32) -> Option<NativeIconImage> {
     load_image_from_bytes(bytes, max_edge)
 }
 
 fn load_image_from_bytes(bytes: &[u8], max_edge: u32) -> Option<NativeIconImage> {
-    let image = image::load_from_memory(bytes).ok()?;
-    let thumbnail = image
-        .resize(max_edge, max_edge, image::imageops::FilterType::Lanczos3)
-        .to_rgba8();
+    load_image_from_reader(Cursor::new(bytes), max_edge)
+}
+
+fn load_image_from_reader<R>(reader: R, max_edge: u32) -> Option<NativeIconImage>
+where
+    R: BufRead + Seek,
+{
+    let _permit = acquire_image_decode_permit();
+    let mut reader = image::ImageReader::new(reader).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_IMAGE_DECODE_ALLOC_BYTES);
+    reader.limits(limits);
+    let mut decoder = reader.into_decoder().ok()?;
+    if decoder.total_bytes() > MAX_IMAGE_DECODE_ALLOC_BYTES {
+        return None;
+    }
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let image = image::DynamicImage::from_decoder(decoder).ok()?;
+    let max_edge = max_edge.max(1);
+    let mut thumbnail = if image.width().max(image.height()) > max_edge {
+        image.resize(max_edge, max_edge, image::imageops::FilterType::Lanczos3)
+    } else {
+        image
+    };
+    thumbnail.apply_orientation(orientation);
+    let thumbnail = thumbnail.to_rgba8();
     Some(NativeIconImage {
         width: thumbnail.width() as usize,
         height: thumbnail.height() as usize,
         rgba: thumbnail.into_raw(),
     })
+}
+
+struct ImageDecodePermit {
+    state: &'static (Mutex<usize>, Condvar),
+}
+
+impl Drop for ImageDecodePermit {
+    fn drop(&mut self) {
+        let (active, available) = self.state;
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        available.notify_one();
+    }
+}
+
+fn acquire_image_decode_permit() -> ImageDecodePermit {
+    static STATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    let state = STATE.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let (active, available) = state;
+    let mut active = active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *active >= MAX_CONCURRENT_IMAGE_DECODERS {
+        active = available
+            .wait(active)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    *active += 1;
+    drop(active);
+    ImageDecodePermit { state }
 }
 
 fn resize_native_image(image: NativeIconImage, max_edge: u32) -> Option<NativeIconImage> {
@@ -388,6 +555,9 @@ fn resize_native_image(image: NativeIconImage, max_edge: u32) -> Option<NativeIc
 }
 
 fn render_svg_image(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
+    if std::fs::metadata(path).ok()?.len() > MAX_SVG_SOURCE_BYTES {
+        return None;
+    }
     let bytes = std::fs::read(path).ok()?;
     let options = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_data(&bytes, &options).ok()?;
@@ -420,7 +590,7 @@ fn unpremultiply_rgba(data: &mut [u8]) {
     }
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 pub fn load_portable_thumbnail_image(
     path: &Path,
     max_bytes: usize,
@@ -437,7 +607,7 @@ pub fn load_portable_thumbnail_image(
     load_thumbnail_image_from_bytes(&bytes, max_edge)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn load_portable_thumbnail_image(
     _path: &Path,
     _max_bytes: usize,
@@ -450,6 +620,117 @@ pub fn load_portable_thumbnail_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_video_files_are_thumbnail_candidates() {
+        let entry = FileEntry {
+            name: "movie.mp4".into(),
+            path: PathBuf::from("/tmp/movie.mp4"),
+            kind: EntryKind::File,
+            category: FileCategory::Video,
+            drive_kind: None,
+            file_system: String::new(),
+            free_space: None,
+            size: Some(128 * 1024 * 1024),
+            percent_full: None,
+            modified: None,
+            created: None,
+            is_hidden: false,
+        };
+
+        assert!(is_thumbnail_candidate(&entry));
+        assert!(
+            !is_visual_preview_candidate(&entry),
+            "video thumbnails should not implicitly enable the full preview panel"
+        );
+    }
+
+    #[test]
+    fn trashed_items_use_virtual_type_icons_without_decoding_the_virtual_path() {
+        let entry = FileEntry {
+            name: "vacation.mp4".into(),
+            path: explorer::trash_item_path(std::ffi::OsStr::new("native-id")),
+            kind: EntryKind::File,
+            category: FileCategory::Video,
+            drive_kind: None,
+            file_system: String::new(),
+            free_space: None,
+            size: Some(42),
+            percent_full: None,
+            modified: Some("/home/example/Videos".into()),
+            created: Some("2026-07-26 12:00".into()),
+            is_hidden: false,
+        };
+
+        let (cache_key, lookup_path, is_directory) =
+            virtual_native_icon_request(&entry, SMALL_ENTRY_IMAGE_SIZE)
+                .expect("trash item icon request");
+        assert!(cache_key.to_string_lossy().contains("trash_ext_mp4"));
+        assert_eq!(lookup_path, PathBuf::from("bexplorer.mp4"));
+        assert!(!is_directory);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn portable_devices_request_the_icon_profile_of_their_linux_backend() {
+        let mut entry = FileEntry {
+            name: "Phone".into(),
+            path: explorer::portable_device_path("linux-kio-mtp:/org/kde/kmtp/device_1", "Phone"),
+            kind: EntryKind::Drive,
+            category: FileCategory::Other,
+            drive_kind: Some(explorer::DriveKind::Portable),
+            file_system: "MTP".into(),
+            free_space: None,
+            size: None,
+            percent_full: None,
+            modified: None,
+            created: None,
+            is_hidden: false,
+        };
+
+        let (cache_key, lookup_path, is_directory) =
+            virtual_native_icon_request(&entry, SMALL_ENTRY_IMAGE_SIZE)
+                .expect("portable device icon request");
+        assert!(cache_key.to_string_lossy().contains("portable-device"));
+        assert!(
+            lookup_path
+                .to_string_lossy()
+                .starts_with("bexplorer-portable-device-icons@multimedia-player")
+        );
+        assert!(is_directory);
+
+        entry.path =
+            explorer::portable_device_path("linux-gvfs-mtp:mtp://Google_Pixel_ABC123/", "Phone");
+        let (gvfs_key, gvfs_lookup, _) =
+            virtual_native_icon_request(&entry, SMALL_ENTRY_IMAGE_SIZE)
+                .expect("GVfs portable device icon request");
+        assert_ne!(cache_key, gvfs_key);
+        assert!(
+            gvfs_lookup
+                .to_string_lossy()
+                .starts_with("bexplorer-portable-device-icons@phone")
+        );
+    }
+
+    #[test]
+    fn large_local_images_are_still_thumbnail_candidates() {
+        let entry = FileEntry {
+            name: "camera-photo.jpg".into(),
+            path: PathBuf::from("/tmp/camera-photo.jpg"),
+            kind: EntryKind::File,
+            category: FileCategory::Image,
+            drive_kind: None,
+            file_system: String::new(),
+            free_space: None,
+            size: Some(80 * 1024 * 1024),
+            percent_full: None,
+            modified: None,
+            created: None,
+            is_hidden: false,
+        };
+
+        assert!(is_thumbnail_candidate(&entry));
+    }
 
     #[cfg(not(target_os = "windows"))]
     #[test]
@@ -465,6 +746,25 @@ mod tests {
         );
         assert_ne!(home, generic);
         assert!(home.to_string_lossy().contains("home"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn removable_root_and_its_folders_have_distinct_native_icon_keys() {
+        let root = native_path_icon_cache_key(
+            Path::new("/run/media/example/USB"),
+            true,
+            SMALL_ENTRY_IMAGE_SIZE,
+        );
+        let child = native_path_icon_cache_key(
+            Path::new("/run/media/example/USB/Documents"),
+            true,
+            SMALL_ENTRY_IMAGE_SIZE,
+        );
+
+        assert!(root.to_string_lossy().contains("removable"));
+        assert!(child.to_string_lossy().contains("folder"));
+        assert_ne!(root, child);
     }
 
     #[test]
@@ -500,5 +800,29 @@ mod tests {
             NATIVE_ICON_SIZE as usize
         );
         assert!(small.rgba.len() < standard.rgba.len());
+    }
+
+    #[test]
+    fn internal_decoder_applies_exif_orientation_before_display() {
+        let source = image::RgbImage::from_pixel(2, 3, image::Rgb([40, 120, 220]));
+        let mut jpeg = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+            .encode_image(&source)
+            .expect("encode JPEG");
+
+        // Big-endian TIFF metadata with one Orientation=6 (rotate 90°)
+        // entry, wrapped in a JPEG APP1 Exif segment.
+        let exif = [
+            0xFF, 0xE1, 0x00, 0x22, b'E', b'x', b'i', b'f', 0x00, 0x00, b'M', b'M', 0x00, 0x2A,
+            0x00, 0x00, 0x00, 0x08, 0x00, 0x01, 0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,
+            0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        let mut oriented = jpeg[..2].to_vec();
+        oriented.extend_from_slice(&exif);
+        oriented.extend_from_slice(&jpeg[2..]);
+
+        let decoded = load_thumbnail_image_from_bytes(&oriented, 3).expect("decode oriented JPEG");
+
+        assert_eq!((decoded.width, decoded.height), (3, 2));
     }
 }

@@ -5,10 +5,16 @@ impl BExplorerIced {
         Id::new("context-open-with-keyboard-scroll")
     }
 
+    pub(in crate::iced_ui) fn context_send_to_scroll_id() -> Id {
+        Id::new("context-send-to-keyboard-scroll")
+    }
+
     pub(in crate::iced_ui) fn active_keyboard_menu(&self) -> Option<KeyboardMenu> {
         if self.context_menu.is_some() {
             return Some(if self.context_open_with_submenu {
                 KeyboardMenu::ContextOpenWith
+            } else if self.context_send_to_submenu {
+                KeyboardMenu::ContextSendTo
             } else if self.context_archive_submenu && self.context_extract_submenu {
                 KeyboardMenu::ContextExtract
             } else if self.context_archive_submenu {
@@ -161,6 +167,7 @@ impl BExplorerIced {
             },
             KeyboardMenu::Context
             | KeyboardMenu::ContextOpenWith
+            | KeyboardMenu::ContextSendTo
             | KeyboardMenu::ContextArchive
             | KeyboardMenu::ContextExtract
             | KeyboardMenu::ContextNew => {
@@ -222,6 +229,7 @@ impl BExplorerIced {
             ],
             KeyboardMenu::Context
             | KeyboardMenu::ContextOpenWith
+            | KeyboardMenu::ContextSendTo
             | KeyboardMenu::ContextArchive
             | KeyboardMenu::ContextExtract
             | KeyboardMenu::ContextNew => self
@@ -255,6 +263,19 @@ impl BExplorerIced {
                     ContextCommand::OpenWith,
                 ));
                 return items;
+            }
+            KeyboardMenu::ContextSendTo => {
+                return menu_state
+                    .send_to_targets
+                    .iter()
+                    .enumerate()
+                    .map(|(index, target)| {
+                        (
+                            target.label().to_owned(),
+                            ContextCommand::SendToTarget(index),
+                        )
+                    })
+                    .collect();
             }
             KeyboardMenu::ContextArchive => {
                 return vec![
@@ -304,6 +325,32 @@ impl BExplorerIced {
 
         let is_entry = matches!(menu_state.target, ContextTarget::Entry(_));
         let is_sidebar_drive = matches!(menu_state.target, ContextTarget::SidebarDrive(_));
+        if self.is_trash_pane(menu_state.pane) && !is_sidebar_drive {
+            return if is_entry {
+                vec![
+                    (
+                        self.localized("Restaurar", "Restore").into(),
+                        ContextCommand::RestoreTrash,
+                    ),
+                    (
+                        self.localized("Eliminar", "Delete").into(),
+                        ContextCommand::DeleteTrash,
+                    ),
+                ]
+            } else {
+                vec![
+                    (
+                        self.localized("Actualizar", "Refresh").into(),
+                        ContextCommand::Refresh,
+                    ),
+                    (
+                        self.localized("Vaciar papelera", "Empty Recycle Bin")
+                            .into(),
+                        ContextCommand::EmptyTrash,
+                    ),
+                ]
+            };
+        }
         let is_search_result = is_entry && self.pane(menu_state.pane).folder_entries.is_some();
         let context_entry = self.context_entry(menu_state.pane, menu_state.target);
         let drive_entry = context_entry
@@ -327,6 +374,9 @@ impl BExplorerIced {
                 || context_entry.as_ref().is_some_and(|entry| {
                     entry.kind.is_container() && !explorer::is_virtual_path(&entry.path)
                 }));
+        let duplicate_cleanup_available = context_entry
+            .as_ref()
+            .is_some_and(crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry);
         let defender_available = cfg!(target_os = "windows")
             && context_entry
                 .as_ref()
@@ -334,16 +384,25 @@ impl BExplorerIced {
 
         let mut items = Vec::new();
         if is_sidebar_drive {
+            if duplicate_cleanup_available {
+                items.push((
+                    self.localized("Limpieza de duplicados", "Duplicate cleanup")
+                        .into(),
+                    ContextCommand::DuplicateCleanup,
+                ));
+            }
             if formatable_drive {
                 items.push((
                     self.localized("Formatear", "Format").into(),
                     ContextCommand::FormatDrive,
                 ));
             }
-            items.push((
-                self.localized("Expulsar", "Eject").into(),
-                ContextCommand::EjectDrive,
-            ));
+            if ejectable_drive {
+                items.push((
+                    self.localized("Expulsar", "Eject").into(),
+                    ContextCommand::EjectDrive,
+                ));
+            }
             return items;
         }
 
@@ -363,11 +422,24 @@ impl BExplorerIced {
 
         if is_entry {
             items.push((self.localized("Abrir", "Open").into(), ContextCommand::Open));
+            if duplicate_cleanup_available {
+                items.push((
+                    self.localized("Limpieza de duplicados", "Duplicate cleanup")
+                        .into(),
+                    ContextCommand::DuplicateCleanup,
+                ));
+            }
             if !drive_entry {
                 items.push((
                     self.localized("Abrir con", "Open with").into(),
                     ContextCommand::OpenWithMenu,
                 ));
+                if !menu_state.send_to_targets.is_empty() {
+                    items.push((
+                        self.localized("Enviar a", "Send to").into(),
+                        ContextCommand::SendToMenu,
+                    ));
+                }
                 if is_search_result {
                     items.push((
                         self.localized("Abrir ubicación del archivo", "Open file location")
@@ -455,18 +527,17 @@ impl BExplorerIced {
 }
 
 fn keyboard_menu_scroll_task(menu: KeyboardMenu, index: usize, count: usize) -> Task<Message> {
-    if menu != KeyboardMenu::ContextOpenWith {
-        return Task::none();
-    }
+    let id = match menu {
+        KeyboardMenu::ContextOpenWith => BExplorerIced::context_open_with_scroll_id(),
+        KeyboardMenu::ContextSendTo => BExplorerIced::context_send_to_scroll_id(),
+        _ => return Task::none(),
+    };
     let y = if count > 1 {
         index as f32 / (count - 1) as f32
     } else {
         0.0
     };
-    iced::widget::operation::snap_to(
-        BExplorerIced::context_open_with_scroll_id(),
-        iced::widget::operation::RelativeOffset { x: 0.0, y },
-    )
+    iced::widget::operation::snap_to(id, iced::widget::operation::RelativeOffset { x: 0.0, y })
 }
 
 fn next_keyboard_menu_match(

@@ -47,7 +47,12 @@ pub fn path_total_bytes(path: &Path) -> u64 {
         object_total_bytes(&session, &object)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        object_total_bytes_linux(&object)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = object;
         0
@@ -66,7 +71,12 @@ pub fn path_file_count(path: &Path) -> usize {
         object_file_count(&session, &object)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        object_file_count_linux(&object)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = object;
         0
@@ -87,7 +97,12 @@ pub fn path_is_folder(path: &Path) -> bool {
             .is_ok_and(|info| info.is_folder)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        object_info(&object).is_ok_and(|info| info.is_folder)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = object;
         false
@@ -106,12 +121,17 @@ where
         export_object_to_local(&session, &object, target, on_event)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        export_object_to_local_linux(&object, target, on_event)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = object;
         let _ = (target, on_event);
         Err(BExplorerError::Operation(
-            "Portable devices are only supported on Windows".into(),
+            "Portable devices are not supported on this platform".into(),
         ))
     }
 }
@@ -139,11 +159,16 @@ where
         import_local_object(&session, source, &parent_object_id, &name, on_event)
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "linux")]
+    {
+        import_local_object_linux(source, &device_id, &parent_object_id, &name, on_event)
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         let _ = (source, device_id, parent_object_id, name, on_event);
         Err(BExplorerError::Operation(
-            "Portable devices are only supported on Windows".into(),
+            "Portable devices are not supported on this platform".into(),
         ))
     }
 }
@@ -332,6 +357,127 @@ fn object_file_count(session: &PortableDeviceSession, object: &PortableObjectRef
                     object_id: child.id,
                 },
             )
+        })
+        .sum()
+}
+
+#[cfg(target_os = "linux")]
+fn export_object_to_local_linux<Event>(
+    object: &PortableObjectRef,
+    target: &Path,
+    on_event: &mut Event,
+) -> Result<usize>
+where
+    Event: FnMut(PortableTransferEvent<'_>) -> Result<()>,
+{
+    let info = object_info(object)?;
+    on_event(PortableTransferEvent::BeforeItem(&info.name))?;
+    if info.is_folder {
+        fs::create_dir_all(target)?;
+        let mut completed = 0;
+        for child in
+            crate::platform::portable_device_objects_result(&object.device_id, &object.object_id)?
+        {
+            let child_ref = PortableObjectRef {
+                device_id: object.device_id.clone(),
+                object_id: child.id,
+            };
+            completed += export_object_to_local_linux(
+                &child_ref,
+                &target.join(safe_child_name(&child.name)),
+                on_event,
+            )?;
+        }
+        return Ok(completed);
+    }
+
+    let bytes =
+        crate::platform::portable_download_file(&object.device_id, &object.object_id, target)?;
+    if bytes > 0 {
+        on_event(PortableTransferEvent::Bytes(&info.name, bytes))?;
+    }
+    on_event(PortableTransferEvent::FileDone(&info.name))?;
+    Ok(1)
+}
+
+#[cfg(target_os = "linux")]
+fn import_local_object_linux<Event>(
+    source: &Path,
+    device_id: &str,
+    parent_object_id: &str,
+    name: &str,
+    on_event: &mut Event,
+) -> Result<usize>
+where
+    Event: FnMut(PortableTransferEvent<'_>) -> Result<()>,
+{
+    on_event(PortableTransferEvent::BeforeItem(name))?;
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.is_dir() {
+        let folder_id = crate::platform::portable_create_folder(device_id, parent_object_id, name)?;
+        let mut completed = 0;
+        for item in fs::read_dir(source)? {
+            let item = item?;
+            let child_name = item.file_name().to_string_lossy().to_string();
+            completed += import_local_object_linux(
+                &item.path(),
+                device_id,
+                &folder_id,
+                &child_name,
+                on_event,
+            )?;
+        }
+        return Ok(completed);
+    }
+
+    if !metadata.is_file() {
+        return Ok(0);
+    }
+
+    crate::platform::portable_upload_file(device_id, parent_object_id, source, name)?;
+    if metadata.len() > 0 {
+        on_event(PortableTransferEvent::Bytes(name, metadata.len()))?;
+    }
+    on_event(PortableTransferEvent::FileDone(name))?;
+    Ok(1)
+}
+
+#[cfg(target_os = "linux")]
+fn object_total_bytes_linux(object: &PortableObjectRef) -> u64 {
+    let Ok(info) = object_info(object) else {
+        return 0;
+    };
+    if !info.is_folder {
+        return info.size.unwrap_or(0);
+    }
+    crate::platform::portable_device_objects_result(&object.device_id, &object.object_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|child| {
+            object_total_bytes_linux(&PortableObjectRef {
+                device_id: object.device_id.clone(),
+                object_id: child.id,
+            })
+        })
+        .sum()
+}
+
+#[cfg(target_os = "linux")]
+fn object_file_count_linux(object: &PortableObjectRef) -> usize {
+    let Ok(info) = object_info(object) else {
+        return 0;
+    };
+    if !info.is_folder {
+        return 1;
+    }
+    crate::platform::portable_device_objects_result(&object.device_id, &object.object_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|child| {
+            object_file_count_linux(&PortableObjectRef {
+                device_id: object.device_id.clone(),
+                object_id: child.id,
+            })
         })
         .sum()
 }

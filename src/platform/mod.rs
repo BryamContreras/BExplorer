@@ -1,5 +1,8 @@
 pub mod shell;
 
+#[cfg(any(target_os = "windows", test))]
+mod thumbnail_fallback_cache;
+
 #[cfg(all(unix, not(target_os = "macos")))]
 pub mod linux;
 
@@ -424,9 +427,19 @@ pub fn portable_devices() -> Vec<PortableDeviceInfo> {
         .collect()
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn portable_devices() -> Vec<PortableDeviceInfo> {
+    linux::portable_devices()
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn portable_devices() -> Vec<PortableDeviceInfo> {
     Vec::new()
+}
+
+#[cfg(target_os = "linux")]
+pub fn portable_device_icon_lookup_path(device_id: Option<&str>, mount_path: &Path) -> PathBuf {
+    linux::portable_device_icon_lookup_path(device_id, mount_path)
 }
 
 #[cfg(target_os = "windows")]
@@ -447,7 +460,15 @@ pub fn portable_device_objects_result(
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn portable_device_objects_result(
+    device_id: &str,
+    parent_object_id: &str,
+) -> Result<Vec<PortableObjectInfo>> {
+    linux::portable_device_objects_result(device_id, parent_object_id)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn portable_device_objects_result(
     _device_id: &str,
     _parent_object_id: &str,
@@ -465,7 +486,12 @@ pub fn portable_device_object_info(device_id: &str, object_id: &str) -> Result<P
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn portable_device_object_info(device_id: &str, object_id: &str) -> Result<PortableObjectInfo> {
+    linux::portable_device_object_info(device_id, object_id)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn portable_device_object_info(
     _device_id: &str,
     _object_id: &str,
@@ -480,7 +506,12 @@ pub fn portable_delete_objects(device_id: &str, object_ids: &[String]) -> Result
     windows::portable_delete_objects(device_id, object_ids)
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub fn portable_delete_objects(device_id: &str, object_ids: &[String]) -> Result<usize> {
+    linux::portable_delete_objects(device_id, object_ids)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn portable_delete_objects(_device_id: &str, _object_ids: &[String]) -> Result<usize> {
     Err(crate::utils::errors::BExplorerError::Operation(
         "Portable devices are not supported on this platform yet".into(),
@@ -495,6 +526,50 @@ pub fn portable_device_thumbnail(
     allow_default_resource: bool,
 ) -> Option<Vec<u8>> {
     windows::portable_device_thumbnail(device_id, object_id, max_bytes, allow_default_resource)
+}
+
+#[cfg(target_os = "linux")]
+pub fn portable_device_thumbnail(
+    device_id: &str,
+    object_id: &str,
+    max_bytes: usize,
+    allow_default_resource: bool,
+) -> Option<Vec<u8>> {
+    linux::portable_device_thumbnail(device_id, object_id, max_bytes, allow_default_resource)
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+pub fn portable_device_thumbnail(
+    _device_id: &str,
+    _object_id: &str,
+    _max_bytes: usize,
+    _allow_default_resource: bool,
+) -> Option<Vec<u8>> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+pub fn portable_download_file(device_id: &str, object_id: &str, target: &Path) -> Result<u64> {
+    linux::portable_download_file(device_id, object_id, target)
+}
+
+#[cfg(target_os = "linux")]
+pub fn portable_upload_file(
+    device_id: &str,
+    parent_object_id: &str,
+    source: &Path,
+    name: &str,
+) -> Result<String> {
+    linux::portable_upload_file(device_id, parent_object_id, source, name)
+}
+
+#[cfg(target_os = "linux")]
+pub fn portable_create_folder(
+    device_id: &str,
+    parent_object_id: &str,
+    name: &str,
+) -> Result<String> {
+    linux::portable_create_folder(device_id, parent_object_id, name)
 }
 
 #[cfg(target_os = "windows")]
@@ -723,11 +798,7 @@ pub fn prompt_network_credentials_for_path(_path: &Path) -> bool {
 
 #[cfg(target_os = "windows")]
 pub fn native_file_icon(path: &Path, is_directory: bool, size: u32) -> Option<NativeIconImage> {
-    windows::native_file_icon(path, is_directory, size).map(|icon| NativeIconImage {
-        rgba: icon.rgba,
-        width: icon.width,
-        height: icon.height,
-    })
+    windows::native_file_icon(path, is_directory, size)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -747,11 +818,7 @@ pub fn native_named_icon(name: &str, size: u32) -> Option<NativeIconImage> {
 
 #[cfg(target_os = "windows")]
 pub fn native_file_icon_highres(path: &Path, is_directory: bool) -> Option<NativeIconImage> {
-    windows::native_file_icon_highres(path, is_directory).map(|icon| NativeIconImage {
-        rgba: icon.rgba,
-        width: icon.width,
-        height: icon.height,
-    })
+    windows::native_file_icon_highres(path, is_directory)
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -764,17 +831,67 @@ pub fn native_file_icon_highres(_path: &Path, _is_directory: bool) -> Option<Nat
     None
 }
 
+#[cfg(target_os = "windows")]
+pub fn cached_desktop_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    windows::cached_desktop_thumbnail(path, size)
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn cached_desktop_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
     linux::cached_desktop_thumbnail(path, size)
 }
 
-#[cfg(not(all(unix, not(target_os = "macos"))))]
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn cached_desktop_thumbnail(_path: &Path, _size: u32) -> Option<NativeIconImage> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "windows")]
+pub fn cache_desktop_thumbnail(path: &Path, size: u32, image: &NativeIconImage) -> bool {
+    windows::cache_desktop_thumbnail(path, size, image)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn cache_desktop_thumbnail(path: &Path, size: u32, image: &NativeIconImage) -> bool {
+    linux::cache_desktop_thumbnail(path, size, image)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+pub fn cache_desktop_thumbnail(_path: &Path, _size: u32, _image: &NativeIconImage) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn image_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    windows::image_thumbnail(path, size)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn image_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    linux::image_thumbnail(path, size)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+pub fn image_thumbnail(_path: &Path, _size: u32) -> Option<NativeIconImage> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub fn video_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    windows::video_thumbnail(path, size)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+pub fn video_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    linux::video_thumbnail(path, size)
+}
+
+#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+pub fn video_thumbnail(_path: &Path, _size: u32) -> Option<NativeIconImage> {
+    None
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn unsupported_portable_devices<T>() -> Result<T> {
     Err(crate::utils::errors::BExplorerError::Operation(
         "Portable devices are not supported on this platform yet".into(),

@@ -403,15 +403,26 @@ impl BExplorerIced {
 
         let load = load_properties_task(request_id, paths);
         if let Some(id) = self.properties_window_id {
-            Task::batch([load, window::minimize(id, false), window::gain_focus(id)])
+            Task::batch([
+                load,
+                self.sync_properties_window_size_task(),
+                window::minimize(id, false),
+                window::gain_focus(id),
+            ])
         } else {
-            let (id, open) = window::open(properties_window_settings());
+            let (id, open) = window::open(properties_window_settings(self.font_size()));
             self.properties_window_id = Some(id);
             Task::batch([
                 load,
                 open.map(|id| Message::Properties(PropertiesMessage::WindowOpened(id))),
             ])
         }
+    }
+
+    pub(super) fn sync_properties_window_size_task(&self) -> Task<Message> {
+        self.properties_window_id.map_or_else(Task::none, |id| {
+            sync_fixed_progress_window_size_task(id, properties_window_size(self.font_size()))
+        })
     }
 
     pub(super) fn properties_window_title(&self) -> String {
@@ -467,7 +478,10 @@ impl BExplorerIced {
                 self.properties_window_id = Some(id);
                 Task::batch([
                     self.apply_window_corners_task_for(id),
-                    sync_fixed_progress_window_size_task(id, properties_window_size()),
+                    sync_fixed_progress_window_size_task(
+                        id,
+                        properties_window_size(self.font_size()),
+                    ),
                     window::minimize(id, false),
                     window::gain_focus(id),
                 ])
@@ -742,7 +756,6 @@ impl BExplorerIced {
                 Task::none()
             }
             PropertiesMessage::SizeFinished(properties_request_id, size_request_id, result) => {
-                let spanish = self.is_spanish();
                 let cancelled_notice = self
                     .localized("Cálculo detenido", "Calculation stopped")
                     .to_owned();
@@ -760,18 +773,6 @@ impl BExplorerIced {
                     Ok(size) => {
                         if size.cancelled {
                             state.notice = Some((cancelled_notice, false));
-                        } else if size.unreadable > 0 {
-                            state.notice = Some((
-                                if spanish {
-                                    format!(
-                                        "Tamaño parcial: {} elementos sin acceso",
-                                        size.unreadable
-                                    )
-                                } else {
-                                    format!("Partial size: {} inaccessible items", size.unreadable)
-                                },
-                                false,
-                            ));
                         } else {
                             state.notice = None;
                         }

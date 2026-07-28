@@ -7,23 +7,32 @@
 mod gnome_blur;
 mod kio;
 mod kwin_blur;
+mod portable;
 #[cfg(target_os = "linux")]
 mod storage_watch;
 mod wayland_drag;
 
+pub use portable::{
+    portable_create_folder, portable_delete_objects, portable_device_object_info,
+    portable_device_objects_result, portable_device_thumbnail, portable_devices,
+    portable_download_file, portable_upload_file,
+};
 #[cfg(target_os = "linux")]
 pub use storage_watch::storage_change_receiver;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::io::Write;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 use directories::UserDirs;
+use image::ImageEncoder;
 use raw_window_handle::{
     DisplayHandle, HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle,
     WindowHandle,
@@ -35,6 +44,7 @@ use crate::utils::errors::{BExplorerError, Result};
 
 const ICON_EXTENSIONS: &[&str] = &["png", "svg"];
 const FALLBACK_THEMES: &[&str] = &["Adwaita", "Breeze", "Yaru", "Papirus", "hicolor"];
+const PORTABLE_DEVICE_ICON_LOOKUP_PREFIX: &str = "bexplorer-portable-device-icons@";
 const LINUX_DRAG_HELPERS: &[LinuxDragHelper] = &[
     LinuxDragHelper {
         program: "ripdrag",
@@ -118,12 +128,27 @@ struct MimeGlob {
     literal: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+struct DesktopThumbnailer {
+    exec: Vec<String>,
+    try_exec: Option<String>,
+    mime_types: HashSet<String>,
+}
+
 pub fn native_file_icon(path: &Path, is_directory: bool, size: u32) -> Option<NativeIconImage> {
     desktop_icon_for_path(path, is_directory, size.clamp(16, 512))
 }
 
 pub fn native_file_icon_highres(path: &Path, is_directory: bool) -> Option<NativeIconImage> {
     desktop_icon_for_path(path, is_directory, 256)
+}
+
+pub fn portable_device_icon_lookup_path(device_id: Option<&str>, mount_path: &Path) -> PathBuf {
+    let names = portable::portable_device_icon_names(device_id, mount_path);
+    PathBuf::from(format!(
+        "{PORTABLE_DEVICE_ICON_LOOKUP_PREFIX}{}",
+        names.join(",")
+    ))
 }
 
 /// Resolves a Freedesktop application icon name (or a direct icon path) using
@@ -163,15 +188,23 @@ pub fn native_named_icon(name: &str, size: u32) -> Option<NativeIconImage> {
 }
 
 pub fn cached_desktop_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
+    cached_desktop_thumbnail_in(&xdg_cache_home(), path, size)
+}
+
+fn cached_desktop_thumbnail_in(
+    cache_home: &Path,
+    path: &Path,
+    size: u32,
+) -> Option<NativeIconImage> {
     let uri = canonical_file_uri(path)?;
     let hash = thumbnail_hash_for_uri(&uri);
-    let cache_home = xdg_cache_home();
     let metadata = fs::metadata(path).ok()?;
 
-    let directories = if size <= 128 {
-        ["normal", "large", "x-large", "xx-large"]
-    } else {
-        ["xx-large", "x-large", "large", "normal"]
+    let directories = match size {
+        0..=128 => ["normal", "large", "x-large", "xx-large"],
+        129..=256 => ["large", "x-large", "xx-large", "normal"],
+        257..=512 => ["x-large", "xx-large", "large", "normal"],
+        _ => ["xx-large", "x-large", "large", "normal"],
     };
     for directory in directories {
         let thumbnail_path = cache_home
@@ -280,6 +313,11 @@ pub fn is_gnome_wayland() -> bool {
     {
         false
     }
+}
+
+pub fn is_wayland_session() -> bool {
+    std::env::var("XDG_SESSION_TYPE").is_ok_and(|session| session.eq_ignore_ascii_case("wayland"))
+        || std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
 /// Loads KWin's built-in Blur effect through its session D-Bus interface.
@@ -902,11 +940,305 @@ mod tests {
     use super::*;
 
     #[test]
+    fn synthetic_send_to_paths_resolve_to_native_theme_icon_names() {
+        let kde_phone = portable_device_icon_lookup_path(
+            Some("linux-kio-mtp:/org/kde/kmtp/device_1"),
+            Path::new(""),
+        );
+        assert_eq!(
+            icon_names_for_path(&kde_phone, true)[0],
+            "multimedia-player"
+        );
+        assert_eq!(
+            icon_names_for_path(Path::new("bexplorer-bluetooth"), false)[0],
+            "preferences-system-bluetooth"
+        );
+        assert_eq!(
+            icon_names_for_path(Path::new("bexplorer-mail"), false)[0],
+            "mail-send"
+        );
+    }
+
+    #[test]
+    fn only_the_removable_mount_root_uses_a_drive_icon() {
+        let root = Path::new("/run/media/example/USB");
+        let child = Path::new("/run/media/example/USB/Documents");
+
+        assert_eq!(icon_names_for_path(root, true)[0], "drive-removable-media");
+        assert_eq!(icon_names_for_path(child, true)[0], "folder");
+    }
+
+    #[test]
     fn thumbnail_hash_matches_freedesktop_example() {
         assert_eq!(
             thumbnail_hash_for_uri("file:///home/jens/photos/me.png"),
             "c6ee772d9e49320e97ec29a7eb5b1697"
         );
+    }
+
+    #[test]
+    fn desktop_thumbnail_uri_matches_glib_path_encoding() {
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-thumbnail-uri-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create thumbnail URI test directory");
+        let path = root.join("Vídeo, demo (live)! O'Brien #1?.mp4");
+        fs::write(&path, []).expect("create thumbnail URI test file");
+
+        let uri = canonical_file_uri(&path).expect("build canonical file URI");
+        assert!(uri.ends_with("/V%C3%ADdeo,%20demo%20(live)!%20O'Brien%20%231%3F.mp4"));
+
+        fs::remove_dir_all(root).expect("cleanup thumbnail URI test directory");
+    }
+
+    #[test]
+    fn ffmpeg_fallback_produces_a_bounded_video_thumbnail_when_available() {
+        if command_path("ffmpeg").is_none() {
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-video-thumbnail-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create video thumbnail test directory");
+        // FFmpeg probes the contents rather than trusting the extension. A
+        // still PNG named as a video keeps this test tiny while exercising the
+        // same bounded process and output-decoding path used for real videos.
+        let path = root.join("frame.mp4");
+        let frame = image::RgbaImage::from_pixel(160, 90, image::Rgba([20, 100, 180, 255]));
+        frame
+            .save_with_format(&path, image::ImageFormat::Png)
+            .expect("write thumbnail source frame");
+
+        let thumbnail =
+            video_thumbnail_in(&path, 64, &root.join("cache")).expect("generate FFmpeg thumbnail");
+        assert_eq!(thumbnail.width, 64);
+        assert_eq!(thumbnail.height, 36);
+        assert_eq!(thumbnail.rgba.len(), 64 * 36 * 4);
+
+        fs::remove_dir_all(root).expect("cleanup video thumbnail test directory");
+    }
+
+    #[test]
+    fn ffmpeg_fallback_can_render_an_unsupported_still_image_when_available() {
+        let Some(ffmpeg) = command_path("ffmpeg") else {
+            return;
+        };
+
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-image-thumbnail-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create image thumbnail test directory");
+        let input = root.join("frame.heic");
+        let output = root.join("thumbnail.png");
+        image::RgbaImage::from_pixel(120, 80, image::Rgba([180, 70, 30, 255]))
+            .save_with_format(&input, image::ImageFormat::Png)
+            .expect("write still-image source");
+
+        assert!(run_ffmpeg(&ffmpeg, &input, &output, 64, &["0"]));
+        let thumbnail = load_generated_thumbnail(&output, 64).expect("decode FFmpeg output");
+        assert_eq!((thumbnail.width, thumbnail.height), (64, 43));
+
+        fs::remove_dir_all(root).expect("cleanup image thumbnail test directory");
+    }
+
+    #[test]
+    fn parses_and_expands_freedesktop_thumbnailer_entry() {
+        let thumbnailer = parse_desktop_thumbnailer(
+            "[Thumbnailer Entry]\n\
+             TryExec=portable-video-thumb\n\
+             Exec=portable-video-thumb --input %i --uri=%u --output=%o --size=%s --percent=%%\n\
+             MimeType=video/mp4;video/webm;\n",
+        )
+        .expect("parse thumbnailer entry");
+        assert!(thumbnailer.supports("video/mp4"));
+        assert!(!thumbnailer.supports("image/png"));
+        assert_eq!(
+            thumbnailer.try_exec.as_deref(),
+            Some("portable-video-thumb")
+        );
+
+        let input = PathBuf::from(OsString::from_vec(b"/tmp/video name-\xFF.mp4".to_vec()));
+        let output = Path::new("/tmp/preview output.png");
+        let uri = canonical_file_uri(&input).expect("canonical URI");
+        let expanded = thumbnailer
+            .exec
+            .iter()
+            .skip(1)
+            .map(|argument| expand_thumbnailer_argument(argument, &input, output, 256, &uri))
+            .collect::<Option<Vec<_>>>()
+            .expect("expand thumbnailer arguments");
+
+        assert_eq!(expanded[0], "--input");
+        assert_eq!(
+            expanded[1].as_os_str().as_bytes(),
+            input.as_os_str().as_bytes()
+        );
+        assert_eq!(expanded[2], OsString::from(format!("--uri={uri}")));
+        assert_eq!(expanded[3], "--output=/tmp/preview output.png");
+        assert_eq!(expanded[4], "--size=256");
+        assert_eq!(expanded[5], "--percent=%");
+    }
+
+    #[test]
+    fn executes_a_registered_freedesktop_thumbnailer() {
+        if command_path("cp").is_none() {
+            return;
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-registered-thumbnailer-test-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("create registered thumbnailer test directory");
+        let input = root.join("source video.mp4");
+        let output = root.join("generated thumbnail.png");
+        image::RgbaImage::from_pixel(80, 45, image::Rgba([15, 80, 170, 255]))
+            .save_with_format(&input, image::ImageFormat::Png)
+            .expect("write thumbnailer source");
+        let thumbnailer = parse_desktop_thumbnailer(
+            "[Thumbnailer Entry]\n\
+             TryExec=cp\n\
+             Exec=cp %i %o\n\
+             MimeType=video/mp4;\n",
+        )
+        .expect("parse registered thumbnailer");
+
+        assert!(run_registered_desktop_thumbnailer_from(
+            &[thumbnailer],
+            &input,
+            &output,
+            128,
+            "video/mp4"
+        ));
+        let generated = fs::read(&output).expect("registered thumbnailer should create its output");
+        let image = load_png_icon(&generated, 128).expect("decode generated thumbnail");
+        assert_eq!((image.width, image.height), (80, 45));
+
+        fs::remove_dir_all(root).expect("cleanup registered thumbnailer test directory");
+    }
+
+    #[test]
+    fn generated_image_thumbnail_round_trips_through_xdg_cache() {
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-thumbnail-cache-test-{}",
+            std::process::id()
+        ));
+        let cache_home = root.join("cache");
+        fs::create_dir_all(&root).expect("create cache test directory");
+        let original = root.join("Imagen portátil.png");
+        fs::write(&original, b"test image bytes").expect("create original image");
+        let image = NativeIconImage {
+            rgba: [30, 90, 180, 255].repeat(64 * 36),
+            width: 64,
+            height: 36,
+        };
+
+        assert!(save_desktop_thumbnail_in(
+            &cache_home,
+            &original,
+            64,
+            "image/png",
+            &image
+        ));
+        let loaded = cached_desktop_thumbnail_in(&cache_home, &original, 64)
+            .expect("load generated XDG thumbnail");
+        assert_eq!((loaded.width, loaded.height), (64, 36));
+        assert_eq!(loaded.rgba, image.rgba);
+
+        let uri = canonical_file_uri(&original).expect("canonical URI");
+        let thumbnail = cache_home
+            .join("thumbnails/normal")
+            .join(format!("{}.png", thumbnail_hash_for_uri(&uri)));
+        let chunks = png_text_chunks(&fs::read(thumbnail).expect("read cached thumbnail"));
+        assert_eq!(chunks.get("Thumb::URI"), Some(&uri));
+        assert_eq!(
+            chunks.get("Thumb::Mimetype").map(String::as_str),
+            Some("image/png")
+        );
+        assert!(
+            chunks
+                .get("Software")
+                .is_some_and(|software| software.starts_with("BExplorer "))
+        );
+
+        fs::remove_dir_all(root).expect("cleanup thumbnail cache test directory");
+    }
+
+    #[test]
+    fn desktop_cache_prefers_the_closest_standard_thumbnail_size() {
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-thumbnail-size-test-{}",
+            std::process::id()
+        ));
+        let cache_home = root.join("cache");
+        fs::create_dir_all(&root).expect("create cache test directory");
+        let original = root.join("photo.png");
+        fs::write(&original, b"original image").expect("create original image");
+        let normal = NativeIconImage {
+            rgba: [210, 30, 20, 255].repeat(128 * 80),
+            width: 128,
+            height: 80,
+        };
+        let large = NativeIconImage {
+            rgba: [20, 80, 220, 255].repeat(256 * 160),
+            width: 256,
+            height: 160,
+        };
+        assert!(save_desktop_thumbnail_in(
+            &cache_home,
+            &original,
+            128,
+            "image/png",
+            &normal
+        ));
+        assert!(save_desktop_thumbnail_in(
+            &cache_home,
+            &original,
+            256,
+            "image/png",
+            &large
+        ));
+
+        let small =
+            cached_desktop_thumbnail_in(&cache_home, &original, 48).expect("normal thumbnail");
+        let standard =
+            cached_desktop_thumbnail_in(&cache_home, &original, 256).expect("large thumbnail");
+        assert_eq!((small.width, small.height), (48, 30));
+        assert_eq!(&small.rgba[..4], &[210, 30, 20, 255]);
+        assert_eq!((standard.width, standard.height), (256, 160));
+        assert_eq!(&standard.rgba[..4], &[20, 80, 220, 255]);
+
+        fs::remove_dir_all(root).expect("cleanup thumbnail size test directory");
+    }
+
+    #[test]
+    fn recognizes_tumbler_service_and_capabilities() {
+        assert!(dbus_service_claims_tumbler(
+            "[D-BUS Service]\n\
+             Name=org.freedesktop.thumbnails.Thumbnailer1\n\
+             Exec=/usr/lib/tumbler-1/tumblerd\n"
+        ));
+        assert!(!dbus_service_claims_tumbler(
+            "[D-BUS Service]\nName=org.example.Other\n"
+        ));
+
+        let schemes = vec!["file".into(), "file".into(), "https".into()];
+        let mime_types = vec!["image/*".into(), "video/mp4".into(), "image/jpeg".into()];
+        assert!(tumbler_supports_file(&schemes, &mime_types, "image/heic"));
+        assert!(tumbler_supports_file(&schemes, &mime_types, "video/mp4"));
+        assert!(!tumbler_supports_file(
+            &schemes,
+            &mime_types,
+            "application/pdf"
+        ));
+
+        let flavors = vec!["normal".into(), "large".into()];
+        assert_eq!(best_tumbler_flavor(&flavors, 256), Some("large"));
+        assert_eq!(best_tumbler_flavor(&flavors, 512), Some("large"));
     }
 
     #[test]
@@ -937,8 +1269,8 @@ mod tests {
     #[test]
     fn parses_png_text_chunk() {
         let mut png = Vec::from(b"\x89PNG\r\n\x1a\n".as_slice());
-        append_png_chunk(&mut png, b"tEXt", b"Thumb::MTime\x00123");
-        append_png_chunk(&mut png, b"IEND", b"");
+        push_png_chunk(&mut png, b"tEXt", b"Thumb::MTime\x00123");
+        push_png_chunk(&mut png, b"IEND", b"");
 
         let chunks = png_text_chunks(&png);
         assert_eq!(chunks.get("Thumb::MTime").map(String::as_str), Some("123"));
@@ -973,12 +1305,5 @@ mod tests {
         assert!(icon.width > 0 && icon.width <= 24);
         assert!(icon.height > 0 && icon.height <= 24);
         assert_eq!(icon.rgba.len(), icon.width * icon.height * 4);
-    }
-
-    fn append_png_chunk(png: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
-        png.extend_from_slice(kind);
-        png.extend_from_slice(data);
-        png.extend_from_slice(&0_u32.to_be_bytes());
     }
 }

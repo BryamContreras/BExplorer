@@ -1,8 +1,35 @@
-#[cfg(target_os = "windows")]
-pub struct NativeIconImage {
-    pub rgba: Vec<u8>,
-    pub width: usize,
-    pub height: usize,
+use std::sync::{Condvar, Mutex, OnceLock};
+
+use crate::platform::NativeIconImage;
+
+const MAX_WINDOWS_THUMBNAIL_EDGE: u32 = 1024;
+const MAX_WINDOWS_THUMBNAIL_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CONCURRENT_WINDOWS_THUMBNAILERS: usize = 2;
+
+#[derive(Clone, Copy)]
+enum ShellThumbnailMode {
+    CacheOnly,
+    Extract,
+}
+
+struct ShellThumbnailResult {
+    image: NativeIconImage,
+    low_quality: bool,
+}
+
+struct WindowsThumbnailPermit {
+    state: &'static (Mutex<usize>, Condvar),
+}
+
+impl Drop for WindowsThumbnailPermit {
+    fn drop(&mut self) {
+        let (active, available) = self.state;
+        let mut active = active
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active = active.saturating_sub(1);
+        available.notify_one();
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -90,6 +117,206 @@ pub fn native_file_icon_highres(
 ) -> Option<NativeIconImage> {
     shell_item_icon(path, 256)
         .or_else(|| native_file_icon_highres_from_system_list(path, is_directory))
+}
+
+pub fn cached_desktop_thumbnail(path: &std::path::Path, size: u32) -> Option<NativeIconImage> {
+    shell_thumbnail(path, size, ShellThumbnailMode::CacheOnly)
+        .filter(|thumbnail| !thumbnail.low_quality)
+        .map(|thumbnail| thumbnail.image)
+        .or_else(|| crate::platform::thumbnail_fallback_cache::load(path, size))
+}
+
+pub fn cache_desktop_thumbnail(path: &std::path::Path, size: u32, image: &NativeIconImage) -> bool {
+    crate::platform::thumbnail_fallback_cache::save(path, size, image)
+}
+
+pub fn image_thumbnail(path: &std::path::Path, size: u32) -> Option<NativeIconImage> {
+    shell_thumbnail(path, size, ShellThumbnailMode::Extract).map(|thumbnail| thumbnail.image)
+}
+
+pub fn video_thumbnail(path: &std::path::Path, size: u32) -> Option<NativeIconImage> {
+    shell_thumbnail(path, size, ShellThumbnailMode::Extract).map(|thumbnail| thumbnail.image)
+}
+
+fn shell_thumbnail(
+    path: &std::path::Path,
+    size: u32,
+    mode: ShellThumbnailMode,
+) -> Option<ShellThumbnailResult> {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows::Win32::System::Com::{
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+        CoUninitialize,
+    };
+    use windows::Win32::UI::Shell::{
+        ISharedBitmap, IShellItem, IThumbnailCache, LocalThumbnailCache,
+        SHCreateItemFromParsingName, WTS_CACHEFLAGS, WTS_EXTRACT, WTS_INCACHEONLY, WTS_LOWQUALITY,
+    };
+    use windows::core::PCWSTR;
+
+    if !path.is_file() {
+        return None;
+    }
+    let _permit =
+        matches!(mode, ShellThumbnailMode::Extract).then(acquire_windows_thumbnail_permit);
+    let initialized = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_ok();
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let edge = size.clamp(32, MAX_WINDOWS_THUMBNAIL_EDGE);
+
+    let thumbnail = (|| {
+        let item: IShellItem =
+            unsafe { SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None) }.ok()?;
+        let cache: IThumbnailCache =
+            unsafe { CoCreateInstance(&LocalThumbnailCache, None, CLSCTX_INPROC_SERVER) }.ok()?;
+        let mut shared: Option<ISharedBitmap> = None;
+        let mut cache_flags = WTS_CACHEFLAGS::default();
+        let request_flags = match mode {
+            ShellThumbnailMode::CacheOnly => WTS_INCACHEONLY,
+            ShellThumbnailMode::Extract => WTS_EXTRACT,
+        };
+        unsafe {
+            cache
+                .GetThumbnail(
+                    &item,
+                    edge,
+                    request_flags,
+                    Some(&mut shared),
+                    Some(&mut cache_flags),
+                    None,
+                )
+                .ok()?;
+        }
+        Some(ShellThumbnailResult {
+            image: shared_bitmap_to_rgba(&shared?)?,
+            low_quality: cache_flags.contains(WTS_LOWQUALITY),
+        })
+    })();
+
+    if initialized {
+        unsafe { CoUninitialize() };
+    }
+    thumbnail
+}
+
+fn shared_bitmap_to_rgba(
+    shared: &windows::Win32::UI::Shell::ISharedBitmap,
+) -> Option<NativeIconImage> {
+    let size = unsafe { shared.GetSize() }.ok()?;
+    let width = u32::try_from(size.cx).ok()?;
+    let height = u32::try_from(size.cy).ok()?;
+    if width == 0
+        || height == 0
+        || width > MAX_WINDOWS_THUMBNAIL_EDGE
+        || height > MAX_WINDOWS_THUMBNAIL_EDGE
+        || (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?
+            > MAX_WINDOWS_THUMBNAIL_BYTES
+    {
+        return None;
+    }
+    let bitmap = unsafe { shared.GetSharedBitmap() }.ok()?;
+    let alpha = unsafe { shared.GetFormat() }.unwrap_or(windows::Win32::UI::Shell::WTSAT_UNKNOWN);
+    hbitmap_thumbnail_to_rgba(bitmap, width, height, alpha)
+}
+
+fn hbitmap_thumbnail_to_rgba(
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+    width: u32,
+    height: u32,
+    alpha_type: windows::Win32::UI::Shell::WTS_ALPHATYPE,
+) -> Option<NativeIconImage> {
+    use std::mem::size_of;
+
+    use windows::Win32::Graphics::Gdi::{
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC,
+        GetDIBits,
+    };
+    use windows::Win32::UI::Shell::{WTSAT_ARGB, WTSAT_RGB};
+
+    let mut info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width as i32,
+            biHeight: -(height as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let byte_len = (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)?;
+    if byte_len > MAX_WINDOWS_THUMBNAIL_BYTES {
+        return None;
+    }
+    let mut bgra = vec![0_u8; byte_len];
+    let dc = unsafe { CreateCompatibleDC(None) };
+    if dc.0.is_null() {
+        return None;
+    }
+    let rows = unsafe {
+        GetDIBits(
+            dc,
+            bitmap,
+            0,
+            height,
+            Some(bgra.as_mut_ptr().cast()),
+            &mut info,
+            DIB_RGB_COLORS,
+        )
+    };
+    let _ = unsafe { DeleteDC(dc) };
+    if rows != height as i32 {
+        return None;
+    }
+
+    let preserve_alpha = alpha_type == WTSAT_ARGB
+        || (alpha_type != WTSAT_RGB && bgra.chunks_exact(4).any(|pixel| pixel[3] != 0));
+    let mut rgba = Vec::with_capacity(byte_len);
+    for pixel in bgra.chunks_exact(4) {
+        let alpha = if preserve_alpha { pixel[3] } else { 255 };
+        let (red, green, blue) = if alpha_type == WTSAT_ARGB && alpha > 0 && alpha < 255 {
+            (
+                unpremultiply_channel(pixel[2], alpha),
+                unpremultiply_channel(pixel[1], alpha),
+                unpremultiply_channel(pixel[0], alpha),
+            )
+        } else {
+            (pixel[2], pixel[1], pixel[0])
+        };
+        rgba.extend_from_slice(&[red, green, blue, alpha]);
+    }
+    Some(NativeIconImage {
+        rgba,
+        width: width as usize,
+        height: height as usize,
+    })
+}
+
+fn unpremultiply_channel(channel: u8, alpha: u8) -> u8 {
+    ((channel as u32 * 255 + alpha as u32 / 2) / alpha as u32).min(255) as u8
+}
+
+fn acquire_windows_thumbnail_permit() -> WindowsThumbnailPermit {
+    static STATE: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+    let state = STATE.get_or_init(|| (Mutex::new(0), Condvar::new()));
+    let (active, available) = state;
+    let mut active = active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    while *active >= MAX_CONCURRENT_WINDOWS_THUMBNAILERS {
+        active = available
+            .wait(active)
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+    }
+    *active += 1;
+    drop(active);
+    WindowsThumbnailPermit { state }
 }
 
 #[cfg(target_os = "windows")]

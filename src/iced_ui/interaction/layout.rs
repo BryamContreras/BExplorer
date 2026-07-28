@@ -179,6 +179,8 @@ impl BExplorerIced {
         } else {
             0.0
         };
-        SIDEBAR_SECTION_HEIGHT + item_count * SIDEBAR_ITEM_HEIGHT + item_count.max(0.0)
+        self.sidebar_section_height()
+            + item_count * self.sidebar_item_height()
+            + item_count.max(0.0)
     }
 }

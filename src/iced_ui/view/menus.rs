@@ -3,35 +3,59 @@ use iced::widget::{column, row};
 
 impl BExplorerIced {
     pub(super) fn title_bar(&self, palette: Palette) -> Element<'_, Message> {
-        let menu = icon_button("menu", Message::ToggleMenu, palette, self.title_menu_open);
+        let menu = icon_button(
+            "menu",
+            Message::ToggleMenu,
+            palette,
+            self.title_menu_open,
+            self.font_size(),
+        );
         let sidebar = icon_button(
             "side",
             Message::ToggleSidebar,
             palette,
             self.sidebar_visible,
+            self.font_size(),
         );
 
         let tabs = self.title_tabs_area(palette);
+        let title_button_width = self.ui_metric(TITLE_BUTTON_WIDTH);
+        let title_button_gap = self.ui_metric(TITLE_BUTTON_GAP);
         let pane_alignment_space = if self.sidebar_is_rendered() && !self.uses_split_sidebars() {
-            (self.current_sidebar_width() - TITLE_BUTTON_WIDTH * 2.0 - TITLE_BUTTON_GAP).max(0.0)
+            (self.current_sidebar_width() - title_button_width * 2.0 - title_button_gap).max(0.0)
         } else {
-            TITLE_TAB_START_PADDING
+            self.ui_metric(TITLE_TAB_START_PADDING)
         };
 
         let tab_band = row![
             menu,
-            Space::new().width(TITLE_BUTTON_GAP),
+            Space::new().width(title_button_gap),
             sidebar,
             Space::new().width(pane_alignment_space),
-            tabs
+            container(tabs)
+                .width(Length::Fill)
+                .height(TITLE_HEIGHT)
+                .clip(true),
         ]
         .align_y(Alignment::Center)
         .height(TITLE_HEIGHT)
         .width(Length::Fill);
 
         let controls = row![
-            icon_button("split", Message::ToggleSplit, palette, self.split.is_some()),
-            icon_button("min", Message::WindowMinimize, palette, false),
+            icon_button(
+                "split",
+                Message::ToggleSplit,
+                palette,
+                self.split.is_some(),
+                self.font_size(),
+            ),
+            icon_button(
+                "min",
+                Message::WindowMinimize,
+                palette,
+                false,
+                self.font_size(),
+            ),
             icon_button(
                 if self.window_maximized {
                     "restore"
@@ -41,10 +65,11 @@ impl BExplorerIced {
                 Message::WindowMaximize,
                 palette,
                 false,
+                self.font_size(),
             ),
-            window_close_button(palette),
+            window_close_button(palette, self.font_size()),
         ]
-        .spacing(TITLE_BUTTON_GAP)
+        .spacing(title_button_gap)
         .align_y(Alignment::Center);
 
         let controls_overlay = row![Space::new().width(Length::Fill), controls]
@@ -74,6 +99,10 @@ impl BExplorerIced {
     }
 
     pub(super) fn title_menu_overlay(&self, palette: Palette) -> Element<'_, Message> {
+        let density = self.ui_density();
+        let menu_item_height = self.ui_metric(32.0);
+        let menu_width = self.ui_metric(220.0);
+        let menu_height = 151.0 + density * 4.0;
         let shortcuts_selected = self.keyboard_menu_item_selected(KeyboardMenu::Title, 0);
         let show_keyboard_selected = self.keyboard_menu_item_selected(KeyboardMenu::Title, 1);
         let settings_selected = self.keyboard_menu_item_selected(KeyboardMenu::Title, 2);
@@ -93,22 +122,22 @@ impl BExplorerIced {
             Button::new(
                 container(
                     row![
-                        inline_icon("eye", show_menu_icon_color, 16.0),
+                        inline_icon("eye", show_menu_icon_color, self.ui_metric(16.0)),
                         text(self.localized("Mostrar", "Show"))
                             .size(self.font_size())
                             .color(show_menu_color)
                             .width(Length::Fill),
-                        inline_icon("chev-right", show_menu_icon_color, 14.0),
+                        inline_icon("chev-right", show_menu_icon_color, self.ui_metric(14.0)),
                     ]
-                    .spacing(10)
+                    .spacing(self.ui_metric(10.0))
                     .align_y(Alignment::Center),
                 )
                 .height(Length::Fill)
                 .center_y(Length::Fill),
             )
             .width(Length::Fill)
-            .height(32)
-            .padding([0, 8])
+            .height(menu_item_height)
+            .padding([0.0, self.ui_metric(8.0)])
             .on_press(Message::OpenShowMenu)
             .style(move |_, status| selected_button_style(palette, show_selected, status)),
         )
@@ -126,7 +155,7 @@ impl BExplorerIced {
                                 } else {
                                     palette.muted_text
                                 },
-                                16.0,
+                                self.ui_metric(16.0),
                             ),
                             text(self.localized("Atajos", "Shortcuts"))
                                 .size(self.font_size())
@@ -137,15 +166,15 @@ impl BExplorerIced {
                                 })
                                 .width(Length::Fill),
                         ]
-                        .spacing(10)
+                        .spacing(self.ui_metric(10.0))
                         .align_y(Alignment::Center),
                     )
                     .height(Length::Fill)
                     .center_y(Length::Fill),
                 )
                 .width(Length::Fill)
-                .height(32)
-                .padding([0, 8])
+                .height(menu_item_height)
+                .padding([0.0, self.ui_metric(8.0)])
                 .on_press(Message::OpenShortcuts)
                 .style(move |_, status| {
                     selected_button_style(palette, shortcuts_selected, status)
@@ -161,7 +190,7 @@ impl BExplorerIced {
                                 } else {
                                     palette.muted_text
                                 },
-                                16.0,
+                                self.ui_metric(16.0),
                             ),
                             text(self.localized("Configuracion", "Settings"))
                                 .size(self.font_size())
@@ -172,15 +201,15 @@ impl BExplorerIced {
                                 })
                                 .width(Length::Fill),
                         ]
-                        .spacing(8)
+                        .spacing(self.ui_metric(8.0))
                         .align_y(Alignment::Center),
                     )
                     .height(Length::Fill)
                     .center_y(Length::Fill),
                 )
                 .width(Length::Fill)
-                .height(32)
-                .padding([0, 8])
+                .height(menu_item_height)
+                .padding([0.0, self.ui_metric(8.0)])
                 .on_press(Message::ToggleSettings)
                 .style(move |_, status| {
                     selected_button_style(palette, settings_selected, status)
@@ -195,7 +224,7 @@ impl BExplorerIced {
                                 } else {
                                     palette.muted_text
                                 },
-                                16.0,
+                                self.ui_metric(16.0),
                             ),
                             text(self.localized("Acerca de", "About"))
                                 .size(self.font_size())
@@ -206,22 +235,22 @@ impl BExplorerIced {
                                 })
                                 .width(Length::Fill),
                         ]
-                        .spacing(8)
+                        .spacing(self.ui_metric(8.0))
                         .align_y(Alignment::Center),
                     )
                     .height(Length::Fill)
                     .center_y(Length::Fill),
                 )
                 .width(Length::Fill)
-                .height(32)
-                .padding([0, 8])
+                .height(menu_item_height)
+                .padding([0.0, self.ui_metric(8.0)])
                 .on_press(Message::OpenAbout)
                 .style(move |_, status| { selected_button_style(palette, about_selected, status) }),
             ]
             .spacing(3),
         )
         .padding(7)
-        .width(220)
+        .width(menu_width)
         .style(move |_| {
             container::Style::default()
                 .background(palette.menu_bg)
@@ -238,46 +267,66 @@ impl BExplorerIced {
                 .height(Length::Fill),
         )
         .on_press(Message::CloseFloatingMenus);
-        let menu =
-            self.frosted_popup_surface(self.popup_backdrop.as_ref(), menu.into(), 220.0, 151.0);
+        let menu = self.frosted_popup_surface(
+            self.popup_backdrop.as_ref(),
+            menu.into(),
+            menu_width,
+            menu_height,
+        );
         let floating_menu: Element<'_, Message> = float(opaque(menu))
             .translate(|_, _| Vector::new(0.0, TITLE_HEIGHT))
             .into();
 
         let mut layers = vec![backdrop.into(), floating_menu];
         if self.show_menu_open {
+            let submenu_width = self.ui_metric(286.0);
+            let action_bar_label = self.localized("Barra de acciones", "Action bar");
+            let bookmark_bar_label = self.localized("Barra de marcadores", "Bookmarks bar");
+            let split_sidebar_label =
+                self.localized("Menu lateral en pantalla dividida", "Sidebar in split view");
+            let split_preview_label = self.localized(
+                "Panel de vista previa en pantalla dividida",
+                "Preview panel in split view",
+            );
+            let submenu_labels = [
+                action_bar_label,
+                bookmark_bar_label,
+                split_sidebar_label,
+                split_preview_label,
+            ];
+            let submenu_height = adaptive_menu_list_height(
+                &submenu_labels,
+                self.font_size(),
+                submenu_width,
+                3.0,
+                7.0,
+            );
             let submenu = container(
                 column![
                     self.show_menu_option(
                         0,
-                        self.localized("Barra de acciones", "Action bar"),
+                        action_bar_label,
                         self.config.show_action_bar,
                         Message::ToggleActionBar,
                         palette,
                     ),
                     self.show_menu_option(
                         1,
-                        self.localized("Barra de marcadores", "Bookmarks bar"),
+                        bookmark_bar_label,
                         self.config.show_bookmark_bar,
                         Message::ToggleBookmarkBar,
                         palette,
                     ),
                     self.show_menu_option(
                         2,
-                        self.localized(
-                            "Menu lateral en pantalla dividida",
-                            "Sidebar in split view"
-                        ),
+                        split_sidebar_label,
                         self.config.show_split_pane_menus,
                         Message::ToggleSplitPaneMenus,
                         palette,
                     ),
                     self.show_menu_option(
                         3,
-                        self.localized(
-                            "Panel de vista previa en pantalla dividida",
-                            "Preview panel in split view",
-                        ),
+                        split_preview_label,
                         self.config.show_split_preview_panels,
                         Message::ToggleSplitPreviewPanels,
                         palette,
@@ -286,7 +335,7 @@ impl BExplorerIced {
                 .spacing(3),
             )
             .padding(7)
-            .width(286)
+            .width(submenu_width)
             .style(move |_| {
                 container::Style::default()
                     .background(palette.menu_bg)
@@ -300,15 +349,16 @@ impl BExplorerIced {
             let submenu = self.frosted_popup_surface(
                 self.title_submenu_backdrop.as_ref(),
                 submenu.into(),
-                286.0,
-                151.0,
+                submenu_width,
+                submenu_height,
             );
             let submenu = mouse_area(submenu)
                 .on_enter(Message::ShowMenuSubmenuEnter)
                 .on_exit(Message::ShowMenuSubmenuExit);
+            let submenu_y = TITLE_HEIGHT + self.ui_metric(41.0);
             layers.push(
                 float(opaque(submenu))
-                    .translate(|_, _| Vector::new(218.0, TITLE_HEIGHT + 41.0))
+                    .translate(move |_, _| Vector::new(menu_width - 2.0, submenu_y))
                     .into(),
             );
         }
@@ -343,22 +393,29 @@ impl BExplorerIced {
                         } else {
                             palette.muted_text
                         })
-                        .width(18),
-                    text(label).size(self.font_size()).color(if selected {
-                        palette.accent_text
-                    } else {
-                        palette.text
-                    }),
+                        .width(self.ui_metric(18.0)),
+                    text(label)
+                        .size(self.font_size())
+                        .color(if selected {
+                            palette.accent_text
+                        } else {
+                            palette.text
+                        })
+                        .width(Length::Fill),
                 ]
-                .spacing(6)
+                .spacing(self.ui_metric(6.0))
                 .align_y(Alignment::Center),
             )
             .height(Length::Fill)
             .center_y(Length::Fill),
         )
         .width(Length::Fill)
-        .height(32)
-        .padding([0, 8])
+        .height(adaptive_menu_item_height(
+            label,
+            self.font_size(),
+            self.ui_metric(286.0),
+        ))
+        .padding([0.0, self.ui_metric(8.0)])
         .on_press(message)
         .style(move |_, status| selected_button_style(palette, selected, status))
         .into()
@@ -370,8 +427,10 @@ impl BExplorerIced {
         };
         let (x, y) = self.context_menu_window_position(menu_state);
         let menu_height = self.context_menu_height(menu_state);
+        let menu_width = context_menu_width(self.font_size());
         let is_entry = matches!(menu_state.target, ContextTarget::Entry(_));
         let is_sidebar_drive = matches!(menu_state.target, ContextTarget::SidebarDrive(_));
+        let trash_view = self.is_trash_pane(menu_state.pane) && !is_sidebar_drive;
         let is_search_result = is_entry && self.pane(menu_state.pane).folder_entries.is_some();
         let extractable_archive = self
             .context_entry(menu_state.pane, menu_state.target)
@@ -399,11 +458,58 @@ impl BExplorerIced {
         let drive_entry = context_entry
             .as_ref()
             .is_some_and(|entry| entry.kind == EntryKind::Drive);
+        let duplicate_cleanup_available = context_entry
+            .as_ref()
+            .is_some_and(crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry);
         let can_copy_or_cut = is_entry && !drive_entry;
         let defender_available = cfg!(target_os = "windows")
             && context_entry
                 .as_ref()
                 .is_some_and(|entry| !explorer::is_virtual_path(&entry.path));
+        let context_font_size = self.font_size();
+        let context_quick_button = |icon, label, command, palette, enabled, selected| {
+            crate::iced_ui::helpers::context_quick_button(
+                icon,
+                label,
+                command,
+                palette,
+                enabled,
+                selected,
+                context_font_size,
+            )
+        };
+        let context_menu_row = |icon, label, trailing, command, palette, selected| {
+            crate::iced_ui::helpers::context_menu_row(
+                icon,
+                label,
+                trailing,
+                command,
+                palette,
+                selected,
+                context_font_size,
+            )
+        };
+        let context_menu_dynamic_row = |icon, label, trailing, command, palette, selected| {
+            crate::iced_ui::helpers::context_menu_dynamic_row(
+                icon,
+                label,
+                trailing,
+                command,
+                palette,
+                selected,
+                context_font_size,
+            )
+        };
+        let context_menu_application_row = |label, icon, command, palette, selected| {
+            crate::iced_ui::helpers::context_menu_application_row(
+                label,
+                icon,
+                command,
+                palette,
+                selected,
+                context_font_size,
+            )
+        };
 
         // On empty space, copying or cutting has no meaningful target. Keep
         // those familiar actions visible but disabled, and lead with Paste so
@@ -469,7 +575,55 @@ impl BExplorerIced {
         .width(Length::Fill);
 
         let mut items = column![].spacing(2).width(Length::Fill);
-        if is_sidebar_drive {
+        if trash_view {
+            if is_entry {
+                items = items
+                    .push(context_menu_row(
+                        "undo",
+                        self.localized("Restaurar", "Restore"),
+                        None,
+                        ContextCommand::RestoreTrash,
+                        palette,
+                        self.context_command_keyboard_selected(ContextCommand::RestoreTrash),
+                    ))
+                    .push(context_menu_row(
+                        "delete-forever",
+                        self.localized("Eliminar", "Delete"),
+                        None,
+                        ContextCommand::DeleteTrash,
+                        palette,
+                        self.context_command_keyboard_selected(ContextCommand::DeleteTrash),
+                    ));
+            } else {
+                items = items
+                    .push(context_menu_row(
+                        "refresh",
+                        self.localized("Actualizar", "Refresh"),
+                        None,
+                        ContextCommand::Refresh,
+                        palette,
+                        self.context_command_keyboard_selected(ContextCommand::Refresh),
+                    ))
+                    .push(context_menu_row(
+                        "delete-forever",
+                        self.localized("Vaciar papelera", "Empty Recycle Bin"),
+                        None,
+                        ContextCommand::EmptyTrash,
+                        palette,
+                        self.context_command_keyboard_selected(ContextCommand::EmptyTrash),
+                    ));
+            }
+        } else if is_sidebar_drive {
+            if duplicate_cleanup_available {
+                items = items.push(context_menu_row(
+                    "folder-stack",
+                    self.localized("Limpieza de duplicados", "Duplicate cleanup"),
+                    None,
+                    ContextCommand::DuplicateCleanup,
+                    palette,
+                    self.context_command_keyboard_selected(ContextCommand::DuplicateCleanup),
+                ));
+            }
             if formatable_drive {
                 items = items.push(context_menu_row(
                     "format",
@@ -480,19 +634,23 @@ impl BExplorerIced {
                     self.context_command_keyboard_selected(ContextCommand::FormatDrive),
                 ));
             }
-            items = items.push(context_menu_row(
-                "eject",
-                self.localized("Expulsar", "Eject"),
-                None,
-                ContextCommand::EjectDrive,
-                palette,
-                self.context_command_keyboard_selected(ContextCommand::EjectDrive),
-            ));
+            if ejectable_drive {
+                items = items.push(context_menu_row(
+                    "eject",
+                    self.localized("Expulsar", "Eject"),
+                    None,
+                    ContextCommand::EjectDrive,
+                    palette,
+                    self.context_command_keyboard_selected(ContextCommand::EjectDrive),
+                ));
+            }
         } else {
             items = items.push(quick_actions).push(context_separator(palette));
         }
 
-        if is_sidebar_drive {
+        if trash_view {
+            // Trash has its own intentionally small action set above.
+        } else if is_sidebar_drive {
             // The sidebar menu intentionally contains only actions that are
             // safe for the mounted volume itself.
         } else if is_entry {
@@ -504,6 +662,16 @@ impl BExplorerIced {
                 palette,
                 self.context_command_keyboard_selected(ContextCommand::Open),
             ));
+            if duplicate_cleanup_available {
+                items = items.push(context_menu_row(
+                    "folder-stack",
+                    self.localized("Limpieza de duplicados", "Duplicate cleanup"),
+                    None,
+                    ContextCommand::DuplicateCleanup,
+                    palette,
+                    self.context_command_keyboard_selected(ContextCommand::DuplicateCleanup),
+                ));
+            }
             if !drive_entry {
                 items = items.push(
                     mouse_area(context_menu_row(
@@ -517,6 +685,20 @@ impl BExplorerIced {
                     .on_enter(Message::ContextOpenWithParentEnter)
                     .on_exit(Message::ContextOpenWithParentExit),
                 );
+                if !menu_state.send_to_targets.is_empty() {
+                    items = items.push(
+                        mouse_area(context_menu_row(
+                            "send",
+                            self.localized("Enviar a", "Send to"),
+                            Some(ContextMenuTrailing::Icon("chev-right")),
+                            ContextCommand::SendToMenu,
+                            palette,
+                            self.context_command_keyboard_selected(ContextCommand::SendToMenu),
+                        ))
+                        .on_enter(Message::ContextSendToParentEnter)
+                        .on_exit(Message::ContextSendToParentExit),
+                    );
+                }
                 if is_search_result {
                     items = items.push(context_menu_row(
                         "folder",
@@ -651,7 +833,7 @@ impl BExplorerIced {
                 .push(context_separator(palette));
         }
 
-        if terminal_available {
+        if terminal_available && !trash_view {
             items = items.push(context_menu_row(
                 "terminal",
                 self.localized("Abrir en Terminal", "Open in Terminal"),
@@ -661,7 +843,7 @@ impl BExplorerIced {
                 self.context_command_keyboard_selected(ContextCommand::OpenTerminal),
             ));
         }
-        if !is_sidebar_drive {
+        if !is_sidebar_drive && !trash_view {
             items = items.push(context_menu_row(
                 "properties",
                 self.localized("Propiedades", "Properties"),
@@ -672,20 +854,22 @@ impl BExplorerIced {
             ));
         }
 
-        let menu_content = container(items.padding([4, 6])).width(258).style(move |_| {
-            container::Style::default()
-                .background(palette.menu_bg)
-                .border(border::rounded(7).color(palette.strong_border).width(1))
-                .shadow(iced::Shadow {
-                    color: Color::from_rgba8(0, 0, 0, 0.28),
-                    offset: iced::Vector::new(0.0, 7.0),
-                    blur_radius: 18.0,
-                })
-        });
+        let menu_content = container(items.padding([4, 6]))
+            .width(menu_width)
+            .style(move |_| {
+                container::Style::default()
+                    .background(palette.menu_bg)
+                    .border(border::rounded(7).color(palette.strong_border).width(1))
+                    .shadow(iced::Shadow {
+                        color: Color::from_rgba8(0, 0, 0, 0.28),
+                        offset: iced::Vector::new(0.0, 7.0),
+                        blur_radius: 18.0,
+                    })
+            });
         let menu = self.frosted_popup_surface(
             menu_state.backdrop.as_ref(),
             menu_content.into(),
-            258.0,
+            menu_width,
             menu_height,
         );
 
@@ -701,7 +885,7 @@ impl BExplorerIced {
             .into();
 
         let mut overlay_layers = vec![backdrop.into(), floating_menu];
-        if self.context_open_with_submenu && is_entry {
+        if self.context_open_with_submenu && is_entry && !trash_view {
             let applications = &menu_state.open_with_applications;
             let mut submenu_labels = applications
                 .iter()
@@ -740,8 +924,11 @@ impl BExplorerIced {
                 palette,
                 self.context_command_keyboard_selected(ContextCommand::OpenWith),
             ));
-            let submenu_width = context_submenu_width(&submenu_labels).max(220.0);
-            let submenu_height = (applications.len() as f32 * 36.0 + 46.0).min(320.0);
+            let submenu_width =
+                context_submenu_width(&submenu_labels, self.font_size()).max(self.ui_metric(220.0));
+            let submenu_height =
+                context_submenu_rows_height(applications.len() + 1, self.font_size())
+                    .min(self.ui_metric(320.0));
             let submenu_content = container(
                 scrollable(rows)
                     .id(Self::context_open_with_scroll_id())
@@ -772,18 +959,93 @@ impl BExplorerIced {
                 submenu_width,
                 submenu_height,
             );
-            let submenu_x = if x + 258.0 + submenu_width <= self.window_size.width - 8.0 {
-                x + 252.0
+            let submenu_x = if x + menu_width + submenu_width <= self.window_size.width - 8.0 {
+                x + menu_width - 6.0
             } else {
                 (x - submenu_width + 6.0).max(8.0)
             };
-            let submenu_y = (y + 42.0).clamp(
-                8.0,
-                (self.window_size.height - submenu_height - 8.0).max(8.0),
-            );
+            let submenu_y = (y + context_submenu_parent_offset(true, 1, 1, self.font_size()))
+                .clamp(
+                    8.0,
+                    (self.window_size.height - submenu_height - 8.0).max(8.0),
+                );
             let submenu = mouse_area(submenu)
                 .on_enter(Message::ContextOpenWithSubmenuEnter)
                 .on_exit(Message::ContextOpenWithSubmenuExit);
+            overlay_layers.push(
+                float(opaque(submenu))
+                    .translate(move |_, _| Vector::new(submenu_x, submenu_y))
+                    .into(),
+            );
+        }
+        if self.context_send_to_submenu
+            && is_entry
+            && !trash_view
+            && !menu_state.send_to_targets.is_empty()
+        {
+            let labels = menu_state
+                .send_to_targets
+                .iter()
+                .map(|target| target.label().to_owned())
+                .collect::<Vec<_>>();
+            let mut rows = column![].spacing(2).width(Length::Fill).padding([4, 6]);
+            for (index, target) in menu_state.send_to_targets.iter().enumerate() {
+                rows = rows.push(context_menu_native_icon_row(
+                    target.label().to_owned(),
+                    self.context_send_to_icon_handle(target),
+                    target.icon(),
+                    ContextCommand::SendToTarget(index),
+                    palette,
+                    self.context_command_keyboard_selected(ContextCommand::SendToTarget(index)),
+                    self.font_size(),
+                ));
+            }
+            let submenu_width = context_submenu_width(&labels, self.font_size());
+            let submenu_height = context_submenu_rows_height(labels.len(), self.font_size())
+                .min(self.ui_metric(320.0));
+            let submenu_content = container(
+                scrollable(rows)
+                    .id(Self::context_send_to_scroll_id())
+                    .height(submenu_height)
+                    .style(move |theme, status| {
+                        explorer_scrollable_style(palette, theme, status, 1.0)
+                    }),
+            )
+            .width(submenu_width)
+            .height(submenu_height)
+            .style(move |_| {
+                container::Style::default()
+                    .background(palette.menu_bg)
+                    .border(border::rounded(7).color(palette.strong_border).width(1))
+                    .shadow(iced::Shadow {
+                        color: Color::from_rgba8(0, 0, 0, 0.28),
+                        offset: iced::Vector::new(0.0, 7.0),
+                        blur_radius: 18.0,
+                    })
+            });
+            let submenu_backdrop = (menu_state.submenu_backdrop_kind
+                == Some(ContextSubmenuKind::SendTo))
+            .then_some(menu_state.submenu_backdrop.as_ref())
+            .flatten();
+            let submenu = self.frosted_popup_surface(
+                submenu_backdrop,
+                submenu_content.into(),
+                submenu_width,
+                submenu_height,
+            );
+            let submenu_x = if x + menu_width + submenu_width <= self.window_size.width - 8.0 {
+                x + menu_width - 6.0
+            } else {
+                (x - submenu_width + 6.0).max(8.0)
+            };
+            let submenu_y = (y + context_submenu_parent_offset(true, 2, 1, self.font_size()))
+                .clamp(
+                    8.0,
+                    (self.window_size.height - submenu_height - 8.0).max(8.0),
+                );
+            let submenu = mouse_area(submenu)
+                .on_enter(Message::ContextSendToSubmenuEnter)
+                .on_exit(Message::ContextSendToSubmenuExit);
             overlay_layers.push(
                 float(opaque(submenu))
                     .translate(move |_, _| Vector::new(submenu_x, submenu_y))
@@ -909,11 +1171,11 @@ impl BExplorerIced {
                         ],
                     )
                 };
-            let submenu_width = context_submenu_width(&submenu_labels);
+            let submenu_width = context_submenu_width(&submenu_labels, self.font_size());
             let submenu_height = if self.context_extract_submenu {
-                78.0
+                context_submenu_rows_height(2, self.font_size())
             } else {
-                114.0
+                context_submenu_rows_height(3, self.font_size())
             };
             let submenu_content = container(submenu_rows)
                 .width(submenu_width)
@@ -941,18 +1203,22 @@ impl BExplorerIced {
                 submenu_width,
                 submenu_height,
             );
-            let submenu_x = if x + 258.0 + submenu_width <= self.window_size.width - 8.0 {
-                x + 252.0
+            let submenu_x = if x + menu_width + submenu_width <= self.window_size.width - 8.0 {
+                x + menu_width - 6.0
             } else {
                 (x - submenu_width + 6.0).max(8.0)
             };
+            let extra_archive_rows =
+                usize::from(!menu_state.send_to_targets.is_empty()) + usize::from(is_search_result);
             let submenu_offset_y = if self.context_extract_submenu {
-                146.0
+                context_submenu_parent_offset(true, 3 + extra_archive_rows, 2, self.font_size())
             } else {
-                112.0
+                context_submenu_parent_offset(true, 2 + extra_archive_rows, 2, self.font_size())
             };
-            let submenu_y =
-                (y + submenu_offset_y).clamp(8.0, (self.window_size.height - 120.0).max(8.0));
+            let submenu_y = (y + submenu_offset_y).clamp(
+                8.0,
+                (self.window_size.height - submenu_height - 8.0).max(8.0),
+            );
             let submenu = mouse_area(submenu)
                 .on_enter(Message::ContextArchiveSubmenuEnter)
                 .on_exit(Message::ContextArchiveSubmenuExit);
@@ -967,8 +1233,8 @@ impl BExplorerIced {
                 self.localized("Documento de texto", "Text document")
                     .to_owned(),
             ];
-            let submenu_width = context_submenu_width(&labels);
-            let submenu_height = 78.0;
+            let submenu_width = context_submenu_width(&labels, self.font_size());
+            let submenu_height = context_submenu_rows_height(2, self.font_size());
             let submenu_content = container(
                 column![
                     context_menu_row(
@@ -1003,12 +1269,16 @@ impl BExplorerIced {
                         blur_radius: 18.0,
                     })
             });
-            let submenu_x = if x + 258.0 + submenu_width <= self.window_size.width - 8.0 {
-                x + 252.0
+            let submenu_x = if x + menu_width + submenu_width <= self.window_size.width - 8.0 {
+                x + menu_width - 6.0
             } else {
                 (x - submenu_width + 6.0).max(8.0)
             };
-            let submenu_y = (y + 98.0).clamp(8.0, (self.window_size.height - 86.0).max(8.0));
+            let submenu_y = (y + context_submenu_parent_offset(true, 1, 1, self.font_size()))
+                .clamp(
+                    8.0,
+                    (self.window_size.height - submenu_height - 8.0).max(8.0),
+                );
             let submenu_backdrop = (menu_state.submenu_backdrop_kind
                 == Some(ContextSubmenuKind::New))
             .then_some(menu_state.submenu_backdrop.as_ref())

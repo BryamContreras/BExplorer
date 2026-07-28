@@ -2,24 +2,26 @@ use super::*;
 use iced::widget::{column, row};
 
 const ABOUT_WIDTH: f32 = 390.0;
-const ABOUT_HEIGHT: f32 = 245.0;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const REPOSITORY_LABEL: &str = "github.com/BryamContreras/BExplorer";
 
 impl BExplorerIced {
     pub(in crate::iced_ui) fn about_modal(&self, palette: Palette) -> Element<'_, Message> {
+        let about_width = self.modal_text_surface_width(ABOUT_WIDTH);
+        let about_height = about_panel_height(self.font_size());
+        let app_icon_size = self.ui_metric(96.0);
         let header = row![
             text(self.localized("Acerca de BExplorer", "About BExplorer"))
                 .size(self.font_size() + 3.0)
                 .color(palette.text)
                 .width(Length::Fill),
-            icon_button("x", Message::CloseAbout, palette, false),
+            icon_button("x", Message::CloseAbout, palette, false, self.font_size(),),
         ]
         .align_y(Alignment::Center);
 
         let app_icon = iced_image::Image::new(app_icon_image_handle())
-            .width(96)
-            .height(96)
+            .width(app_icon_size)
+            .height(app_icon_size)
             .content_fit(ContentFit::Contain)
             .border_radius(border::radius(19.0));
 
@@ -54,7 +56,7 @@ impl BExplorerIced {
 
         let repository = Button::new(
             row![
-                inline_icon("github", palette.text, 24.0),
+                inline_icon("github", palette.text, self.ui_metric(24.0)),
                 column![
                     text(self.localized("Repositorio", "Repository"))
                         .size(self.font_size() - 1.0)
@@ -65,7 +67,7 @@ impl BExplorerIced {
                 ]
                 .spacing(2)
                 .width(Length::Fill),
-                inline_icon("open", palette.accent, 17.0),
+                inline_icon("open", palette.accent, self.ui_metric(17.0)),
             ]
             .spacing(10)
             .align_y(Alignment::Center),
@@ -76,13 +78,13 @@ impl BExplorerIced {
         .style(move |_, status| dialog_button_style(palette, false, status));
 
         let content = column![header, app_tile, repository,]
-            .spacing(10)
-            .padding(14)
-            .height(ABOUT_HEIGHT);
+            .spacing(self.ui_metric(10.0))
+            .padding(14.0 + self.ui_density())
+            .height(about_height);
 
         let surface = container(content)
-            .width(ABOUT_WIDTH)
-            .height(ABOUT_HEIGHT)
+            .width(about_width)
+            .height(about_height)
             .style(move |_| {
                 container::Style::default()
                     .background(palette.menu_bg)
@@ -96,8 +98,8 @@ impl BExplorerIced {
         let surface = self.frosted_popup_surface(
             self.popup_backdrop.as_ref(),
             surface.into(),
-            ABOUT_WIDTH,
-            ABOUT_HEIGHT,
+            about_width,
+            about_height,
         );
 
         container(surface)

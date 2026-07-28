@@ -58,7 +58,7 @@ field_contains_package() {
 # package installation.
 for OPTIONAL_PACKAGE in \
   wl-clipboard xclip xsel libfile-mimeinfo-perl \
-  kde-cli-tools kio-extras kio-fuse
+  kde-cli-tools kio-extras kio-fuse tumbler ffmpegthumbnailer ffmpeg
 do
   if field_contains_package "$DEPENDS" "$OPTIONAL_PACKAGE"; then
     printf 'Optional helper must not be in Depends: %s\n' \

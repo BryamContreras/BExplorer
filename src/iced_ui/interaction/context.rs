@@ -34,6 +34,71 @@ impl BExplorerIced {
         Task::batch(tasks)
     }
 
+    pub(in crate::iced_ui) fn queue_send_to_target_icons(
+        &mut self,
+        targets: &[ContextSendToTarget],
+    ) -> Task<Message> {
+        let mut tasks = Vec::new();
+        for target in targets {
+            match target {
+                ContextSendToTarget::Storage { destination, .. } => {
+                    tasks.push(self.queue_sidebar_path_icon(destination));
+                }
+                ContextSendToTarget::Native(target) => {
+                    let Some((cache_key, path, is_directory)) = native_send_to_icon_request(
+                        target.icon(),
+                        thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+                    ) else {
+                        continue;
+                    };
+                    if self.small_native_icon_cache.contains_key(&cache_key) {
+                        continue;
+                    }
+                    self.small_native_icon_cache
+                        .insert(cache_key.clone(), IcedImageState::Loading);
+                    tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
+                        cache_key,
+                        path,
+                        is_directory,
+                        size: thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+                        variant: IcedImageVariant::Small,
+                    }));
+                }
+            }
+        }
+        Task::batch(tasks)
+    }
+
+    pub(in crate::iced_ui) fn queue_current_send_to_target_icons(&mut self) -> Task<Message> {
+        let targets = self
+            .context_menu
+            .as_ref()
+            .map(|menu| menu.send_to_targets.clone())
+            .unwrap_or_default();
+        self.queue_send_to_target_icons(&targets)
+    }
+
+    pub(in crate::iced_ui) fn context_send_to_icon_handle(
+        &self,
+        target: &ContextSendToTarget,
+    ) -> Option<iced_image::Handle> {
+        let cache_key = match target {
+            ContextSendToTarget::Storage { destination, .. } => sidebar_native_icon_cache_key(
+                destination,
+                &self.sidebar_storage_entries,
+                thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+            ),
+            ContextSendToTarget::Native(target) => {
+                native_send_to_icon_request(target.icon(), thumbnail_data::SMALL_ENTRY_IMAGE_SIZE)?
+                    .0
+            }
+        };
+        match self.small_native_icon_cache.get(&cache_key) {
+            Some(IcedImageState::Ready(handle)) => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
     pub(in crate::iced_ui) fn request_context_menu(
         &mut self,
         pane: PaneId,
@@ -50,6 +115,9 @@ impl BExplorerIced {
         self.context_open_with_submenu = false;
         self.context_open_with_parent_hovered = false;
         self.context_open_with_submenu_hovered = false;
+        self.context_send_to_submenu = false;
+        self.context_send_to_parent_hovered = false;
+        self.context_send_to_submenu_hovered = false;
         self.context_extract_submenu = false;
         self.context_new_submenu = false;
         self.context_archive_parent_hovered = false;
@@ -66,6 +134,13 @@ impl BExplorerIced {
         };
         self.context_menu = None;
         self.context_menu_request_id = self.context_menu_request_id.saturating_add(1);
+        let send_paths = self
+            .context_entry(pane, target)
+            .filter(|entry| entry.kind != EntryKind::Drive)
+            .map(|_| self.context_paths(pane, target))
+            .unwrap_or_default();
+        let send_to_targets = self.context_storage_send_to_targets(&send_paths);
+        let send_to_icon_tasks = self.queue_send_to_target_icons(&send_to_targets);
         let menu = ContextMenuState {
             request_id: self.context_menu_request_id,
             pane,
@@ -78,14 +153,15 @@ impl BExplorerIced {
             submenu_backdrop_kind: None,
             paste_available: false,
             open_with_applications: Vec::new(),
+            send_to_targets,
         };
         let (x, y) = self.context_menu_window_position(&menu);
         let menu = ContextMenuState {
             backdrop_origin: Point::new(x, y),
             ..menu
         };
-        if matches!(target, ContextTarget::SidebarDrive(_)) {
-            return self.capture_context_menu_backdrop(menu);
+        if matches!(target, ContextTarget::SidebarDrive(_)) || self.is_trash_pane(pane) {
+            return Task::batch([self.capture_context_menu_backdrop(menu), send_to_icon_tasks]);
         }
         let local_paste_available = self
             .file_clipboard
@@ -95,28 +171,67 @@ impl BExplorerIced {
             .context_entry(pane, target)
             .filter(|entry| entry.kind != EntryKind::Drive)
             .map(|entry| entry.path);
-        Task::perform(
+        let native_send_paths = send_paths;
+        let spanish = self.is_spanish();
+        let menu_data = Task::perform(
             async move {
                 run_blocking_file_operation(move || {
                     let native_paste_available =
                         shell::read_files().is_ok_and(|clipboard| !clipboard.paths.is_empty());
                     let applications = open_with_path
                         .as_deref()
-                        .map(shell::open_with_applications)
-                        .transpose()?
+                        .and_then(|path| shell::open_with_applications(path).ok())
                         .unwrap_or_default();
+                    let native_send_to_targets =
+                        shell::native_send_to_targets(&native_send_paths, spanish);
                     Ok::<_, BExplorerError>((
                         local_paste_available || native_paste_available,
                         applications,
+                        native_send_to_targets,
                     ))
                 })
                 .await
-                .unwrap_or_else(|_| (local_paste_available, Vec::new()))
+                .unwrap_or_else(|_| (local_paste_available, Vec::new(), Vec::new()))
             },
-            move |(available, applications)| {
-                Message::ContextMenuDataResolved(menu.clone(), available, applications)
+            move |(available, applications, send_to_targets)| {
+                Message::ContextMenuDataResolved(
+                    menu.clone(),
+                    available,
+                    applications,
+                    send_to_targets,
+                )
             },
-        )
+        );
+        Task::batch([menu_data, send_to_icon_tasks])
+    }
+
+    fn context_storage_send_to_targets(&self, sources: &[PathBuf]) -> Vec<ContextSendToTarget> {
+        if sources.is_empty() {
+            return Vec::new();
+        }
+        let has_virtual_portable_source = sources
+            .iter()
+            .any(|source| explorer::is_portable_path(source));
+        self.sidebar_storage_entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.drive_kind,
+                    Some(DriveKind::External | DriveKind::Usb | DriveKind::Portable)
+                )
+            })
+            // The transfer backend deliberately rejects direct MTP-to-MTP
+            // copies. Mounted GVfs devices are ordinary paths and do not hit
+            // this condition.
+            .filter(|entry| {
+                !(has_virtual_portable_source && entry.drive_kind == Some(DriveKind::Portable))
+            })
+            .map(|entry| ContextSendToTarget::Storage {
+                label: entry.name.clone(),
+                destination: entry.path.clone(),
+                icon: send_to_storage_icon(entry.drive_kind),
+            })
+            .collect()
     }
 
     pub(in crate::iced_ui) fn capture_context_menu_backdrop(
@@ -202,24 +317,43 @@ impl BExplorerIced {
                 );
                 labels
             }
+            ContextSubmenuKind::SendTo => menu
+                .send_to_targets
+                .iter()
+                .map(|target| target.label().to_owned())
+                .collect(),
         };
-        let width = view::context_submenu_width(&labels);
+        let font_size = self.font_size();
+        let width = view::context_submenu_width(&labels, font_size);
         let height = match kind {
-            ContextSubmenuKind::Archive => 114.0,
-            ContextSubmenuKind::Extract | ContextSubmenuKind::New => 78.0,
-            ContextSubmenuKind::OpenWith => (labels.len() as f32 * 36.0 + 46.0).min(320.0),
+            ContextSubmenuKind::Archive => context_submenu_rows_height(3, font_size),
+            ContextSubmenuKind::Extract | ContextSubmenuKind::New => {
+                context_submenu_rows_height(2, font_size)
+            }
+            ContextSubmenuKind::OpenWith | ContextSubmenuKind::SendTo => {
+                context_submenu_rows_height(labels.len(), font_size)
+                    .min(scaled_ui_metric(320.0, font_size))
+            }
         };
         let (x, y) = self.context_menu_window_position(menu);
-        let submenu_x = if x + 258.0 + width <= self.window_size.width - 8.0 {
-            x + 252.0
+        let menu_width = context_menu_width(font_size);
+        let submenu_x = if x + menu_width + width <= self.window_size.width - 8.0 {
+            x + menu_width - 6.0
         } else {
             (x - width + 6.0).max(8.0)
         };
+        let extra_archive_rows = usize::from(!menu.send_to_targets.is_empty())
+            + usize::from(self.pane(menu.pane).folder_entries.is_some());
         let offset_y = match kind {
-            ContextSubmenuKind::Archive => 112.0,
-            ContextSubmenuKind::Extract => 146.0,
-            ContextSubmenuKind::New => 98.0,
-            ContextSubmenuKind::OpenWith => 42.0,
+            ContextSubmenuKind::Archive => {
+                context_submenu_parent_offset(true, 2 + extra_archive_rows, 2, font_size)
+            }
+            ContextSubmenuKind::Extract => {
+                context_submenu_parent_offset(true, 3 + extra_archive_rows, 2, font_size)
+            }
+            ContextSubmenuKind::New => context_submenu_parent_offset(true, 1, 1, font_size),
+            ContextSubmenuKind::OpenWith => context_submenu_parent_offset(true, 1, 1, font_size),
+            ContextSubmenuKind::SendTo => context_submenu_parent_offset(true, 2, 1, font_size),
         };
         let submenu_y =
             (y + offset_y).clamp(8.0, (self.window_size.height - height - 8.0).max(8.0));
@@ -272,6 +406,12 @@ impl BExplorerIced {
         } else {
             self.begin_popup_animation(false);
             self.popup_backdrop = None;
+        }
+        // KWin already supplies the live blurred surface. Capturing a second,
+        // frozen backdrop for Settings would hide slider updates and removing
+        // it on the first movement would cause a large artificial jump.
+        if matches!(&target, PopupBackdropTarget::Settings) && self.requests_linux_surface_blur() {
+            return self.show_popup_with_backdrop(target);
         }
         let Some(id) = self.main_window_id else {
             return self.show_popup_with_backdrop(target);
@@ -382,6 +522,9 @@ impl BExplorerIced {
         self.context_open_with_submenu = false;
         self.context_open_with_parent_hovered = false;
         self.context_open_with_submenu_hovered = false;
+        self.context_send_to_submenu = false;
+        self.context_send_to_parent_hovered = false;
+        self.context_send_to_submenu_hovered = false;
         self.context_extract_submenu = false;
         self.context_new_submenu = false;
         self.context_archive_parent_hovered = false;
@@ -484,13 +627,13 @@ impl BExplorerIced {
         &self,
         menu: &ContextMenuState,
     ) -> (f32, f32) {
-        const MENU_WIDTH: f32 = 258.0;
+        let menu_width = context_menu_width(self.font_size());
         let menu_height = self.context_menu_height(menu);
 
         if matches!(menu.target, ContextTarget::SidebarDrive(_)) {
             return (
                 (menu.position.x + 2.0)
-                    .clamp(8.0, (self.window_size.width - MENU_WIDTH - 8.0).max(8.0)),
+                    .clamp(8.0, (self.window_size.width - menu_width - 8.0).max(8.0)),
                 (menu.position.y + 2.0)
                     .clamp(8.0, (self.window_size.height - menu_height - 8.0).max(8.0)),
             );
@@ -503,89 +646,108 @@ impl BExplorerIced {
         // action-bar offset pushed a context menu down whenever that bar was
         // disabled.
         let table_y = TITLE_HEIGHT
-            + 42.0
+            + self.toolbar_height()
             + if self.split.is_some() { 1.0 } else { 0.0 }
             + if self.config.show_action_bar {
-                46.0
+                self.action_bar_height()
             } else {
                 0.0
             }
             + if self.config.show_bookmark_bar || !self.sidebar_visible {
-                46.0
+                self.bookmark_bar_height()
             } else {
                 0.0
             };
         let x = (pane_x + point.x + 2.0)
-            .clamp(8.0, (self.window_size.width - MENU_WIDTH - 8.0).max(8.0));
+            .clamp(8.0, (self.window_size.width - menu_width - 8.0).max(8.0));
         let y = (table_y + point.y + 2.0)
             .clamp(8.0, (self.window_size.height - menu_height - 8.0).max(8.0));
         (x, y)
     }
 
     pub(in crate::iced_ui) fn context_menu_height(&self, menu: &ContextMenuState) -> f32 {
+        let row_height = context_menu_row_height(self.font_size());
+        let quick_height = context_quick_button_height(self.font_size()) + 12.0;
+        let menu_height = |quick: bool, rows: usize, separators: usize| {
+            let children = usize::from(quick) + rows + separators;
+            8.0 + if quick { quick_height } else { 0.0 }
+                + rows as f32 * row_height
+                + separators as f32
+                + children.saturating_sub(1) as f32 * 2.0
+        };
+        if self.is_trash_pane(menu.pane) && !matches!(menu.target, ContextTarget::SidebarDrive(_)) {
+            return menu_height(false, 2, 0);
+        }
         match menu.target {
-            ContextTarget::Background => 218.0,
+            ContextTarget::Background => menu_height(true, 4, 2),
             ContextTarget::SidebarDrive(_) => {
-                let formatable = self
-                    .context_entry(menu.pane, menu.target)
-                    .is_some_and(|entry| {
-                        entry.kind == EntryKind::Drive
-                            && entry.drive_kind.is_some_and(DriveKind::is_formatable)
-                    });
-                if formatable { 84.0 } else { 48.0 }
+                let context_entry = self.context_entry(menu.pane, menu.target);
+                let formatable = context_entry.as_ref().is_some_and(|entry| {
+                    entry.kind == EntryKind::Drive
+                        && entry.drive_kind.is_some_and(DriveKind::is_formatable)
+                });
+                let ejectable = context_entry
+                    .as_ref()
+                    .and_then(|entry| entry.drive_kind)
+                    .is_some_and(DriveKind::is_ejectable);
+                let duplicate_cleanup_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry,
+                );
+                menu_height(
+                    false,
+                    usize::from(ejectable)
+                        + usize::from(formatable)
+                        + usize::from(duplicate_cleanup_available),
+                    0,
+                )
             }
             ContextTarget::Entry(_) => {
-                let drive_entry = self
-                    .context_entry(menu.pane, menu.target)
+                let context_entry = self.context_entry(menu.pane, menu.target);
+                let duplicate_cleanup_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry,
+                );
+                let drive_entry = context_entry
+                    .as_ref()
                     .is_some_and(|entry| entry.kind == EntryKind::Drive);
                 if drive_entry {
-                    let action_rows = self
-                        .context_entry(menu.pane, menu.target)
+                    let action_rows = context_entry
+                        .as_ref()
                         .map(|entry| {
                             usize::from(entry.drive_kind.is_some_and(DriveKind::is_ejectable))
                                 + usize::from(
-                                    entry.kind == EntryKind::Drive
-                                        && entry.drive_kind.is_some_and(DriveKind::is_formatable),
+                                    entry.drive_kind.is_some_and(DriveKind::is_formatable),
                                 )
+                                + usize::from(duplicate_cleanup_available)
                         })
                         .unwrap_or(0);
-                    return 128.0 + action_rows as f32 * 36.0;
+                    return menu_height(true, 2 + action_rows, 1);
                 }
-                let has_extract_action =
-                    self.context_entry(menu.pane, menu.target)
-                        .is_some_and(|entry| {
-                            crate::fs::archive_listing::has_extractable_archive_extension(
-                                &entry.path,
-                            )
-                        });
-                let terminal_available =
-                    self.context_entry(menu.pane, menu.target)
-                        .is_some_and(|entry| {
-                            entry.kind.is_container() && !explorer::is_virtual_path(&entry.path)
-                        });
-                let base_height = if has_extract_action { 404.0 } else { 368.0 };
-                let search_result_rows = usize::from(self.pane(menu.pane).folder_entries.is_some());
-                let advanced_rows = self
-                    .context_entry(menu.pane, menu.target)
+                let has_extract_action = context_entry.as_ref().is_some_and(|entry| {
+                    crate::fs::archive_listing::has_extractable_archive_extension(&entry.path)
+                });
+                let terminal_available = context_entry.as_ref().is_some_and(|entry| {
+                    entry.kind.is_container() && !explorer::is_virtual_path(&entry.path)
+                });
+                let advanced_rows = context_entry
+                    .as_ref()
                     .map(|entry| {
-                        usize::from(is_mountable_disk_image_entry(&entry))
+                        usize::from(is_mountable_disk_image_entry(entry))
                             + usize::from(entry.drive_kind.is_some_and(DriveKind::is_ejectable))
-                            + usize::from(
-                                entry.kind == EntryKind::Drive
-                                    && entry.drive_kind.is_some_and(DriveKind::is_formatable),
-                            )
+                            + usize::from(entry.drive_kind.is_some_and(DriveKind::is_formatable))
                             + usize::from(
                                 cfg!(target_os = "windows")
                                     && !explorer::is_virtual_path(&entry.path),
                             )
                     })
                     .unwrap_or(0);
-                let base_height = base_height + (advanced_rows + search_result_rows) as f32 * 36.0;
-                if terminal_available {
-                    base_height
-                } else {
-                    base_height - 36.0
-                }
+                let rows = 7
+                    + usize::from(self.pane(menu.pane).folder_entries.is_some())
+                    + usize::from(!menu.send_to_targets.is_empty())
+                    + usize::from(has_extract_action)
+                    + usize::from(terminal_available)
+                    + usize::from(duplicate_cleanup_available)
+                    + advanced_rows;
+                menu_height(true, rows, 4)
             }
         }
     }
@@ -637,6 +799,8 @@ impl BExplorerIced {
                     | ContextCommand::CompressDefault(_)
                     | ContextCommand::Copy
                     | ContextCommand::Cut
+                    | ContextCommand::SendToMenu
+                    | ContextCommand::SendToTarget(_)
                     | ContextCommand::Delete
                     | ContextCommand::DeletePermanent
             )
@@ -647,6 +811,7 @@ impl BExplorerIced {
             self.keyboard_menu_selection = None;
             self.context_archive_submenu = true;
             self.context_open_with_submenu = false;
+            self.context_send_to_submenu = false;
             self.context_extract_submenu = false;
             self.context_new_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::Archive);
@@ -655,6 +820,7 @@ impl BExplorerIced {
             self.keyboard_menu_selection = None;
             self.context_archive_submenu = true;
             self.context_open_with_submenu = false;
+            self.context_send_to_submenu = false;
             self.context_extract_submenu = true;
             self.context_new_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::Extract);
@@ -662,6 +828,7 @@ impl BExplorerIced {
         if command == ContextCommand::OpenWithMenu {
             self.keyboard_menu_selection = None;
             self.context_open_with_submenu = true;
+            self.context_send_to_submenu = false;
             self.context_archive_submenu = false;
             self.context_extract_submenu = false;
             self.context_new_submenu = false;
@@ -670,16 +837,38 @@ impl BExplorerIced {
                 self.queue_open_with_application_icons(menu.pane, menu.target),
             ]);
         }
+        if command == ContextCommand::SendToMenu {
+            self.keyboard_menu_selection = None;
+            self.context_send_to_submenu = true;
+            self.context_open_with_submenu = false;
+            self.context_archive_submenu = false;
+            self.context_extract_submenu = false;
+            self.context_new_submenu = false;
+            return Task::batch([
+                self.request_context_submenu_backdrop(ContextSubmenuKind::SendTo),
+                self.queue_current_send_to_target_icons(),
+            ]);
+        }
         if command == ContextCommand::NewMenu {
             self.keyboard_menu_selection = None;
             self.context_new_submenu = true;
             self.context_open_with_submenu = false;
+            self.context_send_to_submenu = false;
             self.context_archive_submenu = false;
             self.context_extract_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::New);
         }
         self.dismiss_context_menu();
         match command {
+            ContextCommand::RestoreTrash => {
+                let paths = self.context_paths(menu.pane, menu.target);
+                self.restore_trash_paths(menu.pane, paths)
+            }
+            ContextCommand::DeleteTrash => {
+                let paths = self.context_paths(menu.pane, menu.target);
+                self.request_trash_purge(menu.pane, paths, PermanentDeleteTarget::TrashItems)
+            }
+            ContextCommand::EmptyTrash => self.request_empty_trash(menu.pane),
             ContextCommand::Paste => self.context_paste(menu.pane, menu.target),
             ContextCommand::Copy => self.context_copy(menu.pane, menu.target, false),
             ContextCommand::Cut => self.context_copy(menu.pane, menu.target, true),
@@ -692,6 +881,56 @@ impl BExplorerIced {
             ContextCommand::Open => self.context_open(menu.pane, menu.target),
             ContextCommand::OpenWith => self.context_open_with(menu.pane, menu.target),
             ContextCommand::OpenWithMenu => Task::none(),
+            ContextCommand::SendToMenu => Task::none(),
+            ContextCommand::SendToTarget(index) => {
+                let Some(target) = menu.send_to_targets.get(index).cloned() else {
+                    return self.report_error(
+                        menu.pane,
+                        self.localized(
+                            "El destino seleccionado ya no está disponible",
+                            "The selected destination is no longer available",
+                        ),
+                    );
+                };
+                let paths = self.context_paths(menu.pane, menu.target);
+                match target {
+                    ContextSendToTarget::Storage {
+                        label, destination, ..
+                    } => {
+                        if paths
+                            .iter()
+                            .any(|path| crate::fs::archive_listing::is_inside_archive(path))
+                        {
+                            return self.queue_archive_entry_extraction(
+                                menu.pane,
+                                menu.pane,
+                                paths,
+                                destination,
+                            );
+                        }
+                        self.pane_mut(menu.pane).status =
+                            format!("{} {label}", self.localized("Copiando a", "Copying to"));
+                        self.request_transfer(
+                            menu.pane,
+                            paths,
+                            destination,
+                            TransferKind::Copy,
+                            false,
+                        )
+                    }
+                    ContextSendToTarget::Native(target) => {
+                        let label = target.label().to_owned();
+                        self.pane_mut(menu.pane).status =
+                            format!("{} {label}…", self.localized("Abriendo", "Opening"));
+                        Task::perform(
+                            run_blocking_file_operation(move || {
+                                shell::invoke_native_send_to(&target, &paths)
+                            }),
+                            move |result| Message::SendToFinished(menu.pane, label.clone(), result),
+                        )
+                    }
+                }
+            }
             ContextCommand::OpenFileLocation => {
                 self.context_open_file_location(menu.pane, menu.target)
             }
@@ -746,6 +985,9 @@ impl BExplorerIced {
                 let paths = self.context_paths(menu.pane, menu.target);
                 self.start_defender_scan(menu.pane, paths)
             }
+            ContextCommand::DuplicateCleanup => {
+                self.start_duplicate_cleanup(menu.pane, menu.target)
+            }
         }
     }
 
@@ -781,11 +1023,76 @@ impl BExplorerIced {
         pane: PaneId,
         target: ContextTarget,
     ) -> Option<PathBuf> {
+        if self.is_trash_pane(pane) {
+            return None;
+        }
         if let Some(entry) = self.context_entry(pane, target)
             && entry.kind.is_container()
+            && !explorer::is_trash_item_path(&entry.path)
         {
             return Some(entry.path);
         }
         self.tab_for_pane(pane).path.clone()
+    }
+}
+
+fn send_to_storage_icon(drive_kind: Option<DriveKind>) -> &'static str {
+    match drive_kind {
+        Some(DriveKind::Portable) => "portable",
+        Some(DriveKind::Usb) => "usb",
+        Some(DriveKind::External) => "external-drive",
+        _ => "storage",
+    }
+}
+
+fn native_send_to_icon_request(icon: &str, size: u32) -> Option<(PathBuf, PathBuf, bool)> {
+    #[cfg(target_os = "linux")]
+    {
+        let path = match icon {
+            "portable" => "bexplorer-portable-device",
+            "bluetooth" => "bexplorer-bluetooth",
+            "mail" => "bexplorer-mail",
+            _ => return None,
+        };
+        Some((
+            PathBuf::from(format!("__bexplorer_send_to_{icon}_icon_size_{size}")),
+            PathBuf::from(path),
+            false,
+        ))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (icon, size);
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn send_to_uses_an_icon_matching_each_removable_destination() {
+        assert_eq!(send_to_storage_icon(Some(DriveKind::Portable)), "portable");
+        assert_eq!(send_to_storage_icon(Some(DriveKind::Usb)), "usb");
+        assert_eq!(
+            send_to_storage_icon(Some(DriveKind::External)),
+            "external-drive"
+        );
+        assert_eq!(send_to_storage_icon(Some(DriveKind::Local)), "storage");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn send_to_native_providers_request_desktop_theme_icons() {
+        let (_, phone, _) =
+            native_send_to_icon_request("portable", 48).expect("portable native icon");
+        let (_, bluetooth, _) =
+            native_send_to_icon_request("bluetooth", 48).expect("Bluetooth native icon");
+        let (_, mail, _) = native_send_to_icon_request("mail", 48).expect("mail native icon");
+
+        assert_eq!(phone, Path::new("bexplorer-portable-device"));
+        assert_eq!(bluetooth, Path::new("bexplorer-bluetooth"));
+        assert_eq!(mail, Path::new("bexplorer-mail"));
     }
 }

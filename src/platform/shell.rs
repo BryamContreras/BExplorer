@@ -17,6 +17,9 @@ mod disk;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 mod elevation;
 mod format;
+mod send_to;
+
+pub use send_to::{NativeSendToTarget, invoke_native_send_to, native_send_to_targets};
 
 #[cfg(target_os = "windows")]
 pub use defender::WindowsDefenderScanResult;
