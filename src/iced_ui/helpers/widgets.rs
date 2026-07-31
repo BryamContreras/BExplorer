@@ -98,27 +98,6 @@ pub(in crate::iced_ui) fn table_header(
     }
 }
 
-pub(in crate::iced_ui) fn render_progress_footer(
-    visible: usize,
-    total: usize,
-    palette: Palette,
-    font_size: f32,
-) -> Element<'static, Message> {
-    let height = scaled_ui_metric(36.0, font_size).max(ui_text_line_height(font_size) + 10.0);
-    container(
-        text(format!(
-            "Showing {visible} of {total}. Scroll to continue loading."
-        ))
-        .size(font_size)
-        .color(palette.muted_text),
-    )
-    .width(Length::Fill)
-    .height(height)
-    .center_x(Length::Fill)
-    .center_y(height)
-    .into()
-}
-
 /// Builds a filename label that keeps the search token visible with the same
 /// yellow emphasis used by the Windows file search results. Search matching
 /// itself happens in `fs::search`; this only splits the already displayed name
@@ -154,6 +133,34 @@ pub(in crate::iced_ui) fn highlighted_search_text(
     }
 
     iced::widget::text::Rich::with_spans(spans)
+}
+
+/// Centers every explicit filename line as its own rich-text block so a short
+/// second line keeps its own natural width below the first one.
+pub(in crate::iced_ui) fn centered_highlighted_search_text(
+    query: &str,
+    value: &str,
+    color: Color,
+    font_size: f32,
+) -> Element<'static, Message> {
+    let mut lines = iced::widget::Column::new()
+        .spacing(0)
+        .width(Length::Fill)
+        .align_x(Alignment::Center);
+
+    for line in value.split('\n') {
+        lines = lines.push(
+            container(
+                highlighted_search_text(query, line, color)
+                    .size(font_size)
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .center_x(Length::Fill),
+        );
+    }
+
+    lines.into()
 }
 
 fn search_highlight_token(query: &str) -> String {

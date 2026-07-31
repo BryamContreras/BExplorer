@@ -1,6 +1,6 @@
 # BExplorer
 
-BExplorer 1.0.4 es un explorador de archivos estable y liviano para Windows y
+BExplorer 1.0.5 es un explorador de archivos estable y liviano para Windows y
 Linux, escrito en Rust. Su objetivo es mejorar la gestion diaria de archivos
 sin intentar reemplazar todo el shell del sistema.
 
@@ -10,7 +10,7 @@ integraciones nativas propias; macOS sigue siendo un objetivo experimental.
 
 ## Estado
 
-BExplorer 1.0.4 es la version estable actual para Windows y Linux. La interfaz,
+BExplorer 1.0.5 es la version estable actual para Windows y Linux. La interfaz,
 el motor de operaciones, los formatos de configuracion y sesion, los flujos de
 comprimidos y las integraciones de plataforma forman la base compatible de la
 serie 1.x.
@@ -85,9 +85,11 @@ La compatibilidad continua se valida especialmente en:
   vaciado.
 - Limpieza recursiva de duplicados en carpetas y unidades extraibles, con
   resultados agrupados y seleccionables.
+- Analisis de almacenamiento para carpetas y unidades montadas, con totales por
+  categoria en vivo y grafico de dona por colores.
 - Las transferencias, eliminaciones, compresiones, extracciones, busquedas de
-  duplicados y analisis de seguridad continúan en ventanas propias aunque se
-  cierre el explorador principal.
+  duplicados, analisis de almacenamiento y analisis de seguridad continúan en
+  ventanas propias aunque se cierre el explorador principal.
 - Integracion Freedesktop para iniciar `bexplorer %f`: abre la carpeta recibida
   o, si otra aplicacion entrega un archivo, navega a su carpeta contenedora.
 - Vistas de detalles, lista, iconos, iconos grandes, iconos extra grandes y
@@ -183,7 +185,7 @@ compatible concreta.
 | Difuminado | Efectos nativos | KWin o Blur My Shell opcional | Experimental |
 | Microsoft Defender | Compatible | No aplica | No aplica |
 
-Compatibilidad del paquete Linux 1.0.4 generado en la base actual:
+Compatibilidad del paquete Linux 1.0.5 generado en la base actual:
 
 | Distribucion o entorno | `.deb` actual | Nivel de validacion |
 | --- | --- | --- |

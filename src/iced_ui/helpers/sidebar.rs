@@ -6,6 +6,18 @@ pub(in crate::iced_ui) fn sidebar_section_height(font_size: f32) -> f32 {
         .max(ui_text_line_height((font_size + 0.8).max(12.4)) + 10.0)
 }
 
+pub(in crate::iced_ui) fn sidebar_section_enabled(
+    config: &AppConfig,
+    section: SidebarSection,
+) -> bool {
+    match section {
+        SidebarSection::Favorites => config.show_sidebar_bookmarks,
+        SidebarSection::Network => config.show_sidebar_network,
+        SidebarSection::Recents => config.show_sidebar_recents,
+        SidebarSection::Places | SidebarSection::Storage | SidebarSection::Portable => true,
+    }
+}
+
 pub(in crate::iced_ui) fn sidebar_section_header(
     section: SidebarSection,
     spanish: bool,

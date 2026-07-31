@@ -10,6 +10,7 @@ pub mod portable;
 #[cfg(target_os = "linux")]
 pub mod properties;
 pub mod search;
+pub mod storage_analysis;
 pub mod transfer_queue;
 pub mod trash;
 pub mod watcher;

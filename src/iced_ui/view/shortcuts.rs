@@ -3,7 +3,7 @@ use iced::widget::{column, row};
 
 impl BExplorerIced {
     pub(super) fn shortcuts_modal(&self, palette: Palette) -> Element<'_, Message> {
-        const ACTIONS: [ShortcutAction; 15] = [
+        const ACTIONS: [ShortcutAction; 17] = [
             ShortcutAction::Copy,
             ShortcutAction::Cut,
             ShortcutAction::Paste,
@@ -19,6 +19,8 @@ impl BExplorerIced {
             ShortcutAction::GoForward,
             ShortcutAction::EditAddress,
             ShortcutAction::Open,
+            ShortcutAction::SwitchPaneFocus,
+            ShortcutAction::FocusSearch,
         ];
 
         let font_size = self.font_size();
@@ -223,9 +225,11 @@ impl BExplorerIced {
             ShortcutAction::GoForward => self.localized("Adelante", "Forward"),
             ShortcutAction::EditAddress => self.localized("Editar dirección", "Edit address"),
             ShortcutAction::Open => self.localized("Abrir", "Open"),
-            ShortcutAction::CommandPalette | ShortcutAction::MoveUp | ShortcutAction::MoveDown => {
-                ""
+            ShortcutAction::SwitchPaneFocus => {
+                self.localized("Cambiar panel activo", "Switch active pane")
             }
+            ShortcutAction::FocusSearch => self.localized("Búsqueda", "Search"),
+            ShortcutAction::CommandPalette => "",
         }
     }
 

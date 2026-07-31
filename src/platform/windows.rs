@@ -37,8 +37,9 @@ pub use send_to::{WindowsSendToTarget, send_to_targets};
 pub use storage_watch::{install_storage_change_notifications, storage_change_receiver};
 #[allow(unused_imports)]
 pub use window::{
-    MainWindowAppearanceEvent, apply_main_window_region, apply_small_window_corners,
-    install_main_window_hooks, main_window_appearance_generation, main_window_appearance_receiver,
-    main_window_appearance_revision, main_window_backdrop_update_is_current,
-    main_window_region_update_is_current, normalize_long_path, take_main_window_appearance_event,
+    MainWindowAppearanceEvent, abandon_main_window_region_update, apply_main_window_region,
+    apply_small_window_corners, install_main_window_hooks, main_window_appearance_generation,
+    main_window_appearance_is_settled, main_window_appearance_receiver,
+    main_window_appearance_revision, main_window_region_update_is_current, normalize_long_path,
+    take_main_window_appearance_event,
 };

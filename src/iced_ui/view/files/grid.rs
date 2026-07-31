@@ -11,94 +11,158 @@ impl BExplorerIced {
         let layout = self.visual_layout_for_pane(pane, mode);
         let metrics = layout.metrics;
 
-        let entries = self.filtered_entries(pane);
-        let total = entries.len();
-        let render_limit = self.pane(pane).render_limit.min(total);
         let group_mode = self.effective_group_mode(pane);
-        // Group labels belong to the file surface itself, not the icon grid.
-        // Keep the grid inset while allowing every label to meet the top and
-        // horizontal edges of its group.
-        let mut grid = column![].spacing(metrics.spacing);
+        let group_starts = if group_mode == GroupMode::None {
+            Vec::new()
+        } else {
+            self.filtered_entry_group_starts(pane)
+        };
+        let entries = self.filtered_entries_ref(pane);
+        let total = entries.len();
+        let state = self.pane(pane);
+        let row_extent = metrics.cell_height + metrics.spacing;
+        let mut grid = column![];
         if group_mode == GroupMode::None {
-            grid = grid.padding(metrics.grid_padding);
-        }
-        let mut row_items = row![].spacing(metrics.spacing).align_y(Alignment::Start);
-        let mut col = 0;
-        let mut current_group: Option<String> = None;
-
-        for index in entries.into_iter().take(render_limit) {
-            let Some(entry) = self.pane(pane).entries.get(index) else {
-                continue;
-            };
-            if group_mode != GroupMode::None {
-                let group = self.localized_entry_group_label(entry, group_mode);
-                if current_group.as_ref() != Some(&group) {
-                    if col > 0 {
-                        grid = if group_mode == GroupMode::None {
-                            grid.push(row_items)
-                        } else {
-                            grid.push(container(row_items).padding([0.0, metrics.grid_padding]))
-                        };
-                        row_items = row![].spacing(metrics.spacing).align_y(Alignment::Start);
-                        col = 0;
-                    }
-                    current_group = Some(group.clone());
-                    grid = grid.push(file_group_header(
-                        group,
-                        palette,
-                        self.font_size(),
-                        self.detail_group_height(),
-                    ));
+            let row_count = total.div_ceil(layout.columns);
+            let range = virtual_table_range(
+                row_count,
+                row_extent,
+                (state.scroll_offset_y - metrics.grid_padding).max(0.0),
+                state.scroll_viewport_height,
+                state.scroll_velocity_y,
+            );
+            let before = metrics.grid_padding + range.before;
+            if before > 0.0 {
+                grid = grid.push(Space::new().height(Length::Fixed(before)));
+            }
+            for row_index in range.start..range.end {
+                let start = row_index * layout.columns;
+                let end = (start + layout.columns).min(total);
+                grid = grid.push(self.visual_file_grid_row(
+                    pane,
+                    &entries[start..end],
+                    palette,
+                    metrics,
+                    row_extent,
+                ));
+            }
+            let after = range.after + metrics.grid_padding;
+            if after > 0.0 {
+                grid = grid.push(Space::new().height(Length::Fixed(after)));
+            }
+        } else {
+            let group_extent = self.detail_group_height() + metrics.spacing;
+            let (window_start, window_end) = virtual_table_pixel_window(
+                state.scroll_offset_y,
+                state.scroll_viewport_height,
+                state.scroll_velocity_y,
+                row_extent,
+            );
+            let mut y = 0.0_f32;
+            let mut rendered_start = None;
+            let mut rendered_end = 0.0_f32;
+            for (group_index, &group_start) in group_starts.iter().enumerate() {
+                let group_end = group_starts.get(group_index + 1).copied().unwrap_or(total);
+                let group_rows = (group_end - group_start).div_ceil(layout.columns);
+                let block_height = group_extent + group_rows as f32 * row_extent;
+                if y + block_height < window_start {
+                    y += block_height;
+                    continue;
                 }
+                if y > window_end {
+                    break;
+                }
+
+                let header_start = y;
+                let header_end = header_start + group_extent;
+                if header_end >= window_start && header_start <= window_end {
+                    if rendered_start.is_none() {
+                        rendered_start = Some(header_start);
+                        if header_start > 0.0 {
+                            grid = grid.push(Space::new().height(Length::Fixed(header_start)));
+                        }
+                    }
+                    let entry_index = entries[group_start];
+                    if let Some(entry) = self.pane(pane).entries.get(entry_index) {
+                        grid = grid.push(
+                            container(file_group_header(
+                                self.localized_entry_group_label(entry, group_mode),
+                                palette,
+                                self.font_size(),
+                                self.detail_group_height(),
+                            ))
+                            .height(Length::Fixed(group_extent))
+                            .align_y(Alignment::Start),
+                        );
+                        rendered_end = header_end;
+                    }
+                }
+
+                let rows_start = header_end;
+                let first_row = (((window_start - rows_start).max(0.0) / row_extent).floor()
+                    as usize)
+                    .min(group_rows);
+                let last_row = (((window_end - rows_start).max(0.0) / row_extent).ceil() as usize)
+                    .saturating_add(1)
+                    .min(group_rows);
+                for row_index in first_row..last_row {
+                    let item_start = rows_start + row_index as f32 * row_extent;
+                    if rendered_start.is_none() {
+                        rendered_start = Some(item_start);
+                        if item_start > 0.0 {
+                            grid = grid.push(Space::new().height(Length::Fixed(item_start)));
+                        }
+                    }
+                    let start = group_start + row_index * layout.columns;
+                    let end = (start + layout.columns).min(group_end);
+                    grid = grid.push(self.visual_file_grid_row(
+                        pane,
+                        &entries[start..end],
+                        palette,
+                        metrics,
+                        row_extent,
+                    ));
+                    rendered_end = item_start + row_extent;
+                }
+                y += block_height;
             }
-            row_items = row_items.push(self.visual_file_item(pane, index, entry, palette, metrics));
-            col += 1;
-            if col >= layout.columns {
-                grid = if group_mode == GroupMode::None {
-                    grid.push(row_items)
-                } else {
-                    grid.push(container(row_items).padding([0.0, metrics.grid_padding]))
-                };
-                row_items = row![].spacing(metrics.spacing).align_y(Alignment::Start);
-                col = 0;
+            let total_height = group_starts
+                .iter()
+                .enumerate()
+                .map(|(group_index, group_start)| {
+                    let group_end = group_starts.get(group_index + 1).copied().unwrap_or(total);
+                    group_extent
+                        + (group_end - *group_start).div_ceil(layout.columns) as f32 * row_extent
+                })
+                .sum::<f32>();
+            if rendered_start.is_none() && total_height > 0.0 {
+                grid = grid.push(Space::new().height(Length::Fixed(total_height)));
+            } else if rendered_end < total_height {
+                grid = grid.push(Space::new().height(Length::Fixed(total_height - rendered_end)));
             }
-        }
-        if col > 0 {
-            grid = if group_mode == GroupMode::None {
-                grid.push(row_items)
-            } else {
-                grid.push(container(row_items).padding([0.0, metrics.grid_padding]))
-            };
-        }
-        if render_limit < total {
-            grid = grid.push(render_progress_footer(
-                render_limit,
-                total,
-                palette,
-                self.font_size(),
-            ));
         }
 
         // Keep the Scrollable mounted when Ctrl changes. Replacing it with a
         // container reset its internal offset and made a lone Ctrl press jump
         // to the top. A stable overlay captures only Ctrl+wheel for view zoom.
+        let pane_state = self.pane(pane);
+        let scrollbar_reveal_progress = pane_state.scrollbar_reveal_progress;
+        let vertical_scrollbar_expansion = f32::from(pane_state.scrollbar_vertical_hovered);
         let scroller: Element<'_, Message> = scrollable(grid)
             .id(pane_scroll_id(pane))
+            .direction(scrollable::Direction::Vertical(explorer_scrollbar(
+                vertical_scrollbar_expansion,
+            )))
             .on_scroll(move |viewport| {
                 Message::PaneScrolled(
                     pane,
-                    viewport.relative_offset().y,
                     viewport.absolute_offset().y,
+                    viewport.bounds().height,
                     viewport.content_bounds().height > viewport.bounds().height,
                 )
             })
             .style(move |theme, status| {
-                explorer_scrollable_style(
-                    palette,
-                    theme,
-                    status,
-                    self.pane(pane).scrollbar_reveal_progress,
-                )
+                explorer_scrollable_style(palette, theme, status, scrollbar_reveal_progress)
             })
             .into();
         let content: Element<'_, Message> = stack(vec![
@@ -124,6 +188,28 @@ impl BExplorerIced {
             palette,
             self.rubber_band_layer(pane, palette, self.scrollbar_hover_layer(pane, base)),
         )
+    }
+
+    fn visual_file_grid_row<'a>(
+        &'a self,
+        pane: PaneId,
+        indices: &[usize],
+        palette: Palette,
+        metrics: VisualViewMetrics,
+        row_extent: f32,
+    ) -> Element<'a, Message> {
+        let mut items = row![].spacing(metrics.spacing).align_y(Alignment::Start);
+        for &index in indices {
+            if let Some(entry) = self.pane(pane).entries.get(index) {
+                items = items.push(self.visual_file_item(pane, index, entry, palette, metrics));
+            }
+        }
+        container(items)
+            .padding([0.0, metrics.grid_padding])
+            .width(Length::Fill)
+            .height(Length::Fixed(row_extent))
+            .align_y(Alignment::Start)
+            .into()
     }
 
     pub(in crate::iced_ui) fn visual_file_item(
@@ -291,17 +377,12 @@ impl BExplorerIced {
                     true,
                 )
             } else {
-                container(
-                    highlighted_search_text(
-                        self.pane(pane).search_text.as_str(),
-                        &two_line_ellipsize_to_width(&display_name, label_width, font_size),
-                        color,
-                    )
-                    .size(font_size)
-                    .width(Length::Fill)
-                    .align_x(Horizontal::Center)
-                    .wrapping(iced::widget::text::Wrapping::None),
-                )
+                container(centered_highlighted_search_text(
+                    self.pane(pane).search_text.as_str(),
+                    &two_line_ellipsize_to_width(&display_name, label_width, font_size),
+                    color,
+                    font_size,
+                ))
                 .width(Length::Fill)
                 .height(label_height)
                 .center_x(Length::Fill)
@@ -357,7 +438,7 @@ impl BExplorerIced {
             .width(metrics.cell_width)
             .height(metrics.cell_height)
             .padding(self.ui_vertical_padding(if metrics.tile { 6.0 } else { 8.0 }))
-            .on_press(Message::RowPressed(pane, index))
+            .on_press(Message::Noop)
             .style(move |_, status| file_item_button_style(palette, selected, status))
             .into()
         };

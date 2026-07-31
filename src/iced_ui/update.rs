@@ -157,8 +157,8 @@ impl BExplorerIced {
                         state.entries = entries;
                         state.selected.clear();
                         state.selection_anchor = None;
-                        state.render_limit = INITIAL_RENDER_LIMIT;
-                        state.scroll_offset_y = 0.0;
+                        state.keyboard_selection_cursor = None;
+                        state.reset_scroll_position();
                     }
                     Err(error) => {
                         state.status = error;
@@ -166,8 +166,8 @@ impl BExplorerIced {
                         state.folder_entries = None;
                         state.selected.clear();
                         state.selection_anchor = None;
-                        state.render_limit = INITIAL_RENDER_LIMIT;
-                        state.scroll_offset_y = 0.0;
+                        state.keyboard_selection_cursor = None;
+                        state.reset_scroll_position();
                     }
                 }
                 state.mark_entries_changed();
@@ -182,10 +182,7 @@ impl BExplorerIced {
                 if let Some(directory) = loaded_watch_directory {
                     crate::fs::watcher::acknowledge_directories([directory]);
                 }
-                let mut tasks = vec![
-                    self.queue_visible_images(pane),
-                    scroll_pane_to_top_task(pane),
-                ];
+                let mut tasks = Vec::new();
                 if let Some(has_items) = loaded_trash_has_items {
                     self.trash_icon_request_id = self.trash_icon_request_id.saturating_add(1);
                     self.trash_has_items = Some(has_items);
@@ -213,9 +210,9 @@ impl BExplorerIced {
                         state.entries = entries.clone();
                         state.selected.retain(|path| available_paths.contains(path));
                         state.selection_anchor = None;
+                        state.keyboard_selection_cursor = None;
                         state.status = format!("{} elements", entries.len());
-                        state.render_limit = INITIAL_RENDER_LIMIT;
-                        state.scroll_offset_y = 0.0;
+                        state.reset_scroll_position();
                         state.has_vertical_overflow = false;
                         state.mark_entries_changed();
                         tasks.push(self.queue_visible_images(other_pane));
@@ -235,6 +232,7 @@ impl BExplorerIced {
                 {
                     tasks.push(self.context_begin_rename(pane, ContextTarget::Entry(index)));
                 }
+                let mut revealed_entry = false;
                 if let Some((_, _, path)) = pending_reveal
                     && let Some(index) = self
                         .pane(pane)
@@ -242,8 +240,17 @@ impl BExplorerIced {
                         .iter()
                         .position(|entry| entry.path == path)
                 {
-                    self.select_single(pane, index);
+                    tasks.push(self.reveal_entry_in_pane(pane, index));
+                    revealed_entry = true;
                 }
+                if !revealed_entry {
+                    tasks.push(scroll_pane_to_top_task(pane));
+                }
+                // `reveal_entry_in_pane` can raise the incremental render
+                // limit to the complete batch containing a distant target.
+                // Queue images only after that mutation so every newly
+                // mounted row receives its thumbnail or native icon.
+                tasks.push(self.queue_visible_images(pane));
                 if !self.pane(pane).search_text.trim().is_empty() {
                     tasks.push(self.start_recursive_search(pane));
                 }
@@ -337,6 +344,7 @@ impl BExplorerIced {
                     state.entries = entries.clone();
                     state.selected.retain(|path| available_paths.contains(path));
                     state.selection_anchor = None;
+                    state.keyboard_selection_cursor = None;
                     state.has_vertical_overflow = false;
                     state.mark_entries_changed();
                     tasks.push(self.queue_visible_images(pane));
@@ -430,6 +438,9 @@ impl BExplorerIced {
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
                 self.context_send_to_submenu_hovered = false;
+                self.context_tools_submenu = false;
+                self.context_tools_parent_hovered = false;
+                self.context_tools_submenu_hovered = false;
                 self.context_extract_submenu = false;
                 self.context_new_submenu = false;
                 self.context_archive_parent_hovered = false;
@@ -657,6 +668,63 @@ impl BExplorerIced {
                 }
                 Task::none()
             }
+            Message::StorageAnalysisScrolled => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.scrollbar_reveal_until =
+                        Some(Instant::now() + Duration::from_millis(850));
+                }
+                Task::none()
+            }
+            Message::StorageOverviewExtensionScrolled {
+                offset_y,
+                viewport_height,
+            } => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    let now = Instant::now();
+                    state.overview_extension_scroll_velocity_y = sampled_scroll_velocity(
+                        state.overview_extension_scroll_offset_y,
+                        state.overview_extension_scroll_sampled_at,
+                        state.overview_extension_scroll_velocity_y,
+                        offset_y,
+                        now,
+                    );
+                    state.overview_extension_scroll_offset_y = offset_y.max(0.0);
+                    state.overview_extension_viewport_height = viewport_height.max(0.0);
+                    state.overview_extension_scroll_sampled_at = Some(now);
+                    state.scrollbar_reveal_until = Some(now + Duration::from_millis(850));
+                }
+                Task::none()
+            }
+            Message::StorageAnalysisScrollbarHover(hovered) => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.scrollbar_vertical_hovered = hovered;
+                }
+                Task::none()
+            }
+            Message::StorageDonutPointerMoved(point) => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.donut_pointer = Some(point);
+                }
+                Task::none()
+            }
+            Message::StorageDonutPointerLeft => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.donut_pointer = None;
+                }
+                Task::none()
+            }
+            Message::StorageDuplicateDonutPointerMoved(point) => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.duplicate_donut_pointer = Some(point);
+                }
+                Task::none()
+            }
+            Message::StorageDuplicateDonutPointerLeft => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.duplicate_donut_pointer = None;
+                }
+                Task::none()
+            }
             Message::ScrollbarAnimationTick => {
                 let now = Instant::now();
                 for pane in [PaneId::Primary, PaneId::Secondary] {
@@ -672,6 +740,20 @@ impl BExplorerIced {
                             || state.scrollbar_vertical_hovered
                             || wheel_reveal,
                     );
+                    state.scrollbar_reveal_progress = if target > state.scrollbar_reveal_progress {
+                        (state.scrollbar_reveal_progress + SCROLLBAR_FADE_STEP).min(target)
+                    } else {
+                        (state.scrollbar_reveal_progress - SCROLLBAR_FADE_STEP).max(target)
+                    };
+                }
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    let wheel_reveal = state
+                        .scrollbar_reveal_until
+                        .is_some_and(|until| until > now);
+                    if !wheel_reveal {
+                        state.scrollbar_reveal_until = None;
+                    }
+                    let target = f32::from(state.scrollbar_vertical_hovered || wheel_reveal);
                     state.scrollbar_reveal_progress = if target > state.scrollbar_reveal_progress {
                         (state.scrollbar_reveal_progress + SCROLLBAR_FADE_STEP).min(target)
                     } else {
@@ -835,69 +917,47 @@ impl BExplorerIced {
                     Err(error) => self.report_error(pane, error),
                 }
             }
-            Message::RowPressed(pane, index) => {
-                if self
-                    .file_drag
-                    .as_ref()
-                    .is_some_and(|drag| drag.source_pane == pane && drag.dragging)
+            Message::BeginClickRename(pane, path, clicked_at) => {
+                if !entry_click_is_current(self.last_entry_click.as_ref(), pane, &path, clicked_at)
                 {
                     return Task::none();
                 }
-                if self.file_drag_suppressed_click == Some((pane, index)) {
-                    self.file_drag_suppressed_click = None;
-                    self.last_entry_click = None;
+                self.last_entry_click = None;
+
+                let selection_is_current = self.pane(pane).selected.len() == 1
+                    && self.pane(pane).selected.contains(&path)
+                    && self
+                        .pane(pane)
+                        .entries
+                        .iter()
+                        .any(|entry| entry.path == path);
+                let interaction_is_blocked = self.file_drag.is_some()
+                    || self.rubber_band.is_some()
+                    || self.context_menu.is_some()
+                    || self.address_edit.is_some()
+                    || self.new_menu_open.is_some()
+                    || self.view_menu_open.is_some()
+                    || self.group_menu_open.is_some()
+                    || self.search_mode_menu_open.is_some()
+                    || self.title_menu_open
+                    || self.show_menu_open
+                    || self.settings_open
+                    || self.shortcuts_open
+                    || self.about_open
+                    || self.rename_dialog.is_some()
+                    || self.archive_dialog.is_some()
+                    || self.format_dialog.is_some()
+                    || self.error_dialog.is_some()
+                    || self.permanent_delete_dialog.is_some()
+                    || self.transfer_conflict_dialog.is_some()
+                    || self.elevated_transfer_dialog.is_some()
+                    || self.elevated_delete_dialog.is_some()
+                    || self.elevated_file_action_dialog.is_some();
+                if !selection_is_current || interaction_is_blocked {
                     return Task::none();
                 }
-                self.focus_pane(pane);
-                let Some(entry) = self.pane(pane).entries.get(index).cloned() else {
-                    return Task::none();
-                };
-                if self
-                    .rename_dialog
-                    .as_ref()
-                    .is_some_and(|dialog| dialog.pane == pane && dialog.path == entry.path)
-                {
-                    return Task::none();
-                }
-                let commit_task = self.commit_pending_rename_if_not(pane, Some(&entry.path));
-                let modifiers = self.current_modifiers;
-                let is_double_click = !modifiers.shift()
-                    && !modifiers.command()
-                    && self.last_entry_click.as_ref().is_some_and(|click| {
-                        click.pane == pane
-                            && click.path == entry.path
-                            && click.at.elapsed() <= Duration::from_millis(450)
-                    });
-                if modifiers.shift() {
-                    self.select_range_to(pane, index);
-                } else if modifiers.command() {
-                    let state = self.pane_mut(pane);
-                    if !state.selected.remove(&entry.path) {
-                        state.selected.insert(entry.path.clone());
-                    }
-                    state.selection_anchor = Some(index);
-                } else {
-                    self.select_single(pane, index);
-                }
-                self.last_entry_click = if modifiers.shift() || modifiers.command() {
-                    None
-                } else {
-                    Some(EntryClickState {
-                        pane,
-                        path: entry.path.clone(),
-                        at: Instant::now(),
-                    })
-                };
-                let preview_task = self.queue_selected_preview(pane);
-                if is_double_click {
-                    self.last_entry_click = None;
-                    return Task::batch([
-                        commit_task,
-                        preview_task,
-                        self.context_open(pane, ContextTarget::Entry(index)),
-                    ]);
-                }
-                Task::batch([commit_task, preview_task])
+
+                self.rename_selected(pane)
             }
             Message::Back(pane) => {
                 self.address_edit = None;
@@ -1468,9 +1528,19 @@ impl BExplorerIced {
                 self.refresh_search(pane)
             }
             Message::PollSearches => self.poll_searches(),
-            Message::PaneScrolled(pane, relative_y, absolute_y, has_vertical_overflow) => {
+            Message::PaneScrolled(pane, absolute_y, viewport_height, has_vertical_overflow) => {
+                let now = Instant::now();
                 let state = self.pane_mut(pane);
+                state.scroll_velocity_y = sampled_scroll_velocity(
+                    state.scroll_offset_y,
+                    state.scroll_sampled_at,
+                    state.scroll_velocity_y,
+                    absolute_y,
+                    now,
+                );
                 state.scroll_offset_y = absolute_y.max(0.0);
+                state.scroll_viewport_height = viewport_height.max(0.0);
+                state.scroll_sampled_at = Some(now);
                 state.has_vertical_overflow = has_vertical_overflow;
                 state.scrollbar_reveal_until = Some(Instant::now() + Duration::from_millis(850));
                 if let Some(current) = self
@@ -1481,15 +1551,6 @@ impl BExplorerIced {
                 {
                     self.update_rubber_band_selection(pane, current);
                 }
-                if relative_y < 0.9 {
-                    return Task::none();
-                }
-                let total = self.filtered_entries(pane).len();
-                let state = self.pane_mut(pane);
-                if state.render_limit >= total {
-                    return Task::none();
-                }
-                state.render_limit = expanded_render_limit(state.render_limit, total);
                 self.queue_visible_images(pane)
             }
             Message::PaneMouseWheel(pane, delta) => {
@@ -1573,8 +1634,7 @@ impl BExplorerIced {
                 self.focus_pane(pane);
                 self.set_view_mode_for_pane(pane, mode);
                 let state = self.pane_mut(pane);
-                state.render_limit = INITIAL_RENDER_LIMIT;
-                state.scroll_offset_y = 0.0;
+                state.reset_scroll_position();
                 self.view_menu_open = None;
                 self.save_session();
                 Task::batch([
@@ -1608,8 +1668,7 @@ impl BExplorerIced {
                     }
                 }
                 let state = self.pane_mut(pane);
-                state.render_limit = INITIAL_RENDER_LIMIT;
-                state.scroll_offset_y = 0.0;
+                state.reset_scroll_position();
                 self.group_menu_open = None;
                 self.save_session();
                 Task::batch([
@@ -1630,8 +1689,7 @@ impl BExplorerIced {
                     }
                 }
                 let state = self.pane_mut(pane);
-                state.render_limit = INITIAL_RENDER_LIMIT;
-                state.scroll_offset_y = 0.0;
+                state.reset_scroll_position();
                 self.group_menu_open = None;
                 self.save_session();
                 Task::batch([
@@ -1648,8 +1706,7 @@ impl BExplorerIced {
                     state.sort_column = column;
                     state.sort_ascending = true;
                 }
-                state.render_limit = INITIAL_RENDER_LIMIT;
-                state.scroll_offset_y = 0.0;
+                state.reset_scroll_position();
                 Task::batch([
                     self.queue_visible_images(pane),
                     scroll_pane_to_top_task(pane),
@@ -1907,7 +1964,8 @@ impl BExplorerIced {
                 };
                 let has_context_action = entry.drive_kind.is_some_and(DriveKind::is_ejectable)
                     || entry.drive_kind.is_some_and(DriveKind::is_formatable)
-                    || super::duplicate_cleanup::duplicate_cleanup_available_for_entry(entry);
+                    || super::duplicate_cleanup::duplicate_cleanup_available_for_entry(entry)
+                    || super::storage_analysis::storage_analysis_available_for_entry(entry);
                 if !has_context_action {
                     return Task::none();
                 }
@@ -2025,6 +2083,9 @@ impl BExplorerIced {
                         ContextSubmenuKind::SendTo => {
                             self.context_send_to_submenu = true;
                         }
+                        ContextSubmenuKind::Tools => {
+                            self.context_tools_submenu = true;
+                        }
                         ContextSubmenuKind::Archive | ContextSubmenuKind::Extract => {
                             self.context_archive_submenu = true;
                         }
@@ -2108,6 +2169,7 @@ impl BExplorerIced {
                 }
                 let region_target = target.clone();
                 let font_size = self.font_size();
+                let show_vibrancy_intensity = self.config.vibrancy != VibrancyMode::None;
                 Task::perform(
                     async move {
                         let region = popup_backdrop_region_for_screenshot(
@@ -2115,6 +2177,7 @@ impl BExplorerIced {
                             screenshot.size,
                             screenshot.scale_factor,
                             font_size,
+                            show_vibrancy_intensity,
                         );
                         run_blocking_file_operation(move || {
                             Ok(blurred_screenshot_region(screenshot, region))
@@ -2153,6 +2216,9 @@ impl BExplorerIced {
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
                 self.context_send_to_submenu_hovered = false;
+                self.context_tools_submenu = false;
+                self.context_tools_parent_hovered = false;
+                self.context_tools_submenu_hovered = false;
                 self.context_extract_submenu = false;
                 self.context_archive_parent_hovered = true;
                 self.context_new_submenu = false;
@@ -2165,6 +2231,9 @@ impl BExplorerIced {
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
                 self.context_send_to_submenu_hovered = false;
+                self.context_tools_submenu = false;
+                self.context_tools_parent_hovered = false;
+                self.context_tools_submenu_hovered = false;
                 self.context_extract_submenu = true;
                 self.context_archive_parent_hovered = true;
                 self.context_new_submenu = false;
@@ -2177,6 +2246,9 @@ impl BExplorerIced {
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
                 self.context_send_to_submenu_hovered = false;
+                self.context_tools_submenu = false;
+                self.context_tools_parent_hovered = false;
+                self.context_tools_submenu_hovered = false;
                 self.context_new_parent_hovered = true;
                 self.context_archive_submenu = false;
                 self.context_extract_submenu = false;
@@ -2194,6 +2266,9 @@ impl BExplorerIced {
                 self.context_send_to_submenu = false;
                 self.context_send_to_parent_hovered = false;
                 self.context_send_to_submenu_hovered = false;
+                self.context_tools_submenu = false;
+                self.context_tools_parent_hovered = false;
+                self.context_tools_submenu_hovered = false;
                 self.context_archive_submenu = false;
                 self.context_extract_submenu = false;
                 self.context_new_submenu = false;
@@ -2232,6 +2307,9 @@ impl BExplorerIced {
                 self.context_open_with_submenu = false;
                 self.context_open_with_parent_hovered = false;
                 self.context_open_with_submenu_hovered = false;
+                self.context_tools_submenu = false;
+                self.context_tools_parent_hovered = false;
+                self.context_tools_submenu_hovered = false;
                 self.context_archive_submenu = false;
                 self.context_extract_submenu = false;
                 self.context_new_submenu = false;
@@ -2261,6 +2339,49 @@ impl BExplorerIced {
             Message::CloseContextSendToSubmenuIfUnhovered => {
                 if !self.context_send_to_parent_hovered && !self.context_send_to_submenu_hovered {
                     self.context_send_to_submenu = false;
+                }
+                Task::none()
+            }
+            Message::ContextToolsParentEnter => {
+                self.context_tools_submenu =
+                    self.context_submenu_backdrop_ready(ContextSubmenuKind::Tools);
+                self.context_tools_parent_hovered = true;
+                self.context_open_with_submenu = false;
+                self.context_open_with_parent_hovered = false;
+                self.context_open_with_submenu_hovered = false;
+                self.context_send_to_submenu = false;
+                self.context_send_to_parent_hovered = false;
+                self.context_send_to_submenu_hovered = false;
+                self.context_archive_submenu = false;
+                self.context_extract_submenu = false;
+                self.context_archive_parent_hovered = false;
+                self.context_archive_submenu_hovered = false;
+                self.context_new_submenu = false;
+                self.context_new_parent_hovered = false;
+                self.context_new_submenu_hovered = false;
+                self.request_context_submenu_backdrop(ContextSubmenuKind::Tools)
+            }
+            Message::ContextToolsParentExit => {
+                self.context_tools_parent_hovered = false;
+                self.cancel_context_submenu_backdrop_request(ContextSubmenuKind::Tools);
+                Task::perform(delay(Duration::from_millis(140)), |_| {
+                    Message::CloseContextToolsSubmenuIfUnhovered
+                })
+            }
+            Message::ContextToolsSubmenuEnter => {
+                self.context_tools_submenu = true;
+                self.context_tools_submenu_hovered = true;
+                Task::none()
+            }
+            Message::ContextToolsSubmenuExit => {
+                self.context_tools_submenu_hovered = false;
+                Task::perform(delay(Duration::from_millis(140)), |_| {
+                    Message::CloseContextToolsSubmenuIfUnhovered
+                })
+            }
+            Message::CloseContextToolsSubmenuIfUnhovered => {
+                if !self.context_tools_parent_hovered && !self.context_tools_submenu_hovered {
+                    self.context_tools_submenu = false;
                 }
                 Task::none()
             }
@@ -2327,8 +2448,6 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::KeyPressed(window_id, key, physical_key, modifiers) => {
-                #[cfg(not(target_os = "linux"))]
-                let _ = window_id;
                 self.current_modifiers = modifiers;
                 let is_enter = matches!(
                     key.as_ref(),
@@ -2346,6 +2465,46 @@ impl BExplorerIced {
                     key.as_ref(),
                     keyboard::Key::Named(keyboard::key::Named::ArrowDown)
                 );
+                let is_arrow_left = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::ArrowLeft)
+                );
+                let is_arrow_right = matches!(
+                    key.as_ref(),
+                    keyboard::Key::Named(keyboard::key::Named::ArrowRight)
+                );
+                if self.storage_analysis_window_id == Some(window_id) {
+                    if is_escape {
+                        let context_open = self
+                            .storage_analysis
+                            .as_ref()
+                            .is_some_and(|state| state.category_context_path.is_some());
+                        if context_open {
+                            return self.update(Message::CloseStorageCategoryRowContext);
+                        }
+                        let category_open = self
+                            .storage_analysis
+                            .as_ref()
+                            .is_some_and(|state| state.selected_category.is_some());
+                        return if category_open {
+                            self.update(Message::BackToStorageOverview)
+                        } else {
+                            self.update(Message::CloseStorageAnalysis)
+                        };
+                    }
+                    if is_enter
+                        && let Some(path) = self
+                            .storage_analysis
+                            .as_ref()
+                            .and_then(|state| state.category_highlighted.clone())
+                    {
+                        return self.update(Message::OpenStorageCategoryFile(path));
+                    }
+                    // This utility is read-only. In particular, never allow
+                    // Delete/Shift+Delete or other global explorer shortcuts
+                    // to act on the main pane hidden behind this window.
+                    return Task::none();
+                }
                 #[cfg(target_os = "linux")]
                 if self.is_properties_window(window_id) {
                     let selector_menu = self
@@ -2407,6 +2566,7 @@ impl BExplorerIced {
                                 KeyboardMenu::Context
                                     | KeyboardMenu::ContextOpenWith
                                     | KeyboardMenu::ContextSendTo
+                                    | KeyboardMenu::ContextTools
                                     | KeyboardMenu::ContextArchive
                                     | KeyboardMenu::ContextExtract
                                     | KeyboardMenu::ContextNew
@@ -2491,16 +2651,33 @@ impl BExplorerIced {
                         .map(|binding| self.update(Message::ShortcutBindingCaptured(binding)))
                         .unwrap_or_else(Task::none);
                 }
-                if let Some(shortcut) = keyboard_shortcut_from_key(
-                    &key,
-                    physical_key,
-                    modifiers,
-                    &self.config.shortcuts,
-                ) {
+                if self.main_window_id == Some(window_id)
+                    && (is_arrow_up || is_arrow_down || is_arrow_left || is_arrow_right)
+                    && !modifiers.control()
+                    && !modifiers.alt()
+                    && !modifiers.logo()
+                {
+                    let pane = self.focused_pane();
+                    let extend = modifiers.shift();
+                    return if is_arrow_up || is_arrow_down {
+                        self.move_file_selection_vertical(pane, is_arrow_down, extend)
+                    } else {
+                        self.move_file_selection_horizontal(pane, is_arrow_right, extend)
+                    };
+                }
+                if self.main_window_id == Some(window_id)
+                    && let Some(shortcut) = keyboard_shortcut_from_key(
+                        &key,
+                        physical_key,
+                        modifiers,
+                        &self.config.shortcuts,
+                    )
+                {
                     return self.handle_keyboard_shortcut(shortcut);
                 }
 
-                if !modifiers.command()
+                if self.main_window_id == Some(window_id)
+                    && !modifiers.command()
                     && !modifiers.alt()
                     && !modifiers.logo()
                     && let keyboard::Key::Character(character) = key.as_ref()
@@ -3064,6 +3241,11 @@ impl BExplorerIced {
                         *width = (*width + density_delta).max(0.0);
                     }
                 }
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    for width in &mut state.category_column_widths {
+                        *width = (*width + density_delta).max(0.0);
+                    }
+                }
                 save_config(&self.config);
                 #[cfg(target_os = "linux")]
                 let properties_task = self.sync_properties_window_size_task();
@@ -3073,6 +3255,7 @@ impl BExplorerIced {
                     self.sync_transfer_window_size_task(),
                     self.sync_archive_window_size_task(),
                     self.sync_duplicate_window_size_task(),
+                    self.sync_storage_analysis_window_constraints_task(),
                     properties_task,
                 ])
             }
@@ -3091,6 +3274,11 @@ impl BExplorerIced {
                         *width = (*width + density_delta).max(0.0);
                     }
                 }
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    for width in &mut state.category_column_widths {
+                        *width = (*width + density_delta).max(0.0);
+                    }
+                }
                 save_config(&self.config);
                 #[cfg(target_os = "linux")]
                 let properties_task = self.sync_properties_window_size_task();
@@ -3100,6 +3288,7 @@ impl BExplorerIced {
                     self.sync_transfer_window_size_task(),
                     self.sync_archive_window_size_task(),
                     self.sync_duplicate_window_size_task(),
+                    self.sync_storage_analysis_window_constraints_task(),
                     properties_task,
                 ])
             }
@@ -3221,6 +3410,21 @@ impl BExplorerIced {
                 save_config(&self.config);
                 self.refresh_sidebar_storage()
             }
+            Message::ToggleShowSidebarBookmarks => {
+                self.config.show_sidebar_bookmarks = !self.config.show_sidebar_bookmarks;
+                save_config(&self.config);
+                Task::none()
+            }
+            Message::ToggleShowSidebarNetwork => {
+                self.config.show_sidebar_network = !self.config.show_sidebar_network;
+                save_config(&self.config);
+                Task::none()
+            }
+            Message::ToggleShowSidebarRecents => {
+                self.config.show_sidebar_recents = !self.config.show_sidebar_recents;
+                save_config(&self.config);
+                Task::none()
+            }
             Message::StartSidebarResize => {
                 self.resize_drag = Some(ResizeDrag::Sidebar {
                     start_x: f32::NAN,
@@ -3278,6 +3482,9 @@ impl BExplorerIced {
                 let split_resize_dirty = matches!(self.resize_drag, Some(ResizeDrag::Split { .. }));
                 let sidebar_section_drag = self.sidebar_section_drag.take();
                 let file_drag = self.file_drag.take();
+                if file_drag.as_ref().is_some_and(|drag| drag.dragging) {
+                    self.last_entry_click = None;
+                }
                 if let Some(drag) = &file_drag {
                     self.fade_out_file_drag_overlay(drag);
                 }
@@ -3489,14 +3696,21 @@ impl BExplorerIced {
             Message::OpenDuplicateFileLocation => self.open_duplicate_file_location_task(),
             Message::DuplicateTableScrolled {
                 offset_x,
-                relative_y,
+                offset_y,
+                viewport_height,
             } => {
-                if relative_y >= 0.9
-                    && let Some(state) = self.duplicate_cleanup.as_mut()
-                    && state.render_limit < state.entries.len()
-                {
-                    state.render_limit =
-                        expanded_render_limit(state.render_limit, state.entries.len());
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    let now = Instant::now();
+                    state.table_scroll_velocity_y = sampled_scroll_velocity(
+                        state.table_scroll_offset_y,
+                        state.table_scroll_sampled_at,
+                        state.table_scroll_velocity_y,
+                        offset_y,
+                        now,
+                    );
+                    state.table_scroll_offset_y = offset_y.max(0.0);
+                    state.table_viewport_height = viewport_height.max(0.0);
+                    state.table_scroll_sampled_at = Some(now);
                 }
                 iced::widget::operation::scroll_to(
                     duplicate_table_header_scroll_id(),
@@ -3561,12 +3775,134 @@ impl BExplorerIced {
                     self.close_duplicate_cleanup_task()
                 }
             }
+            Message::SelectStorageOverviewCategory(category) => {
+                self.select_storage_overview_category(category)
+            }
+            Message::SelectStorageOverviewExtension(index) => {
+                if let Some(state) = self.storage_analysis.as_mut()
+                    && index < state.overview_extensions.len()
+                {
+                    state.overview_selected_extension = Some(index);
+                }
+                Task::none()
+            }
+            Message::OpenStorageCategory(category) => self.open_storage_category(category),
+            Message::BackToStorageOverview => self.back_to_storage_overview(),
+            Message::StorageCategoryPointerMoved(point) => {
+                let font_size = self.font_size();
+                let spanish = self.is_spanish();
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.category_pointer = point;
+                    if let Some(resize) = state.category_column_resize
+                        && let Some(width) = state.category_column_widths.get_mut(resize.column)
+                    {
+                        let minimum = storage_category_table_column_min_width(
+                            resize.column,
+                            font_size,
+                            spanish,
+                        );
+                        *width = (resize.start_width + point.x - resize.start_x).max(minimum);
+                    }
+                }
+                Task::none()
+            }
+            Message::StorageCategoryResizePointerMoved(id, point) => {
+                if self.storage_analysis_window_id == Some(id) {
+                    self.update(Message::StorageCategoryPointerMoved(point))
+                } else {
+                    Task::none()
+                }
+            }
+            Message::StorageCategoryResizeReleased(id) => {
+                if self.storage_analysis_window_id == Some(id) {
+                    self.update(Message::StopStorageCategoryColumnResize)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::StorageCategoryRowSelected(path) => self.select_storage_category_file(path),
+            Message::StorageCategoryFilterChanged(filter) => {
+                self.update_storage_category_filter(filter)
+            }
+            Message::OpenStorageCategoryRowContext(path) => {
+                let select = self.select_storage_category_file(path.clone());
+                if let Some(state) = self.storage_analysis.as_mut()
+                    && state.category_highlighted.as_ref() == Some(&path)
+                {
+                    state.category_context_path = Some(path);
+                    state.category_context_position = state.category_pointer;
+                }
+                select
+            }
+            Message::CloseStorageCategoryRowContext => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.category_context_path = None;
+                    state.category_context_position = Point::ORIGIN;
+                }
+                Task::none()
+            }
+            Message::OpenStorageCategoryFile(path) => self.open_storage_category_file_task(path),
+            Message::OpenStorageCategoryFileLocation => {
+                self.open_storage_category_file_location_task()
+            }
+            Message::StorageCategoryTableScrolled {
+                offset_x,
+                offset_y,
+                viewport_height,
+            } => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    let now = Instant::now();
+                    state.category_scroll_velocity_y = sampled_scroll_velocity(
+                        state.category_scroll_offset_y,
+                        state.category_scroll_sampled_at,
+                        state.category_scroll_velocity_y,
+                        offset_y,
+                        now,
+                    );
+                    state.category_scroll_offset_y = offset_y.max(0.0);
+                    state.category_viewport_height = viewport_height.max(0.0);
+                    state.category_scroll_sampled_at = Some(now);
+                }
+                let header_scroll = iced::widget::operation::scroll_to(
+                    storage_category_table_header_scroll_id(),
+                    iced::widget::operation::AbsoluteOffset {
+                        x: Some(offset_x),
+                        y: None,
+                    },
+                );
+                Task::batch([header_scroll, self.queue_storage_category_images()])
+            }
+            Message::SortStorageCategoryColumn(column) => self.sort_storage_category_column(column),
+            Message::StartStorageCategoryColumnResize(column) => {
+                if let Some(state) = self.storage_analysis.as_mut()
+                    && let Some(width) = state.category_column_widths.get(column).copied()
+                {
+                    state.category_column_resize = Some(StorageCategoryColumnResize {
+                        column,
+                        start_x: state.category_pointer.x,
+                        start_width: width,
+                    });
+                }
+                Task::none()
+            }
+            Message::StopStorageCategoryColumnResize => {
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.category_column_resize = None;
+                }
+                Task::none()
+            }
+            Message::CancelStorageAnalysis => {
+                if let Some(state) = self.storage_analysis.as_ref() {
+                    state.cancel.store(true, AtomicOrdering::Relaxed);
+                }
+                Task::none()
+            }
+            Message::CloseStorageAnalysis => self.close_storage_analysis_task(),
             Message::MainWindowOpened(id) => {
                 self.main_window_id = Some(id);
                 #[cfg(target_os = "windows")]
                 {
                     self.pending_window_maximized_appearance = None;
-                    self.windows_pending_backdrop_refresh = None;
                     self.windows_native_appearance_generation =
                         crate::platform::main_window_appearance_generation();
                     self.next_window_appearance_epoch();
@@ -3649,6 +3985,15 @@ impl BExplorerIced {
                     window::gain_focus(id),
                 ])
             }
+            Message::StorageAnalysisWindowOpened(id) => {
+                self.storage_analysis_window_id = Some(id);
+                Task::batch([
+                    self.apply_window_corners_task_for(id),
+                    self.sync_storage_analysis_window_constraints_task(),
+                    window::minimize(id, false),
+                    window::gain_focus(id),
+                ])
+            }
             Message::ReopenTransferWindow(old_id, position) => {
                 if self.transfer_window_id == Some(old_id) {
                     self.reopen_transfer_window_task(old_id, self.transfer_items().len(), position)
@@ -3666,6 +4011,8 @@ impl BExplorerIced {
             Message::WindowCloseRequested(id) => {
                 if self.main_window_id == Some(id) {
                     self.update(Message::WindowClose)
+                } else if self.storage_analysis_window_id == Some(id) {
+                    self.close_storage_analysis_task()
                 } else if self.transfer_window_id == Some(id)
                     || self.archive_window_id == Some(id)
                     || self.defender_window_id == Some(id)
@@ -3691,7 +4038,6 @@ impl BExplorerIced {
                     #[cfg(target_os = "windows")]
                     {
                         self.pending_window_maximized_appearance = None;
-                        self.windows_pending_backdrop_refresh = None;
                         self.windows_native_appearance_generation = self
                             .windows_native_appearance_generation
                             .max(crate::platform::main_window_appearance_generation());
@@ -3743,6 +4089,12 @@ impl BExplorerIced {
                             state.cancel.store(true, AtomicOrdering::Relaxed);
                         }
                     }
+                    if self.storage_analysis_window_id == Some(id) {
+                        self.storage_analysis_window_id = None;
+                        if let Some(state) = self.storage_analysis.take() {
+                            state.cancel_workers();
+                        }
+                    }
                     #[cfg(target_os = "linux")]
                     self.properties_window_closed(id);
                     self.finish_detached_operation_host_task()
@@ -3752,6 +4104,7 @@ impl BExplorerIced {
                 self.transfer_progress_phase = (self.transfer_progress_phase + 0.025) % 1.0;
                 let defender_task = self.poll_defender_messages();
                 self.poll_duplicate_cleanup_messages();
+                self.poll_storage_analysis_messages();
                 let mut tasks = vec![
                     defender_task,
                     self.poll_transfer_messages(),
@@ -3854,6 +4207,62 @@ impl BExplorerIced {
                     Task::none()
                 }
             }
+            Message::StorageAnalysisWindowDrag => {
+                if let Some(id) = self.storage_analysis_window_id {
+                    window::drag(id)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::StorageAnalysisWindowMinimize => {
+                if let Some(id) = self.storage_analysis_window_id {
+                    window::minimize(id, true)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::StorageAnalysisWindowMaximize => {
+                let Some(id) = self.storage_analysis_window_id else {
+                    return Task::none();
+                };
+                let Some(state) = self.storage_analysis.as_mut() else {
+                    return Task::none();
+                };
+                state.window_maximized = !state.window_maximized;
+                Task::batch([
+                    window::maximize(id, state.window_maximized),
+                    self.apply_window_corners_task_for(id),
+                ])
+            }
+            Message::StorageAnalysisWindowMaximizedState(id, maximized) => {
+                if self.storage_analysis_window_id != Some(id) {
+                    return Task::none();
+                }
+                let changed = self
+                    .storage_analysis
+                    .as_ref()
+                    .is_some_and(|state| state.window_maximized != maximized);
+                if let Some(state) = self.storage_analysis.as_mut() {
+                    state.window_maximized = maximized;
+                }
+                if changed {
+                    self.apply_window_corners_task_for(id)
+                } else {
+                    Task::none()
+                }
+            }
+            Message::StorageAnalysisWindowResize(direction) => {
+                if let Some(id) = self.storage_analysis_window_id
+                    && self
+                        .storage_analysis
+                        .as_ref()
+                        .is_some_and(|state| !state.window_maximized)
+                {
+                    window::drag_resize(id, direction)
+                } else {
+                    Task::none()
+                }
+            }
             Message::DuplicateWindowMaximize => {
                 let Some(id) = self.duplicate_window_id else {
                     return Task::none();
@@ -3943,7 +4352,8 @@ impl BExplorerIced {
             Message::WindowResized(id, size) => {
                 if self.main_window_id == Some(id) {
                     self.window_size = size;
-                    self.config.window_size = [size.width, size.height];
+                    let remember_size = window::is_maximized(id)
+                        .map(move |maximized| Message::MainWindowSizeObserved(id, size, maximized));
                     #[cfg(target_os = "windows")]
                     {
                         // Native WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE now owns
@@ -3952,11 +4362,12 @@ impl BExplorerIced {
                         // after the native settle (including one induced by
                         // SetWindowRgn), so it must not invalidate the pending
                         // Acrylic recovery.
-                        Task::none()
+                        remember_size
                     }
                     #[cfg(not(target_os = "windows"))]
                     {
                         Task::batch([
+                            remember_size,
                             self.apply_window_corners_only_task_for(id),
                             self.sync_main_window_maximized_task(id),
                         ])
@@ -3998,6 +4409,16 @@ impl BExplorerIced {
                             Message::DuplicateWindowMaximizedState(id, maximized)
                         }),
                     ])
+                } else if self.storage_analysis_window_id == Some(id) {
+                    if let Some(state) = self.storage_analysis.as_mut() {
+                        state.window_size = size;
+                    }
+                    Task::batch([
+                        self.apply_window_corners_only_task_for(id),
+                        window::is_maximized(id).map(move |maximized| {
+                            Message::StorageAnalysisWindowMaximizedState(id, maximized)
+                        }),
+                    ])
                 } else if self.is_properties_window(id) {
                     #[cfg(target_os = "linux")]
                     {
@@ -4016,11 +4437,21 @@ impl BExplorerIced {
                     || self.archive_window_id == Some(id)
                     || self.defender_window_id == Some(id)
                     || self.duplicate_window_id == Some(id)
+                    || self.storage_analysis_window_id == Some(id)
                 {
                     self.apply_window_corners_only_task_for(id)
                 } else {
                     Task::none()
                 }
+            }
+            Message::MainWindowSizeObserved(id, observed_size, maximized) => {
+                if self.main_window_id == Some(id)
+                    && let Some(size) =
+                        remembered_main_window_size(self.window_size, observed_size, maximized)
+                {
+                    self.config.window_size = size;
+                }
+                Task::none()
             }
             Message::WindowUnfocused(id) => {
                 if self.main_window_id == Some(id) {
@@ -4114,12 +4545,7 @@ impl BExplorerIced {
                 }
             }
             #[cfg(target_os = "windows")]
-            Message::WindowsWindowAppearanceSettled(
-                generation,
-                revision,
-                maximized,
-                refresh_backdrop,
-            ) => {
+            Message::WindowsWindowAppearanceSettled(generation, revision, maximized) => {
                 let Some(id) = self.main_window_id else {
                     return Task::none();
                 };
@@ -4127,10 +4553,30 @@ impl BExplorerIced {
                     return Task::none();
                 }
                 self.windows_native_appearance_generation = generation;
+                if !windows_appearance_event_is_current(
+                    generation,
+                    crate::platform::main_window_appearance_generation(),
+                    revision,
+                    crate::platform::main_window_appearance_revision(),
+                ) || !crate::platform::main_window_region_update_is_current(revision)
+                {
+                    // The bridge can deliver a coalesced settle after a newer
+                    // minimize/restore or Snap revision has already opened, or
+                    // while a second geometry signal is debouncing within the
+                    // same revision.
+                    // Consume its generation baseline, but never let stale
+                    // geometry change the logical maximize state or HRGN.
+                    return Task::none();
+                }
 
                 let pending = self.pending_window_maximized_appearance;
                 let completes_pending = pending.is_some_and(|transition| {
                     windows_maximize_transition_completed(transition, generation, maximized)
+                });
+                let pending_watchdog = pending.filter(|_| !completes_pending).map(|transition| {
+                    Task::perform(delay(WINDOWS_MAXIMIZE_APPEARANCE_WATCHDOG), move |_| {
+                        Message::WindowMaximizeAppearanceWatchdog(id, transition.epoch)
+                    })
                 });
                 if pending.is_none() || completes_pending {
                     self.pending_window_maximized_appearance = None;
@@ -4141,71 +4587,44 @@ impl BExplorerIced {
                     }
                 }
 
-                let region = self.apply_main_window_region_task_for(id, revision, maximized);
-                if windows_backdrop_refresh_is_due(
-                    refresh_backdrop,
-                    self.windows_pending_backdrop_refresh.is_some(),
-                ) {
-                    // DWM can rebuild the system-backdrop visual after WM_SIZE
-                    // has already completed. Restore the final HRGN now, then
-                    // reassert Acrylic only after the newest compositor
-                    // transition. An existing refresh debt remains latched
-                    // even when this particular settle did not request one.
-                    let (_, settle) = self.next_windows_backdrop_refresh(revision, maximized);
-                    region.chain(settle)
+                // The system backdrop is a persistent HWND attribute. Geometry
+                // changes reconcile only the final HRGN; rewriting Acrylic on
+                // every maximize/Snap creates extra compositor transitions and
+                // can consume a newer transition with an older async result.
+                let region = self.apply_main_window_region_task_for(id, revision, maximized, 0);
+                if let Some(watchdog) = pending_watchdog {
+                    Task::batch([region, watchdog])
                 } else {
                     region
                 }
             }
             #[cfg(target_os = "windows")]
-            Message::WindowsBackdropRefreshReady(token, revision, attempt) => {
-                let Some(refresh) = self.windows_pending_backdrop_refresh.filter(|refresh| {
-                    refresh.token == token
-                        && refresh.revision == revision
-                        && refresh.attempt == attempt
-                }) else {
+            Message::WindowsMainWindowRegionFailed(revision, maximized, attempt) => {
+                if !crate::platform::main_window_region_update_is_current(revision) {
                     return Task::none();
-                };
-                self.main_window_id
-                    .map(|id| self.refresh_window_backdrop_task_for(id, refresh))
-                    .unwrap_or_else(Task::none)
+                }
+                if attempt >= WINDOWS_REGION_RECONCILE_MAX_RETRIES {
+                    // Do not leave activation redraws polling forever if GDI
+                    // repeatedly refuses the final HRGN. The next native
+                    // geometry transition will retry from an invalid cache.
+                    crate::platform::abandon_main_window_region_update(revision);
+                    return Task::none();
+                }
+                let next_attempt = attempt.saturating_add(1);
+                Task::perform(delay(WINDOWS_REGION_RECONCILE_RETRY), move |_| {
+                    Message::WindowsMainWindowRegionRetry(revision, maximized, next_attempt)
+                })
             }
             #[cfg(target_os = "windows")]
-            Message::WindowsBackdropRefreshFinished(token, revision, attempt, active) => {
-                let Some(refresh) = self.windows_pending_backdrop_refresh.filter(|refresh| {
-                    refresh.token == token
-                        && refresh.revision == revision
-                        && refresh.attempt == attempt
-                }) else {
-                    return Task::none();
-                };
-                if let Some(active) = active {
-                    self.windows_pending_backdrop_refresh = None;
-                    self.config.vibrancy_active = active;
+            Message::WindowsMainWindowRegionRetry(revision, maximized, attempt) => {
+                if !crate::platform::main_window_region_update_is_current(revision) {
                     return Task::none();
                 }
-
-                if crate::platform::main_window_region_update_is_current(revision)
-                    && refresh.attempt < WINDOWS_BACKDROP_REFRESH_MAX_RETRIES
-                    && let Some(id) = self.main_window_id
-                {
-                    // Retry both pieces: a transient SetWindowRgn failure keeps
-                    // the region marked suspended, while a transient DWM
-                    // failure leaves the region ready but Acrylic unconfirmed.
-                    let region = self.apply_main_window_region_task_for(
-                        id,
-                        refresh.revision,
-                        refresh.maximized,
-                    );
-                    let retry = self.retry_windows_backdrop_refresh(refresh);
-                    return region.chain(retry);
-                }
-                if crate::platform::main_window_region_update_is_current(revision) {
-                    crate::utils::log::info(
-                        "Native window appearance recovery exhausted its bounded retries; keeping the request latched for the next settle",
-                    );
-                }
-                Task::none()
+                self.main_window_id
+                    .map(|id| {
+                        self.apply_main_window_region_task_for(id, revision, maximized, attempt)
+                    })
+                    .unwrap_or_else(Task::none)
             }
             #[cfg(target_os = "windows")]
             Message::WindowMaximizeAppearanceWatchdog(id, epoch) => {
@@ -4217,12 +4636,16 @@ impl BExplorerIced {
                 {
                     return Task::none();
                 }
-                window::is_maximized(id).map(move |maximized| {
-                    Message::WindowMaximizeAppearanceWatchdogState(id, epoch, maximized)
+                window::is_minimized(id).then(move |minimized| {
+                    window::is_maximized(id).map(move |maximized| {
+                        Message::WindowMaximizeAppearanceWatchdogState(
+                            id, epoch, maximized, minimized,
+                        )
+                    })
                 })
             }
             #[cfg(target_os = "windows")]
-            Message::WindowMaximizeAppearanceWatchdogState(id, epoch, maximized) => {
+            Message::WindowMaximizeAppearanceWatchdogState(id, epoch, maximized, minimized) => {
                 if self.main_window_id != Some(id)
                     || self.window_appearance_epoch != epoch
                     || self
@@ -4230,6 +4653,17 @@ impl BExplorerIced {
                         .is_none_or(|transition| transition.epoch != epoch)
                 {
                     return Task::none();
+                }
+                if minimized == Some(true) {
+                    // A restore publishes a fresh native settle. Keep the
+                    // optimistic transition for that event without polling a
+                    // hidden window indefinitely.
+                    return Task::none();
+                }
+                if !crate::platform::main_window_appearance_is_settled() {
+                    return Task::perform(delay(WINDOWS_MAXIMIZE_APPEARANCE_WATCHDOG), move |_| {
+                        Message::WindowMaximizeAppearanceWatchdog(id, epoch)
+                    });
                 }
 
                 // Windows did not produce another matching resize/state
@@ -4242,10 +4676,10 @@ impl BExplorerIced {
                 if maximized {
                     self.resize_drag = None;
                 }
-                let revision = crate::platform::main_window_appearance_revision();
-                let region = self.apply_main_window_region_task_for(id, revision, maximized);
-                let (_, settle) = self.next_windows_backdrop_refresh(revision, maximized);
-                region.chain(settle)
+                // This watchdog repairs only optimistic Iced state. Native
+                // geometry and HRGN remain owned by the debounced settle, so a
+                // slow Snap animation cannot be clipped at the 240 ms mark.
+                Task::none()
             }
             Message::WindowClose => {
                 #[cfg(target_os = "linux")]

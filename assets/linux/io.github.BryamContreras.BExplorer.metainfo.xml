@@ -25,6 +25,17 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.5" date="2026-07-31">
+      <description>
+        <p>Storage analysis, large-folder performance, keyboard navigation, and interface refinement update.</p>
+        <ul>
+          <li>Added cross-platform storage analysis with interactive category, extension, and duplicate-usage summaries.</li>
+          <li>Virtualized file, search, duplicate-cleanup, and analysis views for responsive large folders.</li>
+          <li>Expanded keyboard navigation, selection, shortcuts, and delayed rename behavior across every view.</li>
+          <li>Improved Windows acrylic stability, responsive tabs, settings, tooltips, columns, and adaptive scrollbars.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.4" date="2026-07-27">
       <description>
         <p>Cross-platform storage, media, background operations, and interface refinement update.</p>

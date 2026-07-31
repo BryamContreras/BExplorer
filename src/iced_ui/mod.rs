@@ -33,6 +33,9 @@ use crate::fs::defender::{self, DefenderJob};
 use crate::fs::defender::{DefenderMessage, DefenderProgress, DefenderScanState, DefenderSummary};
 use crate::fs::duplicates::{DuplicateFile, DuplicateScanEvent};
 use crate::fs::explorer::{self, DriveKind, EntryKind, FileCategory, FileEntry};
+use crate::fs::storage_analysis::{
+    StorageAnalysisEvent, StorageAnalysisSummary, StorageCategory, StorageFile, StorageFiles,
+};
 use crate::fs::transfer_queue::{
     self, ConflictPolicy, ElevatedTransferResult, TransferCompletedRoot, TransferControl,
     TransferJob, TransferKind, TransferMessage, TransferProgress, TransferState,
@@ -51,6 +54,7 @@ mod navigation;
 #[cfg(target_os = "linux")]
 mod properties;
 mod search_state;
+mod storage_analysis;
 mod update;
 mod view;
 
@@ -60,6 +64,7 @@ const THIS_PC_LABEL: &str = "This PC";
 const TITLE_HEIGHT: f32 = 38.0;
 const TITLE_BUTTON_WIDTH: f32 = 32.0;
 const TITLE_BUTTON_HEIGHT: f32 = 31.0;
+const WINDOW_CAPTION_BUTTON_WIDTH: f32 = TITLE_BUTTON_WIDTH + (TITLE_HEIGHT - TITLE_BUTTON_HEIGHT);
 const TITLE_BUTTON_GAP: f32 = 3.0;
 const TITLE_ICON_SIZE: f32 = 20.0;
 const TITLE_TAB_START_PADDING: f32 = 12.0;
@@ -101,11 +106,11 @@ const POPUP_ANIMATION_RESPONSE: f32 = 30.0;
 const CONTEXT_MENU_ANIMATION_RESPONSE: f32 = 64.0;
 const CONTEXT_MENU_INITIAL_SCALE: f32 = 0.98;
 #[cfg(target_os = "windows")]
-const WINDOWS_BACKDROP_REFRESH_SETTLE: Duration = Duration::from_millis(160);
-#[cfg(target_os = "windows")]
 const WINDOWS_MAXIMIZE_APPEARANCE_WATCHDOG: Duration = Duration::from_millis(240);
 #[cfg(target_os = "windows")]
-const WINDOWS_BACKDROP_REFRESH_MAX_RETRIES: u8 = 3;
+const WINDOWS_REGION_RECONCILE_RETRY: Duration = Duration::from_millis(32);
+#[cfg(target_os = "windows")]
+const WINDOWS_REGION_RECONCILE_MAX_RETRIES: u8 = 3;
 const SPLIT_DIVIDER_WIDTH: f32 = 6.0;
 const SPLIT_MIN_RATIO: f32 = 0.24;
 const SPLIT_MAX_RATIO: f32 = 0.76;
@@ -126,15 +131,6 @@ struct WindowsMaximizeTransition {
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct WindowsBackdropRefresh {
-    token: u64,
-    revision: u64,
-    maximized: bool,
-    attempt: u8,
-}
-
-#[cfg(target_os = "windows")]
 fn windows_maximize_transition_completed(
     transition: WindowsMaximizeTransition,
     generation: u64,
@@ -144,8 +140,16 @@ fn windows_maximize_transition_completed(
 }
 
 #[cfg(target_os = "windows")]
-fn windows_backdrop_refresh_is_due(requested: bool, pending: bool) -> bool {
-    requested || pending
+fn windows_appearance_event_is_current(
+    event_generation: u64,
+    current_generation: u64,
+    event_revision: u64,
+    current_revision: u64,
+) -> bool {
+    event_generation != 0
+        && event_generation == current_generation
+        && event_revision != 0
+        && event_revision == current_revision
 }
 
 #[cfg(target_os = "windows")]
@@ -154,6 +158,15 @@ fn windows_maximized_visual_state(reported_maximized: bool, pending_target: Opti
     // pressed. Keep painting the old material density until the native
     // maximize/restore transaction has actually settled.
     pending_target.map_or(reported_maximized, |target| !target)
+}
+
+fn remembered_main_window_size(
+    current_size: Size,
+    observed_size: Size,
+    maximized: bool,
+) -> Option<[f32; 2]> {
+    (!maximized && current_size == observed_size)
+        .then_some([observed_size.width, observed_size.height])
 }
 
 const DETAIL_ROW_HEIGHT: f32 = 26.0;
@@ -168,10 +181,14 @@ const DETAIL_SIZE_MAX_WIDTH: f32 = 132.0;
 const DETAIL_DATE_MIN_WIDTH: f32 = 132.0;
 const DETAIL_DATE_MAX_WIDTH: f32 = 196.0;
 const DETAIL_COLUMN_HANDLE_WIDTH: f32 = 6.0;
-const INITIAL_RENDER_LIMIT: usize = 500;
-const RENDER_BATCH_SIZE: usize = 500;
+const VIRTUAL_TABLE_FALLBACK_ROWS: f32 = 60.0;
+const VIRTUAL_TABLE_OVERSCAN_SCREENS: f32 = 1.5;
+const VIRTUAL_TABLE_MAX_VELOCITY_SCREENS: f32 = 3.0;
 const MAX_SEARCH_EVENTS_PER_TICK: usize = 2;
 const STARTUP_BUSY_DELAY: Duration = Duration::from_millis(400);
+// Wait just beyond the double-click window before turning a second, slow
+// click on the selected entry into a rename request.
+const ENTRY_CLICK_RENAME_DELAY: Duration = Duration::from_millis(600);
 const RUBBER_BAND_MIN_SIZE: f32 = 4.0;
 const TRANSFER_MAX_PARALLEL: usize = 3;
 const TRANSFER_CARD_HEIGHT: f32 = 96.0;
@@ -200,9 +217,18 @@ const DUPLICATE_WINDOW_WIDTH: f32 = 1_080.0;
 const DUPLICATE_WINDOW_HEIGHT: f32 = 680.0;
 const DUPLICATE_TABLE_HEADER_HEIGHT: f32 = 34.0;
 const DUPLICATE_TABLE_ROW_HEIGHT: f32 = 34.0;
-const DUPLICATE_TABLE_COLUMN_WIDTHS: [f32; 6] = [250.0, 105.0, 180.0, 205.0, 180.0, 220.0];
-const DUPLICATE_TABLE_COLUMN_MIN_WIDTHS: [f32; 6] = [190.0, 70.0, 125.0, 125.0, 135.0, 150.0];
+const DUPLICATE_TABLE_COLUMN_WIDTHS: [f32; 7] = [250.0, 150.0, 105.0, 180.0, 205.0, 180.0, 220.0];
+const DUPLICATE_TABLE_COLUMN_MIN_WIDTHS: [f32; 7] =
+    [190.0, 110.0, 70.0, 125.0, 125.0, 135.0, 150.0];
 const DUPLICATE_TABLE_COLUMN_HANDLE_WIDTH: f32 = 7.0;
+const STORAGE_CATEGORY_TABLE_COLUMN_WIDTHS: [f32; 6] = [250.0, 150.0, 105.0, 180.0, 205.0, 220.0];
+const STORAGE_CATEGORY_TABLE_COLUMN_MIN_WIDTHS: [f32; 6] =
+    [190.0, 110.0, 70.0, 125.0, 125.0, 150.0];
+const STORAGE_CATEGORY_COLOR_COUNT: usize = StorageCategory::ALL.len();
+type StorageCategoryColors = [Color; STORAGE_CATEGORY_COLOR_COUNT];
+const STORAGE_ANALYSIS_WINDOW_WIDTH: f32 = 900.0;
+const STORAGE_ANALYSIS_WINDOW_HEIGHT: f32 = 640.0;
+const SETTINGS_PANEL_WIDTH: f32 = 900.0;
 const COLOR_PICKER_WIDTH: f32 = 290.0;
 const COLOR_PICKER_PLANE_WIDTH: f32 = 260.0;
 const COLOR_PICKER_PLANE_HEIGHT: f32 = 210.0;
@@ -235,20 +261,34 @@ fn duplicate_table_header_scroll_id() -> Id {
     Id::new("duplicate-table-header-scroll")
 }
 
+fn storage_category_table_header_scroll_id() -> Id {
+    Id::new("storage-category-table-header-scroll")
+}
+
+fn storage_category_table_scroll_id() -> Id {
+    Id::new("storage-category-table-scroll")
+}
+
+fn storage_overview_extension_scroll_id() -> Id {
+    Id::new("storage-overview-extension-scroll")
+}
+
 fn duplicate_table_column_min_width(column: usize, font_size: f32, spanish: bool) -> f32 {
     let label = match (column, spanish) {
         (0, true) => "Nombre",
         (0, false) => "Name",
-        (1, true) => "Tamaño",
-        (1, false) => "Size",
-        (2, true) => "Fecha de creación",
-        (2, false) => "Creation date",
-        (3, true) => "Fecha de modificación",
-        (3, false) => "Modification date",
-        (4, true) => "Coincidencia",
-        (4, false) => "Match",
-        (5, true) => "Ubicación",
-        (5, false) => "Location",
+        (1, true) => "Tipo",
+        (1, false) => "Type",
+        (2, true) => "Tamaño",
+        (2, false) => "Size",
+        (3, true) => "Fecha de creación",
+        (3, false) => "Creation date",
+        (4, true) => "Fecha de modificación",
+        (4, false) => "Modification date",
+        (5, true) => "Coincidencia",
+        (5, false) => "Match",
+        (6, true) => "Ubicación",
+        (6, false) => "Location",
         _ => "",
     };
     let content_extra = if column == 0 {
@@ -259,7 +299,7 @@ fn duplicate_table_column_min_width(column: usize, font_size: f32, spanish: bool
     // Date headers are long but their values keep a fixed compact format. Once
     // the resize handle preserves its real width they only need a modest font
     // reserve, not the deliberately generous allowance used by other labels.
-    let (font_reserve, fixed_reserve) = if matches!(column, 2 | 3) {
+    let (font_reserve, fixed_reserve) = if matches!(column, 3 | 4) {
         (1.08, 4.0)
     } else {
         (1.35, 8.0)
@@ -272,6 +312,48 @@ fn duplicate_table_column_min_width(column: usize, font_size: f32, spanish: bool
         + content_extra;
     scaled_ui_metric(
         DUPLICATE_TABLE_COLUMN_MIN_WIDTHS
+            .get(column)
+            .copied()
+            .unwrap_or_default(),
+        font_size,
+    )
+    .max(header_width.ceil())
+}
+
+fn storage_category_table_column_min_width(column: usize, font_size: f32, spanish: bool) -> f32 {
+    let label = match (column, spanish) {
+        (0, true) => "Nombre",
+        (0, false) => "Name",
+        (1, true) => "Tipo",
+        (1, false) => "Type",
+        (2, true) => "Tamaño",
+        (2, false) => "Size",
+        (3, true) => "Fecha de creación",
+        (3, false) => "Creation date",
+        (4, true) => "Fecha de modificación",
+        (4, false) => "Modification date",
+        (5, true) => "Ubicación",
+        (5, false) => "Location",
+        _ => "",
+    };
+    let content_extra = if column == 0 {
+        scaled_ui_metric(24.0 + 8.0, font_size)
+    } else {
+        0.0
+    };
+    let (font_reserve, fixed_reserve) = if matches!(column, 3 | 4) {
+        (1.08, 4.0)
+    } else {
+        (1.35, 8.0)
+    };
+    let rendered_label_reserve =
+        estimated_ui_text_width(label, font_size) * font_reserve + fixed_reserve;
+    let header_width = rendered_label_reserve
+        + scaled_ui_metric(8.0, font_size) * 2.0
+        + scaled_ui_metric(DUPLICATE_TABLE_COLUMN_HANDLE_WIDTH, font_size)
+        + content_extra;
+    scaled_ui_metric(
+        STORAGE_CATEGORY_TABLE_COLUMN_MIN_WIDTHS
             .get(column)
             .copied()
             .unwrap_or_default(),
@@ -350,6 +432,20 @@ fn fitted_tab_width(
     }
     let reserved = add_button_width + spacing * tab_count as f32;
     ((area_width - reserved).max(0.0) / tab_count as f32).clamp(minimum_width, preferred_width)
+}
+
+fn split_title_primary_width(
+    window_width: f32,
+    title_start: f32,
+    content_start: f32,
+    ratio: f32,
+    divider_width: f32,
+) -> f32 {
+    let title_area_width = (window_width - title_start).max(1.0);
+    let maximum = (title_area_width - divider_width - 1.0).max(1.0);
+    let content_width = (window_width - content_start - divider_width).max(1.0);
+    let divider_x = content_start + content_width * ratio.clamp(0.0, 1.0);
+    (divider_x - title_start).clamp(1.0, maximum)
 }
 
 fn adaptive_text_slot_width(label: &str, font_size: f32, minimum: f32) -> f32 {
@@ -478,9 +574,38 @@ fn context_submenu_parent_offset(
         + preceding_children as f32 * CHILD_SPACING
 }
 
+fn context_tools_submenu_parent_offset(
+    is_sidebar_drive: bool,
+    drive_entry: bool,
+    extra_archive_rows: usize,
+    font_size: f32,
+) -> f32 {
+    if is_sidebar_drive {
+        context_submenu_parent_offset(false, 0, 0, font_size)
+    } else if drive_entry {
+        context_submenu_parent_offset(true, 1, 1, font_size)
+    } else {
+        context_submenu_parent_offset(true, 3 + extra_archive_rows, 2, font_size)
+    }
+}
+
+fn context_tools_commands(
+    storage_analysis_available: bool,
+    duplicate_cleanup_available: bool,
+) -> Vec<ContextCommand> {
+    let mut commands = Vec::with_capacity(2);
+    if storage_analysis_available {
+        commands.push(ContextCommand::StorageAnalysis);
+    }
+    if duplicate_cleanup_available {
+        commands.push(ContextCommand::DuplicateCleanup);
+    }
+    commands
+}
+
 fn adaptive_menu_item_height(label: &str, font_size: f32, menu_width: f32) -> f32 {
     let available_width = (menu_width - 54.0).max(32.0);
-    let estimated_width = label.chars().count() as f32 * (font_size * 0.58).max(1.0);
+    let estimated_width = estimated_ui_text_width(label, font_size);
     let line_count = (estimated_width / available_width).ceil().clamp(1.0, 2.0);
     scaled_ui_metric(32.0, font_size).max(ui_text_line_height(font_size) * line_count + 10.0)
 }
@@ -506,15 +631,21 @@ fn stacked_text_control_height(base: f32, font_size: f32) -> f32 {
     scaled_ui_metric(base, font_size).max(content_height)
 }
 
-fn settings_panel_height(font_size: f32, window_height: f32) -> f32 {
+fn settings_panel_height(font_size: f32, window_height: f32, show_vibrancy_intensity: bool) -> f32 {
     let stacked_height = stacked_text_control_height(44.0, font_size);
     let stacked_height_extra = (stacked_height - scaled_ui_metric(44.0, font_size)).max(0.0);
-    let desired_height = scaled_ui_metric(620.0, font_size) + stacked_height_extra * 7.0;
+    let intensity_height = if show_vibrancy_intensity {
+        scaled_ui_metric(50.0, font_size)
+    } else {
+        0.0
+    };
+    let desired_height =
+        scaled_ui_metric(620.0, font_size) + stacked_height_extra * 7.0 + intensity_height;
     desired_height.min((window_height - TITLE_HEIGHT - 24.0).max(320.0))
 }
 
 fn shortcuts_panel_height(font_size: f32) -> f32 {
-    470.0 + ui_density_level(font_size) * 12.0
+    520.0 + ui_density_level(font_size) * 12.0
 }
 
 fn about_panel_height(font_size: f32) -> f32 {
@@ -538,6 +669,17 @@ fn keep_process_after_main_window_closes(
     detach_requested || operations_in_progress
 }
 
+fn storage_analysis_polling_required(
+    phase: StorageAnalysisPhase,
+    duplicate_phase: StorageDuplicateEstimatePhase,
+) -> bool {
+    phase == StorageAnalysisPhase::Scanning
+        || matches!(
+            duplicate_phase,
+            StorageDuplicateEstimatePhase::Counting | StorageDuplicateEstimatePhase::Scanning
+        )
+}
+
 fn should_exit_detached_operation_host(
     detached: bool,
     main_window_open: bool,
@@ -552,6 +694,28 @@ fn should_exit_detached_operation_host(
 
 // Kept in the parent module so all UI workers share the same private state types.
 include!("state.rs");
+
+fn entry_click_matches(click: &EntryClickState, pane: PaneId, path: &Path) -> bool {
+    click.pane == pane && click.path == path
+}
+
+fn entry_click_requests_rename(
+    click: Option<&EntryClickState>,
+    pane: PaneId,
+    path: &Path,
+    already_selected: bool,
+) -> bool {
+    already_selected && click.is_some_and(|click| entry_click_matches(click, pane, path))
+}
+
+fn entry_click_is_current(
+    click: Option<&EntryClickState>,
+    pane: PaneId,
+    path: &Path,
+    clicked_at: Instant,
+) -> bool {
+    click.is_some_and(|click| entry_click_matches(click, pane, path) && click.at == clicked_at)
+}
 
 struct BExplorerIced {
     config: AppConfig,
@@ -593,6 +757,9 @@ struct BExplorerIced {
     context_send_to_submenu: bool,
     context_send_to_parent_hovered: bool,
     context_send_to_submenu_hovered: bool,
+    context_tools_submenu: bool,
+    context_tools_parent_hovered: bool,
+    context_tools_submenu_hovered: bool,
     context_extract_submenu: bool,
     context_new_submenu: bool,
     context_archive_parent_hovered: bool,
@@ -635,6 +802,8 @@ struct BExplorerIced {
     defender_threat_remediation_message: Option<(String, bool)>,
     duplicate_cleanup: Option<DuplicateCleanupState>,
     duplicate_window_id: Option<window::Id>,
+    storage_analysis: Option<StorageAnalysisState>,
+    storage_analysis_window_id: Option<window::Id>,
     rename_dialog: Option<RenameState>,
     archive_dialog: Option<ArchiveDialogState>,
     format_dialog: Option<FormatDialogState>,
@@ -688,10 +857,6 @@ struct BExplorerIced {
     window_appearance_epoch: u64,
     #[cfg(target_os = "windows")]
     windows_native_appearance_generation: u64,
-    #[cfg(target_os = "windows")]
-    windows_pending_backdrop_refresh: Option<WindowsBackdropRefresh>,
-    #[cfg(target_os = "windows")]
-    windows_backdrop_refresh_token: u64,
     startup: StartupState,
     main_window_id: Option<window::Id>,
     main_window_detached_for_operations: bool,
@@ -737,7 +902,21 @@ fn input_event_message(event: Event, status: event::Status, window: window::Id) 
             ..
         // Widgets such as inline rename editors own their Enter key. Do not
         // emit a second global shortcut for a key they already captured.
-        }) if !repeat && status == event::Status::Ignored => {
+        }) if status == event::Status::Ignored
+            && (!repeat
+                || (!modifiers.control()
+                    && !modifiers.alt()
+                    && !modifiers.logo()
+                    && matches!(
+                        key.as_ref(),
+                        keyboard::Key::Named(
+                            keyboard::key::Named::ArrowUp
+                                | keyboard::key::Named::ArrowDown
+                                | keyboard::key::Named::ArrowLeft
+                                | keyboard::key::Named::ArrowRight
+                        )
+                    ))) =>
+        {
             Some(Message::KeyPressed(window, key, physical_key, modifiers))
         }
         Event::Mouse(mouse::Event::ButtonPressed(_)) => {
@@ -767,6 +946,23 @@ fn duplicate_column_resize_event_message(
     }
 }
 
+fn storage_category_column_resize_event_message(
+    event: Event,
+    _status: event::Status,
+    window: window::Id,
+) -> Option<Message> {
+    match event {
+        Event::Mouse(mouse::Event::CursorMoved { position }) => {
+            Some(Message::StorageCategoryResizePointerMoved(window, position))
+        }
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+        | Event::Mouse(mouse::Event::CursorLeft) => {
+            Some(Message::StorageCategoryResizeReleased(window))
+        }
+        _ => None,
+    }
+}
+
 fn pointer_moved_beyond(start: Point, current: Point, threshold: f32) -> bool {
     let x = current.x - start.x;
     let y = current.y - start.y;
@@ -778,6 +974,7 @@ fn popup_backdrop_region_for_screenshot(
     physical_size: Size<u32>,
     scale_factor: f32,
     font_size: f32,
+    show_vibrancy_intensity: bool,
 ) -> Rectangle {
     let scale = scale_factor.max(1.0);
     let window_width = physical_size.width as f32 / scale;
@@ -850,8 +1047,8 @@ fn popup_backdrop_region_for_screenshot(
             height: (223.0 + density * 14.0).min(window_height),
         },
         PopupBackdropTarget::Settings => centered(
-            modal_text_surface_width(470.0, font_size, window_width),
-            settings_panel_height(font_size, window_height),
+            modal_text_surface_width(SETTINGS_PANEL_WIDTH, font_size, window_width),
+            settings_panel_height(font_size, window_height, show_vibrancy_intensity),
         ),
         PopupBackdropTarget::Shortcuts => centered(
             modal_text_surface_width(740.0, font_size, window_width),
@@ -863,7 +1060,8 @@ fn popup_backdrop_region_for_screenshot(
         ),
         PopupBackdropTarget::ColorPicker => {
             let mut region = centered(COLOR_PICKER_WIDTH, 400.0);
-            region.x = ((window_width - modal_text_surface_width(470.0, font_size, window_width))
+            region.x = ((window_width
+                - modal_text_surface_width(SETTINGS_PANEL_WIDTH, font_size, window_width))
                 * 0.5
                 + scaled_ui_metric(136.0, font_size))
             .min((window_width - region.width).max(0.0))
@@ -1178,6 +1376,9 @@ impl BExplorerIced {
             context_send_to_submenu: false,
             context_send_to_parent_hovered: false,
             context_send_to_submenu_hovered: false,
+            context_tools_submenu: false,
+            context_tools_parent_hovered: false,
+            context_tools_submenu_hovered: false,
             context_extract_submenu: false,
             context_new_submenu: false,
             context_archive_parent_hovered: false,
@@ -1220,6 +1421,8 @@ impl BExplorerIced {
             defender_threat_remediation_message: None,
             duplicate_cleanup: None,
             duplicate_window_id: None,
+            storage_analysis: None,
+            storage_analysis_window_id: None,
             rename_dialog: None,
             archive_dialog: None,
             format_dialog: None,
@@ -1262,10 +1465,6 @@ impl BExplorerIced {
             window_appearance_epoch: 0,
             #[cfg(target_os = "windows")]
             windows_native_appearance_generation: 0,
-            #[cfg(target_os = "windows")]
-            windows_pending_backdrop_refresh: None,
-            #[cfg(target_os = "windows")]
-            windows_backdrop_refresh_token: 0,
             startup,
             main_window_id: None,
             main_window_detached_for_operations: false,
@@ -1491,6 +1690,7 @@ impl BExplorerIced {
             self.defender_window_id,
             self.defender_threats_window_id,
             self.duplicate_window_id,
+            self.storage_analysis_window_id,
         ]
         .into_iter()
         .flatten()
@@ -1538,11 +1738,16 @@ impl BExplorerIced {
         self.duplicate_cleanup.is_some() && self.duplicate_window_id.is_some()
     }
 
+    fn storage_analysis_window_open(&self) -> bool {
+        self.storage_analysis.is_some() && self.storage_analysis_window_id.is_some()
+    }
+
     fn detachable_operations_in_progress(&self) -> bool {
         self.transfer_jobs_in_progress()
             || self.archive_jobs_in_progress()
             || self.defender_active()
             || self.duplicate_cleanup_window_open()
+            || self.storage_analysis_window_open()
     }
 
     fn operation_lifecycle_active(&self) -> bool {
@@ -1550,6 +1755,7 @@ impl BExplorerIced {
             || self.archive_active()
             || self.defender_active()
             || self.duplicate_cleanup_window_open()
+            || self.storage_analysis_window_open()
     }
 
     fn main_window_is_closing(&self) -> bool {
@@ -1601,6 +1807,11 @@ impl BExplorerIced {
             let (id, open) = window::open(duplicate_cleanup_window_settings(self.font_size()));
             self.duplicate_window_id = Some(id);
             tasks.push(open.map(Message::DuplicateCleanupWindowOpened));
+        }
+        if self.storage_analysis.is_some() && self.storage_analysis_window_id.is_none() {
+            let (id, open) = window::open(storage_analysis_window_settings(self.font_size()));
+            self.storage_analysis_window_id = Some(id);
+            tasks.push(open.map(Message::StorageAnalysisWindowOpened));
         }
         Task::batch(tasks)
     }
@@ -1684,6 +1895,7 @@ impl BExplorerIced {
             .or(self.defender_window_id)
             .or(self.defender_threats_window_id)
             .or(self.duplicate_window_id)
+            .or(self.storage_analysis_window_id)
         {
             self.close_application_task(id)
         } else {
@@ -1703,51 +1915,26 @@ impl BExplorerIced {
     }
 
     #[cfg(target_os = "windows")]
-    fn next_windows_backdrop_refresh(
-        &mut self,
-        revision: u64,
-        maximized: bool,
-    ) -> (WindowsBackdropRefresh, Task<Message>) {
-        self.windows_backdrop_refresh_token =
-            self.windows_backdrop_refresh_token.wrapping_add(1).max(1);
-        let refresh = WindowsBackdropRefresh {
-            token: self.windows_backdrop_refresh_token,
-            revision,
-            maximized,
-            attempt: 0,
-        };
-        self.windows_pending_backdrop_refresh = Some(refresh);
-        let task = Task::perform(delay(WINDOWS_BACKDROP_REFRESH_SETTLE), move |_| {
-            Message::WindowsBackdropRefreshReady(refresh.token, refresh.revision, refresh.attempt)
-        });
-        (refresh, task)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn retry_windows_backdrop_refresh(
-        &mut self,
-        mut refresh: WindowsBackdropRefresh,
-    ) -> Task<Message> {
-        refresh.attempt = refresh.attempt.saturating_add(1);
-        self.windows_pending_backdrop_refresh = Some(refresh);
-        Task::perform(delay(WINDOWS_BACKDROP_REFRESH_SETTLE), move |_| {
-            Message::WindowsBackdropRefreshReady(refresh.token, refresh.revision, refresh.attempt)
-        })
-    }
-
-    #[cfg(target_os = "windows")]
     fn apply_main_window_region_task_for(
         &self,
         id: window::Id,
         revision: u64,
         maximized: bool,
+        attempt: u8,
     ) -> Task<Message> {
         let radius = if maximized { 1 } else { WINDOW_RADIUS as u32 };
         window::run(id, move |native_window| {
-            if crate::platform::main_window_region_update_is_current(revision)
-                && let Ok(window_handle) = native_window.window_handle()
-            {
-                let _ = crate::platform::apply_main_window_region(&window_handle, radius);
+            if !crate::platform::main_window_region_update_is_current(revision) {
+                return Message::Noop;
+            }
+            let Ok(window_handle) = native_window.window_handle() else {
+                return Message::WindowsMainWindowRegionFailed(revision, maximized, attempt);
+            };
+            if let Err(error) = crate::platform::apply_main_window_region(&window_handle, radius) {
+                crate::utils::log::info(format!(
+                    "Native window region could not be reconciled: {error}"
+                ));
+                return Message::WindowsMainWindowRegionFailed(revision, maximized, attempt);
             }
             Message::Noop
         })
@@ -1782,6 +1969,11 @@ impl BExplorerIced {
                 .as_ref()
                 .map(|state| state.window_size)
                 .unwrap_or_else(|| duplicate_cleanup_window_size(self.font_size()))
+        } else if self.storage_analysis_window_id == Some(id) {
+            self.storage_analysis
+                .as_ref()
+                .map(|state| state.window_size)
+                .unwrap_or_else(|| storage_analysis_window_size(self.font_size()))
         } else if self.is_properties_window(id) {
             #[cfg(target_os = "linux")]
             {
@@ -1798,55 +1990,6 @@ impl BExplorerIced {
 
     fn apply_window_corners_only_task_for(&self, id: window::Id) -> Task<Message> {
         self.apply_window_appearance_task_for(id, WindowVibrancyUpdate::Skip)
-    }
-
-    #[cfg(target_os = "windows")]
-    fn refresh_window_backdrop_task_for(
-        &self,
-        id: window::Id,
-        refresh: WindowsBackdropRefresh,
-    ) -> Task<Message> {
-        let vibrancy = self.config.vibrancy;
-        let vibrancy_intensity = self.config.vibrancy_intensity;
-        let dark = self.is_dark_theme();
-        window::run(id, move |native_window| {
-            if !crate::platform::main_window_backdrop_update_is_current(refresh.revision) {
-                return Message::WindowsBackdropRefreshFinished(
-                    refresh.token,
-                    refresh.revision,
-                    refresh.attempt,
-                    None,
-                );
-            }
-            let active = match crate::platform::refresh_window_vibrancy(
-                native_window,
-                vibrancy,
-                vibrancy_intensity,
-                dark,
-            ) {
-                Ok(active) => active,
-                Err(error) => {
-                    // A transient DWM failure must not switch the Iced
-                    // surfaces to their opaque fallback or consume the
-                    // outstanding recovery request.
-                    crate::utils::log::info(format!(
-                        "Native window effect could not be restored: {error}"
-                    ));
-                    return Message::WindowsBackdropRefreshFinished(
-                        refresh.token,
-                        refresh.revision,
-                        refresh.attempt,
-                        None,
-                    );
-                }
-            };
-            Message::WindowsBackdropRefreshFinished(
-                refresh.token,
-                refresh.revision,
-                refresh.attempt,
-                Some(active),
-            )
-        })
     }
 
     fn prepare_native_file_drag_task_for(&self, id: window::Id) -> Task<Message> {
@@ -1938,6 +2081,11 @@ impl BExplorerIced {
                 .duplicate_cleanup
                 .as_ref()
                 .is_some_and(|state| state.window_maximized)
+            || self.storage_analysis_window_id == Some(id)
+                && self
+                    .storage_analysis
+                    .as_ref()
+                    .is_some_and(|state| state.window_maximized)
         {
             1.0
         } else {
@@ -2024,6 +2172,19 @@ impl BExplorerIced {
         } else {
             Subscription::none()
         };
+        let storage_category_column_resize_events = if self
+            .storage_analysis
+            .as_ref()
+            .is_some_and(|state| state.category_column_resize.is_some())
+        {
+            if self.storage_analysis_window_id.is_some() {
+                event::listen_with(storage_category_column_resize_event_message)
+            } else {
+                Subscription::none()
+            }
+        } else {
+            Subscription::none()
+        };
 
         let transfer_tick = if self.transfer_active()
             || self.archive_active()
@@ -2033,6 +2194,9 @@ impl BExplorerIced {
                     state.phase,
                     DuplicateCleanupPhase::Counting | DuplicateCleanupPhase::Scanning
                 )
+            })
+            || self.storage_analysis.as_ref().is_some_and(|state| {
+                storage_analysis_polling_required(state.phase, state.duplicate_estimate.phase)
             })
             || self.main_window_detached_for_operations
             || self.pending_main_window_reactivation
@@ -2109,6 +2273,7 @@ impl BExplorerIced {
             input_events,
             pointer_events,
             duplicate_column_resize_events,
+            storage_category_column_resize_events,
             transfer_tick,
             animation_frame,
             scrollbar_tick,
@@ -2125,8 +2290,47 @@ impl BExplorerIced {
 }
 
 #[cfg(test)]
+mod settings_layout_tests {
+    use super::*;
+
+    #[test]
+    fn visible_intensity_control_reserves_an_extra_settings_row() {
+        let without_intensity = settings_panel_height(14.0, 900.0, false);
+        let with_intensity = settings_panel_height(14.0, 900.0, true);
+
+        assert!(with_intensity >= without_intensity + 50.0);
+    }
+
+    #[test]
+    fn settings_height_still_respects_the_available_window() {
+        let available = 560.0 - TITLE_HEIGHT - 24.0;
+
+        assert_eq!(settings_panel_height(18.0, 560.0, true), available);
+    }
+}
+
+#[cfg(test)]
 mod address_focus_tests {
     use super::*;
+    use iced::keyboard::key::{Code, Physical};
+
+    fn key_pressed(
+        named: keyboard::key::Named,
+        code: Code,
+        modifiers: keyboard::Modifiers,
+        repeat: bool,
+    ) -> Event {
+        let key = keyboard::Key::Named(named);
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            modified_key: key.clone(),
+            key,
+            physical_key: Physical::Code(code),
+            location: keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat,
+        })
+    }
 
     #[test]
     fn every_mouse_press_requests_an_address_focus_check() {
@@ -2157,6 +2361,123 @@ mod address_focus_tests {
             Some(Message::WindowUnfocused(id)) if id == window
         ));
     }
+
+    #[test]
+    fn held_arrows_repeat_but_other_global_shortcuts_do_not() {
+        let window = window::Id::unique();
+        let repeated_arrow = input_event_message(
+            key_pressed(
+                keyboard::key::Named::ArrowDown,
+                Code::ArrowDown,
+                keyboard::Modifiers::SHIFT,
+                true,
+            ),
+            event::Status::Ignored,
+            window,
+        );
+        assert!(matches!(
+            repeated_arrow,
+            Some(Message::KeyPressed(id, ..)) if id == window
+        ));
+
+        let repeated_horizontal_arrow = input_event_message(
+            key_pressed(
+                keyboard::key::Named::ArrowRight,
+                Code::ArrowRight,
+                keyboard::Modifiers::empty(),
+                true,
+            ),
+            event::Status::Ignored,
+            window,
+        );
+        assert!(matches!(
+            repeated_horizontal_arrow,
+            Some(Message::KeyPressed(id, ..)) if id == window
+        ));
+
+        let repeated_delete = input_event_message(
+            key_pressed(
+                keyboard::key::Named::Delete,
+                Code::Delete,
+                keyboard::Modifiers::empty(),
+                true,
+            ),
+            event::Status::Ignored,
+            window,
+        );
+        assert!(repeated_delete.is_none());
+    }
+}
+
+#[cfg(test)]
+mod entry_click_tests {
+    use super::*;
+
+    #[test]
+    fn only_a_second_click_on_the_selected_entry_requests_rename() {
+        let path = PathBuf::from("document.txt");
+        let clicked_at = Instant::now();
+        let click = EntryClickState {
+            pane: PaneId::Primary,
+            path: path.clone(),
+            at: clicked_at,
+        };
+
+        assert!(entry_click_requests_rename(
+            Some(&click),
+            PaneId::Primary,
+            &path,
+            true,
+        ));
+        assert!(!entry_click_requests_rename(
+            None,
+            PaneId::Primary,
+            &path,
+            true,
+        ));
+        assert!(!entry_click_requests_rename(
+            Some(&click),
+            PaneId::Primary,
+            &path,
+            false,
+        ));
+        assert!(!entry_click_requests_rename(
+            Some(&click),
+            PaneId::Primary,
+            Path::new("other.txt"),
+            true,
+        ));
+    }
+
+    #[test]
+    fn delayed_rename_requires_the_original_click_to_still_be_current() {
+        let path = PathBuf::from("document.txt");
+        let clicked_at = Instant::now();
+        let click = EntryClickState {
+            pane: PaneId::Primary,
+            path: path.clone(),
+            at: clicked_at,
+        };
+
+        assert!(entry_click_is_current(
+            Some(&click),
+            PaneId::Primary,
+            &path,
+            clicked_at,
+        ));
+        assert!(!entry_click_is_current(
+            Some(&click),
+            PaneId::Primary,
+            &path,
+            clicked_at + Duration::from_millis(1),
+        ));
+        assert!(!entry_click_is_current(
+            Some(&click),
+            PaneId::Secondary,
+            &path,
+            clicked_at,
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2167,16 +2488,69 @@ mod context_layout_tests {
     fn submenu_offsets_align_with_their_parent_rows() {
         let font_size = 13.0;
         let open_with = context_submenu_parent_offset(true, 1, 1, font_size);
-        let send_to = context_submenu_parent_offset(true, 2, 1, font_size);
-        let archive = context_submenu_parent_offset(true, 2, 2, font_size);
-        let extract = context_submenu_parent_offset(true, 3, 2, font_size);
+        let compress = context_submenu_parent_offset(true, 2, 2, font_size);
+        let tools = context_submenu_parent_offset(true, 3, 2, font_size);
+        let extract = context_submenu_parent_offset(true, 4, 2, font_size);
 
         assert_eq!(
-            send_to - open_with,
+            compress - open_with,
+            context_menu_row_height(font_size) + 5.0
+        );
+        assert_eq!(tools - compress, context_menu_row_height(font_size) + 2.0);
+        assert_eq!(extract - tools, context_menu_row_height(font_size) + 2.0);
+    }
+
+    #[test]
+    fn optional_rows_keep_compress_tools_and_extract_aligned() {
+        let font_size = 13.0;
+        let row_step = context_menu_row_height(font_size) + 2.0;
+        let compress = context_submenu_parent_offset(true, 2, 2, font_size);
+        let tools = context_submenu_parent_offset(true, 3, 2, font_size);
+        let extract = context_submenu_parent_offset(true, 4, 2, font_size);
+        let compress_with_send_to = context_submenu_parent_offset(true, 3, 2, font_size);
+        let tools_with_send_to = context_submenu_parent_offset(true, 4, 2, font_size);
+        let extract_with_send_to = context_submenu_parent_offset(true, 5, 2, font_size);
+
+        assert_eq!(compress_with_send_to - compress, row_step);
+        assert_eq!(tools_with_send_to - tools, row_step);
+        assert_eq!(extract_with_send_to - extract, row_step);
+    }
+
+    #[test]
+    fn drive_tools_offsets_match_their_shorter_context_menus() {
+        let font_size = 13.0;
+        let regular_entry = context_tools_submenu_parent_offset(false, false, 0, font_size);
+        let regular_entry_with_optional_row =
+            context_tools_submenu_parent_offset(false, false, 1, font_size);
+        let table_drive = context_tools_submenu_parent_offset(false, true, 0, font_size);
+        let sidebar_drive = context_tools_submenu_parent_offset(true, true, 0, font_size);
+
+        assert!(regular_entry > table_drive);
+        assert_eq!(
+            regular_entry_with_optional_row - regular_entry,
             context_menu_row_height(font_size) + 2.0
         );
-        assert_eq!(archive - send_to, 3.0);
-        assert_eq!(extract - archive, context_menu_row_height(font_size) + 2.0);
+        assert!(table_drive > sidebar_drive);
+        assert_eq!(sidebar_drive, 4.0);
+    }
+
+    #[test]
+    fn storage_analysis_precedes_duplicate_cleanup_in_tools() {
+        assert_eq!(
+            context_tools_commands(true, true),
+            vec![
+                ContextCommand::StorageAnalysis,
+                ContextCommand::DuplicateCleanup,
+            ]
+        );
+        assert_eq!(
+            context_tools_commands(false, true),
+            vec![ContextCommand::DuplicateCleanup]
+        );
+        assert_eq!(
+            context_tools_commands(true, false),
+            vec![ContextCommand::StorageAnalysis]
+        );
     }
 
     #[test]
@@ -2213,12 +2587,57 @@ mod context_layout_tests {
             minimum
         );
     }
+
+    #[test]
+    fn split_title_divider_matches_content_with_or_without_sidebar() {
+        let window_width = 1_920.0;
+        let divider = 6.0;
+        let ratio = 0.5;
+
+        let visible_start = 200.0;
+        let visible_primary =
+            split_title_primary_width(window_width, visible_start, visible_start, ratio, divider);
+        let visible_content_divider =
+            visible_start + (window_width - visible_start - divider) * ratio;
+        assert!((visible_start + visible_primary - visible_content_divider).abs() < 0.01);
+
+        let hidden_title_start = 80.0;
+        let hidden_primary =
+            split_title_primary_width(window_width, hidden_title_start, 0.0, ratio, divider);
+        let hidden_content_divider = (window_width - divider) * ratio;
+        assert!((hidden_title_start + hidden_primary - hidden_content_divider).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod main_window_size_tests {
+    use super::*;
+
+    #[test]
+    fn only_the_latest_non_maximized_size_is_remembered() {
+        let normal = Size::new(1180.0, 720.0);
+        let maximized = Size::new(1920.0, 1040.0);
+
+        assert_eq!(
+            remembered_main_window_size(normal, normal, false),
+            Some([1180.0, 720.0])
+        );
+        assert_eq!(
+            remembered_main_window_size(maximized, maximized, true),
+            None
+        );
+        assert_eq!(
+            remembered_main_window_size(maximized, normal, false),
+            None,
+            "an older asynchronous size observation must not overwrite the live geometry"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_appearance_state_tests {
     use super::{
-        WindowsMaximizeTransition, windows_backdrop_refresh_is_due,
+        WindowsMaximizeTransition, windows_appearance_event_is_current,
         windows_maximize_transition_completed, windows_maximized_visual_state,
     };
 
@@ -2238,17 +2657,18 @@ mod windows_appearance_state_tests {
     }
 
     #[test]
-    fn backdrop_refresh_debt_survives_a_settle_without_a_new_request() {
-        assert!(windows_backdrop_refresh_is_due(false, true));
-        assert!(windows_backdrop_refresh_is_due(true, false));
-        assert!(!windows_backdrop_refresh_is_due(false, false));
-    }
-
-    #[test]
     fn acrylic_density_changes_only_after_native_maximize_settles() {
         assert!(!windows_maximized_visual_state(true, Some(true)));
         assert!(windows_maximized_visual_state(false, Some(false)));
         assert!(windows_maximized_visual_state(true, None));
         assert!(!windows_maximized_visual_state(false, None));
+    }
+
+    #[test]
+    fn queued_native_state_cannot_cross_a_newer_transition_revision() {
+        assert!(windows_appearance_event_is_current(8, 8, 12, 12));
+        assert!(!windows_appearance_event_is_current(7, 8, 12, 12));
+        assert!(!windows_appearance_event_is_current(8, 8, 11, 12));
+        assert!(!windows_appearance_event_is_current(0, 0, 0, 0));
     }
 }

@@ -203,6 +203,48 @@ pub(in crate::iced_ui) fn duplicate_cleanup_window_size(font_size: f32) -> Size 
     )
 }
 
+pub(in crate::iced_ui) fn storage_analysis_window_size(font_size: f32) -> Size {
+    Size::new(
+        adaptive_text_surface_width(STORAGE_ANALYSIS_WINDOW_WIDTH, font_size),
+        scaled_ui_metric(STORAGE_ANALYSIS_WINDOW_HEIGHT, font_size),
+    )
+}
+
+pub(in crate::iced_ui) fn storage_analysis_window_settings(font_size: f32) -> window::Settings {
+    window::Settings {
+        size: storage_analysis_window_size(font_size),
+        min_size: Some(storage_analysis_window_min_size(font_size)),
+        closeable: false,
+        decorations: false,
+        resizable: true,
+        transparent: true,
+        exit_on_close_request: false,
+        icon: app_window_icon(),
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific {
+            application_id: crate::platform::LINUX_APPLICATION_ID.into(),
+            ..window::settings::PlatformSpecific::default()
+        },
+        ..window::Settings::default()
+    }
+}
+
+pub(in crate::iced_ui) fn storage_analysis_window_min_size(font_size: f32) -> Size {
+    Size::new(
+        adaptive_text_surface_width(760.0, font_size),
+        scaled_ui_metric(520.0, font_size),
+    )
+}
+
+pub(in crate::iced_ui) fn sync_storage_analysis_window_constraints_task(
+    id: window::Id,
+    font_size: f32,
+) -> Task<Message> {
+    window::set_min_size(id, Some(storage_analysis_window_min_size(font_size)))
+        .chain(window::set_max_size(id, None))
+        .chain(window::set_resizable(id, true))
+}
+
 pub(in crate::iced_ui) fn duplicate_cleanup_window_settings(font_size: f32) -> window::Settings {
     window::Settings {
         size: duplicate_cleanup_window_size(font_size),
@@ -421,12 +463,9 @@ pub(in crate::iced_ui) fn windows_window_appearance_stream()
                     event.generation,
                     event.revision,
                     event.maximized,
-                    event.refresh_backdrop,
                 );
-                // This dedicated bridge thread must honor backpressure. The
-                // native snapshot contains a consumed cumulative refresh bit;
-                // dropping it merely because Iced's one-slot channel is full
-                // can leave Acrylic absent after a rapid series of Snaps.
+                // This dedicated bridge thread honors backpressure so the
+                // newest native settle cannot be dropped while Iced is busy.
                 if iced::futures::executor::block_on(iced::futures::SinkExt::send(
                     &mut output,
                     message,
@@ -508,9 +547,24 @@ pub(in crate::iced_ui) fn keyboard_shortcut_from_key(
         (ShortcutAction::GoBack, KeyboardShortcut::GoBack),
         (ShortcutAction::GoForward, KeyboardShortcut::GoForward),
         (ShortcutAction::Open, KeyboardShortcut::Open),
+        (
+            ShortcutAction::SwitchPaneFocus,
+            KeyboardShortcut::SwitchPaneFocus,
+        ),
+        (ShortcutAction::FocusSearch, KeyboardShortcut::FocusSearch),
     ]
     .into_iter()
-    .find_map(|(action, shortcut)| (shortcuts.binding(action) == &binding).then_some(shortcut))
+    .find_map(|(action, shortcut)| {
+        let configured = shortcuts.binding(action);
+        let exact = configured == &binding;
+        let reverse_pane_focus = modifiers.shift()
+            && action == ShortcutAction::SwitchPaneFocus
+            && !configured.shift
+            && configured.key == binding.key
+            && configured.ctrl == binding.ctrl
+            && configured.alt == binding.alt;
+        (exact || reverse_pane_focus).then_some(shortcut)
+    })
 }
 
 pub(in crate::iced_ui) fn rename_clipboard_shortcut_from_key(
@@ -544,6 +598,7 @@ pub(in crate::iced_ui) fn shortcut_binding_from_key(
         keyboard::Key::Named(Named::ArrowDown) => "ArrowDown".into(),
         keyboard::Key::Named(Named::ArrowLeft) => "ArrowLeft".into(),
         keyboard::Key::Named(Named::ArrowRight) => "ArrowRight".into(),
+        keyboard::Key::Named(Named::Tab) => "Tab".into(),
         keyboard::Key::Named(Named::F2) => "F2".into(),
         keyboard::Key::Named(Named::F5) => "F5".into(),
         _ => key.to_latin(physical_key)?.to_ascii_uppercase().to_string(),
@@ -594,5 +649,51 @@ mod rename_clipboard_shortcut_tests {
             Some(RenameClipboardShortcut::SelectAll)
         );
         assert_eq!(shortcut("z", Code::KeyZ), None);
+    }
+
+    #[test]
+    fn pane_focus_and_search_shortcuts_use_their_defaults() {
+        let shortcuts = ShortcutConfig::default();
+        assert_eq!(
+            keyboard_shortcut_from_key(
+                &keyboard::Key::Named(keyboard::key::Named::Tab),
+                Physical::Code(Code::Tab),
+                keyboard::Modifiers::empty(),
+                &shortcuts,
+            ),
+            Some(KeyboardShortcut::SwitchPaneFocus)
+        );
+        assert_eq!(
+            keyboard_shortcut_from_key(
+                &keyboard::Key::Named(keyboard::key::Named::Tab),
+                Physical::Code(Code::Tab),
+                keyboard::Modifiers::SHIFT,
+                &shortcuts,
+            ),
+            Some(KeyboardShortcut::SwitchPaneFocus)
+        );
+        assert_eq!(
+            keyboard_shortcut_from_key(
+                &keyboard::Key::Character("b".into()),
+                Physical::Code(Code::KeyB),
+                keyboard::Modifiers::CTRL,
+                &shortcuts,
+            ),
+            Some(KeyboardShortcut::FocusSearch)
+        );
+    }
+
+    #[test]
+    fn file_navigation_arrows_are_fixed_instead_of_configurable() {
+        let shortcuts = ShortcutConfig::default();
+        assert_eq!(
+            keyboard_shortcut_from_key(
+                &keyboard::Key::Named(keyboard::key::Named::ArrowUp),
+                Physical::Code(Code::ArrowUp),
+                keyboard::Modifiers::empty(),
+                &shortcuts,
+            ),
+            None
+        );
     }
 }
