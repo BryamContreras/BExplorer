@@ -238,8 +238,19 @@ impl BExplorerIced {
         let start = self.title_tabs_start_x();
         let area_width = (self.window_size.width - start).max(1.0);
         if let Some(split) = &self.split {
+            let content_start = if self.sidebar_is_rendered() && !self.uses_split_sidebars() {
+                self.current_sidebar_width()
+            } else {
+                0.0
+            };
+            let primary_width = split_title_primary_width(
+                self.window_size.width,
+                start,
+                content_start,
+                split.ratio,
+                SPLIT_DIVIDER_WIDTH,
+            );
             let available = (area_width - SPLIT_DIVIDER_WIDTH).max(1.0);
-            let primary_width = available * split.ratio;
             match pane {
                 PaneId::Primary => (start, primary_width),
                 PaneId::Secondary => (

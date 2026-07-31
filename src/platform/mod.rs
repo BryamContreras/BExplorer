@@ -13,9 +13,10 @@ pub mod macos;
 pub mod windows;
 #[cfg(target_os = "windows")]
 pub use windows::{
-    apply_main_window_region, main_window_appearance_generation, main_window_appearance_receiver,
-    main_window_appearance_revision, main_window_backdrop_update_is_current,
-    main_window_region_update_is_current, take_main_window_appearance_event,
+    abandon_main_window_region_update, apply_main_window_region, main_window_appearance_generation,
+    main_window_appearance_is_settled, main_window_appearance_receiver,
+    main_window_appearance_revision, main_window_region_update_is_current,
+    take_main_window_appearance_event,
 };
 
 use std::path::{Path, PathBuf};
@@ -419,31 +420,6 @@ fn apply_windows_acrylic<W: HasWindowHandle + ?Sized>(
         window_vibrancy::apply_acrylic(window, Some(color))
             .map(|_| true)
             .map_err(|error| crate::utils::errors::BExplorerError::Operation(error.to_string()))
-    }
-}
-
-#[cfg(target_os = "windows")]
-pub fn refresh_window_vibrancy<W: HasWindowHandle + HasDisplayHandle + ?Sized>(
-    window: &W,
-    mode: VibrancyMode,
-    intensity: u8,
-    dark: bool,
-) -> Result<bool> {
-    match mode {
-        VibrancyMode::None => Ok(false),
-        VibrancyMode::Mica | VibrancyMode::Blur => Ok(false),
-        VibrancyMode::Acrylic => {
-            // Reassert the existing backdrop after DWM finishes a native
-            // maximize/restore transition. Do not clear it first: clearing the
-            // system backdrop is the flash this recovery path must avoid.
-            if apply_windows_acrylic(window, windows_acrylic_color(intensity, dark))? {
-                Ok(true)
-            } else {
-                Err(crate::utils::errors::BExplorerError::Operation(
-                    "DWM did not confirm the requested Acrylic backdrop".to_owned(),
-                ))
-            }
-        }
     }
 }
 

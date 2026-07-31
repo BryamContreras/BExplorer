@@ -7,6 +7,30 @@ mod menus;
 mod shortcuts;
 use iced::widget::{column, pick_list, row};
 
+const EXPLORER_SCROLLBAR_RAIL_WIDTH: f32 = 10.0;
+const EXPLORER_SCROLLBAR_THUMB_WIDTH: f32 = 6.0;
+const EXPLORER_SCROLLBAR_HOVER_THUMB_WIDTH: f32 = 8.0;
+const EXPLORER_SCROLLBAR_MIN_LENGTH: f32 = 9.0;
+const EXPLORER_SCROLLBAR_HOVER_MIN_LENGTH: f32 = 18.0;
+
+fn explorer_scrollbar(expansion_progress: f32) -> scrollable::Scrollbar {
+    let progress = expansion_progress.clamp(0.0, 1.0);
+    let interpolate = |resting: f32, hovered: f32| resting + (hovered - resting) * progress;
+
+    scrollable::Scrollbar::default()
+        // The rail keeps a stable hit area, so the animation never relayouts
+        // the file surface while the thumb expands.
+        .width(EXPLORER_SCROLLBAR_RAIL_WIDTH)
+        .scroller_width(interpolate(
+            EXPLORER_SCROLLBAR_THUMB_WIDTH,
+            EXPLORER_SCROLLBAR_HOVER_THUMB_WIDTH,
+        ))
+        .scroller_min_length(interpolate(
+            EXPLORER_SCROLLBAR_MIN_LENGTH,
+            EXPLORER_SCROLLBAR_HOVER_MIN_LENGTH,
+        ))
+}
+
 fn explorer_scrollable_style(
     palette: Palette,
     theme: &Theme,
@@ -106,6 +130,38 @@ fn settings_pick_list_menu_style(palette: Palette) -> iced::widget::overlay::men
     }
 }
 
+fn settings_slider_style(
+    palette: Palette,
+    status: iced::widget::slider::Status,
+) -> iced::widget::slider::Style {
+    let accent = match status {
+        iced::widget::slider::Status::Active => palette.accent,
+        iced::widget::slider::Status::Hovered => {
+            mix_color(palette.accent, palette.accent_text, 0.08)
+        }
+        iced::widget::slider::Status::Dragged => {
+            mix_color(palette.accent, palette.accent_text, 0.14)
+        }
+    };
+
+    iced::widget::slider::Style {
+        rail: iced::widget::slider::Rail {
+            backgrounds: (
+                accent.into(),
+                mix_color(palette.input_bg, palette.strong_border, 0.46).into(),
+            ),
+            width: 4.0,
+            border: border::rounded(2),
+        },
+        handle: iced::widget::slider::Handle {
+            shape: iced::widget::slider::HandleShape::Circle { radius: 7.0 },
+            background: accent.into(),
+            border_width: 1.0,
+            border_color: mix_color(palette.accent, palette.accent_text, 0.24),
+        },
+    }
+}
+
 impl BExplorerIced {
     pub(super) fn view_window(&self, id: window::Id) -> Element<'_, Message> {
         if self.transfer_window_id == Some(id) {
@@ -121,6 +177,11 @@ impl BExplorerIced {
             ))
         } else if self.duplicate_window_id == Some(id) {
             self.duplicate_cleanup_window_view(Palette::from_config(
+                &self.config,
+                self.is_dark_theme(),
+            ))
+        } else if self.storage_analysis_window_id == Some(id) {
+            self.storage_analysis_window_view(Palette::from_config(
                 &self.config,
                 self.is_dark_theme(),
             ))
@@ -150,7 +211,10 @@ impl BExplorerIced {
             )
             .to_owned()
         } else if self.duplicate_window_id == Some(id) {
-            self.localized("Limpieza de duplicados", "Duplicate cleanup")
+            self.localized("Limpieza de archivos duplicados", "Duplicate file cleanup")
+                .to_owned()
+        } else if self.storage_analysis_window_id == Some(id) {
+            self.localized("Análisis de almacenamiento", "Storage analysis")
                 .to_owned()
         } else if cfg!(target_os = "linux") && self.is_properties_window(id) {
             #[cfg(target_os = "linux")]
@@ -322,4 +386,22 @@ pub(super) fn context_submenu_width(labels: &[String], font_size: f32) -> f32 {
     (text_width + scaled_ui_metric(68.0, font_size))
         .ceil()
         .clamp(minimum, maximum)
+}
+
+#[cfg(test)]
+mod settings_style_tests {
+    use super::*;
+
+    #[test]
+    fn intensity_slider_uses_the_configured_accent() {
+        let config = AppConfig {
+            accent_color: [18, 146, 203],
+            ..AppConfig::default()
+        };
+        let palette = Palette::from_config(&config, true);
+        let style = settings_slider_style(palette, iced::widget::slider::Status::Active);
+
+        assert_eq!(style.rail.backgrounds.0, Background::Color(palette.accent));
+        assert_eq!(style.handle.background, Background::Color(palette.accent));
+    }
 }

@@ -741,6 +741,14 @@ impl BExplorerIced {
         let Some(entry) = self.context_entry(pane, target) else {
             return Task::none();
         };
+        self.open_file_entry(pane, entry)
+    }
+
+    pub(in crate::iced_ui) fn open_file_entry(
+        &mut self,
+        pane: PaneId,
+        entry: FileEntry,
+    ) -> Task<Message> {
         if explorer::is_trash_item_path(&entry.path) {
             self.pane_mut(pane).status = self
                 .localized(

@@ -278,7 +278,7 @@ impl BExplorerIced {
         let mut modified_chars = modified_header.chars().count();
         let mut created_chars = created_header.chars().count();
 
-        for index in self.filtered_entries(pane).into_iter().take(400) {
+        for index in self.filtered_entries_ref(pane).iter().copied().take(400) {
             let Some(entry) = self.pane(pane).entries.get(index) else {
                 continue;
             };
@@ -398,7 +398,7 @@ impl BExplorerIced {
             .width(Length::Fill)
             .into()
         } else {
-            let name = ellipsize_to_width(
+            let name = ellipsize_to_glyph_width(
                 &self.entry_display_name(entry),
                 name_text_width,
                 table_font_size,
@@ -425,7 +425,7 @@ impl BExplorerIced {
         let size_content_width = (widths.size - cell_padding * 2.0).max(1.0);
         let modified_content_width = (widths.modified - cell_padding * 2.0).max(1.0);
         let created_content_width = (widths.created - cell_padding * 2.0).max(1.0);
-        let type_label = ellipsize_to_width(
+        let type_label = ellipsize_to_glyph_width(
             &self.localized_entry_type_label(entry),
             type_content_width,
             table_font_size,
@@ -447,7 +447,7 @@ impl BExplorerIced {
             .center_y(Length::Fill)
             .clip(true),
             container(
-                text(ellipsize_to_width(
+                text(ellipsize_to_glyph_width(
                     &format_size(entry.size),
                     size_content_width,
                     table_font_size,
@@ -463,7 +463,7 @@ impl BExplorerIced {
             .center_y(Length::Fill)
             .clip(true),
             container(
-                text(ellipsize_to_width(
+                text(ellipsize_to_glyph_width(
                     &modified,
                     modified_content_width,
                     table_font_size
@@ -479,7 +479,7 @@ impl BExplorerIced {
             .center_y(Length::Fill)
             .clip(true),
             container(
-                text(ellipsize_to_width(
+                text(ellipsize_to_glyph_width(
                     &created,
                     created_content_width,
                     table_font_size,
@@ -515,7 +515,7 @@ impl BExplorerIced {
             )
             .padding(0)
             .width(Length::Fixed(widths.total_width()))
-            .on_press(Message::RowPressed(pane, index))
+            .on_press(Message::Noop)
             .style(move |_, status| file_item_button_style(palette, selected, status))
             .into()
         };

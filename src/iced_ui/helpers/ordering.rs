@@ -26,8 +26,100 @@ pub(in crate::iced_ui) fn rebase_tab_indices(indices: &[usize], removed: usize) 
         .collect()
 }
 
-pub(in crate::iced_ui) fn expanded_render_limit(current: usize, total: usize) -> usize {
-    current.saturating_add(RENDER_BATCH_SIZE).min(total)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::iced_ui) struct VirtualTableRange {
+    pub(in crate::iced_ui) start: usize,
+    pub(in crate::iced_ui) end: usize,
+    pub(in crate::iced_ui) before: f32,
+    pub(in crate::iced_ui) after: f32,
+}
+
+pub(in crate::iced_ui) fn virtual_table_pixel_window(
+    offset_y: f32,
+    viewport_height: f32,
+    velocity_y: f32,
+    row_height: f32,
+) -> (f32, f32) {
+    let row_height = row_height.max(1.0);
+    let viewport_height = if viewport_height.is_finite() && viewport_height > row_height {
+        viewport_height
+    } else {
+        row_height * VIRTUAL_TABLE_FALLBACK_ROWS
+    };
+    let offset_y = offset_y.max(0.0);
+    let screens_per_second = (velocity_y.abs() / viewport_height).min(12.0);
+    let directional_screens = (screens_per_second * 0.25).min(VIRTUAL_TABLE_MAX_VELOCITY_SCREENS);
+    let before_screens = VIRTUAL_TABLE_OVERSCAN_SCREENS
+        + if velocity_y < 0.0 {
+            directional_screens
+        } else {
+            0.0
+        };
+    let after_screens = VIRTUAL_TABLE_OVERSCAN_SCREENS
+        + if velocity_y > 0.0 {
+            directional_screens
+        } else {
+            0.0
+        };
+
+    (
+        (offset_y - viewport_height * before_screens).max(0.0),
+        offset_y + viewport_height * (1.0 + after_screens),
+    )
+}
+
+pub(in crate::iced_ui) fn virtual_table_range(
+    total: usize,
+    row_height: f32,
+    offset_y: f32,
+    viewport_height: f32,
+    velocity_y: f32,
+) -> VirtualTableRange {
+    if total == 0 {
+        return VirtualTableRange {
+            start: 0,
+            end: 0,
+            before: 0.0,
+            after: 0.0,
+        };
+    }
+
+    let row_height = row_height.max(1.0);
+    let (window_start, window_end) =
+        virtual_table_pixel_window(offset_y, viewport_height, velocity_y, row_height);
+    let start = ((window_start / row_height).floor() as usize).min(total);
+    let end = ((window_end / row_height).ceil() as usize)
+        .max(start.saturating_add(1))
+        .min(total);
+
+    VirtualTableRange {
+        start,
+        end,
+        before: start as f32 * row_height,
+        after: total.saturating_sub(end) as f32 * row_height,
+    }
+}
+
+pub(in crate::iced_ui) fn sampled_scroll_velocity(
+    previous_offset: f32,
+    previous_sample: Option<Instant>,
+    previous_velocity: f32,
+    offset: f32,
+    now: Instant,
+) -> f32 {
+    let delta = offset - previous_offset;
+    if delta.abs() < 0.5 {
+        return previous_velocity * 0.8;
+    }
+    let Some(elapsed) = previous_sample.map(|sample| now.saturating_duration_since(sample)) else {
+        return 0.0;
+    };
+    let seconds = elapsed.as_secs_f32();
+    if seconds <= f32::EPSILON {
+        return previous_velocity;
+    }
+    let measured = (delta / seconds).clamp(-200_000.0, 200_000.0);
+    previous_velocity * 0.35 + measured * 0.65
 }
 
 pub(in crate::iced_ui) fn compare_entries_for_view(
@@ -334,6 +426,32 @@ pub(in crate::iced_ui) fn ellipsize_to_width(value: &str, width: f32, font_size:
     ellipsize_text(value, max_chars)
 }
 
+pub(in crate::iced_ui) fn ellipsize_to_glyph_width(
+    value: &str,
+    width: f32,
+    font_size: f32,
+) -> String {
+    if estimated_ui_text_width(value, font_size) <= width {
+        return value.to_owned();
+    }
+
+    const ELLIPSIS: &str = "...";
+
+    let available_width = (width - estimated_ui_text_width(ELLIPSIS, font_size) - 2.0).max(0.0);
+    let mut shortened = String::new();
+    let mut used_width = 0.0;
+    for character in value.chars() {
+        let character_width = estimated_ui_character_width(character, font_size);
+        if used_width + character_width > available_width {
+            break;
+        }
+        shortened.push(character);
+        used_width += character_width;
+    }
+    shortened.push_str(ELLIPSIS);
+    shortened
+}
+
 pub(in crate::iced_ui) fn two_line_ellipsize_to_width(
     value: &str,
     width: f32,
@@ -424,4 +542,64 @@ pub(in crate::iced_ui) fn ellipsize_text(value: &str, max_chars: usize) -> Strin
     let mut text = value.chars().take(keep).collect::<String>();
     text.push_str("...");
     text
+}
+
+#[cfg(test)]
+mod virtual_table_tests {
+    use super::*;
+
+    #[test]
+    fn initial_window_uses_a_safe_fallback_without_rendering_every_row() {
+        let range = virtual_table_range(100_000, 20.0, 0.0, 0.0, 0.0);
+
+        assert_eq!(range.start, 0);
+        assert_eq!(range.end, 150);
+        assert_eq!(range.before, 0.0);
+        assert_eq!(range.after, 1_997_000.0);
+    }
+
+    #[test]
+    fn middle_window_preserves_the_full_scroll_extent() {
+        let range = virtual_table_range(10_000, 20.0, 10_000.0, 400.0, 0.0);
+
+        assert_eq!((range.start, range.end), (470, 550));
+        assert_eq!(range.before, 9_400.0);
+        assert_eq!(range.after, 189_000.0);
+        assert!(range.start <= 500 && range.end > 500);
+    }
+
+    #[test]
+    fn fast_scrolling_expands_overscan_in_the_travel_direction() {
+        let resting = virtual_table_range(10_000, 20.0, 10_000.0, 400.0, 0.0);
+        let down = virtual_table_range(10_000, 20.0, 10_000.0, 400.0, 4_000.0);
+        let up = virtual_table_range(10_000, 20.0, 10_000.0, 400.0, -4_000.0);
+
+        assert_eq!(down.start, resting.start);
+        assert!(down.end > resting.end);
+        assert!(up.start < resting.start);
+        assert_eq!(up.end, resting.end);
+    }
+
+    #[test]
+    fn direct_scroll_jump_renders_the_destination_instead_of_intermediate_batches() {
+        let offset = 1_600_000.0;
+        let range = virtual_table_range(100_000, 20.0, offset, 800.0, 0.0);
+        let destination = (offset / 20.0) as usize;
+
+        assert!(range.start <= destination);
+        assert!(range.end > destination);
+        assert!(range.end - range.start < 250);
+    }
+
+    #[test]
+    fn sampled_velocity_tracks_direction_and_smooths_the_measurement() {
+        let now = Instant::now();
+        let previous = now - Duration::from_millis(100);
+
+        let down = sampled_scroll_velocity(100.0, Some(previous), 0.0, 500.0, now);
+        let up = sampled_scroll_velocity(500.0, Some(previous), 0.0, 100.0, now);
+
+        assert!(down > 0.0);
+        assert!(up < 0.0);
+    }
 }

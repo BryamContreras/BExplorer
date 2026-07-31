@@ -35,13 +35,8 @@ impl StartupState {
     }
 
     fn complete_pane_load(&mut self, pane: PaneId, request_id: u64) {
-        self.pending_initial_loads.retain(|load| {
-            *load
-                != StartupInitialLoad::Pane {
-                    pane,
-                    request_id,
-                }
-        });
+        self.pending_initial_loads
+            .retain(|load| *load != StartupInitialLoad::Pane { pane, request_id });
     }
 
     fn complete_storage_root_load(&mut self) {
@@ -138,11 +133,7 @@ enum Message {
     SidebarStorageLoaded(Result<Vec<FileEntry>, String>),
     TrashIconStatusLoaded(u64, Result<bool, String>),
     DirectoryChanged(crate::fs::watcher::DirectoryChange),
-    WatchedDirectoryLoaded(
-        PathBuf,
-        Vec<(PaneId, u64)>,
-        Result<Vec<FileEntry>, String>,
-    ),
+    WatchedDirectoryLoaded(PathBuf, Vec<(PaneId, u64)>, Result<Vec<FileEntry>, String>),
     StorageDevicesChanged,
     RefreshStorageAfterDeviceChange,
     CloseTab(PaneId, usize),
@@ -184,7 +175,7 @@ enum Message {
     AddressFocusChecked(PaneId, u64, bool),
     AddressChanged(String),
     SubmitAddress(PaneId),
-    RowPressed(PaneId, usize),
+    BeginClickRename(PaneId, PathBuf, Instant),
     OpenSidebarDriveContext(PaneId, usize),
     Back(PaneId),
     Forward(PaneId),
@@ -228,7 +219,11 @@ enum Message {
     ),
     DismissErrorDialog,
     CancelArchive(u64),
-    TrashFinished(PaneId, Vec<PathBuf>, Result<operations::TrashDeleteOutcome, String>),
+    TrashFinished(
+        PaneId,
+        Vec<PathBuf>,
+        Result<operations::TrashDeleteOutcome, String>,
+    ),
     TrashRestoreFinished(
         PaneId,
         Vec<PathBuf>,
@@ -296,6 +291,11 @@ enum Message {
     ContextSendToSubmenuEnter,
     ContextSendToSubmenuExit,
     CloseContextSendToSubmenuIfUnhovered,
+    ContextToolsParentEnter,
+    ContextToolsParentExit,
+    ContextToolsSubmenuEnter,
+    ContextToolsSubmenuExit,
+    CloseContextToolsSubmenuIfUnhovered,
     ContextExtractParentEnter,
     ContextNewParentEnter,
     ContextArchiveParentExit,
@@ -340,7 +340,8 @@ enum Message {
     OpenDuplicateFileLocation,
     DuplicateTableScrolled {
         offset_x: f32,
-        relative_y: f32,
+        offset_y: f32,
+        viewport_height: f32,
     },
     StartDuplicateColumnResize(usize),
     StopDuplicateColumnResize,
@@ -355,6 +356,45 @@ enum Message {
     DuplicateWindowMaximize,
     DuplicateWindowMaximizedState(window::Id, bool),
     DuplicateWindowResize(window::Direction),
+    StorageAnalysisWindowOpened(window::Id),
+    CancelStorageAnalysis,
+    CloseStorageAnalysis,
+    StorageAnalysisScrolled,
+    StorageOverviewExtensionScrolled {
+        offset_y: f32,
+        viewport_height: f32,
+    },
+    StorageAnalysisScrollbarHover(bool),
+    StorageAnalysisWindowDrag,
+    StorageAnalysisWindowMinimize,
+    StorageAnalysisWindowMaximize,
+    StorageAnalysisWindowMaximizedState(window::Id, bool),
+    StorageAnalysisWindowResize(window::Direction),
+    StorageDonutPointerMoved(Point),
+    StorageDonutPointerLeft,
+    StorageDuplicateDonutPointerMoved(Point),
+    StorageDuplicateDonutPointerLeft,
+    SelectStorageOverviewCategory(StorageCategory),
+    SelectStorageOverviewExtension(usize),
+    OpenStorageCategory(StorageCategory),
+    BackToStorageOverview,
+    StorageCategoryPointerMoved(Point),
+    StorageCategoryResizePointerMoved(window::Id, Point),
+    StorageCategoryResizeReleased(window::Id),
+    StorageCategoryRowSelected(PathBuf),
+    StorageCategoryFilterChanged(String),
+    OpenStorageCategoryRowContext(PathBuf),
+    CloseStorageCategoryRowContext,
+    OpenStorageCategoryFile(PathBuf),
+    OpenStorageCategoryFileLocation,
+    StorageCategoryTableScrolled {
+        offset_x: f32,
+        offset_y: f32,
+        viewport_height: f32,
+    },
+    SortStorageCategoryColumn(StorageCategorySortColumn),
+    StartStorageCategoryColumnResize(usize),
+    StopStorageCategoryColumnResize,
     CancelDefenderScan,
     CloseDefenderPanel,
     RemediateDefenderThreats,
@@ -424,6 +464,9 @@ enum Message {
     ToggleShowExtensions,
     ToggleShowHidden,
     ToggleShowHiddenSystemDrives,
+    ToggleShowSidebarBookmarks,
+    ToggleShowSidebarNetwork,
+    ToggleShowSidebarRecents,
     WindowDrag,
     WindowResize(window::Direction),
     WindowMinimize,
@@ -431,15 +474,15 @@ enum Message {
     #[cfg(not(target_os = "windows"))]
     WindowMaximizedState(window::Id, bool),
     #[cfg(target_os = "windows")]
-    WindowsWindowAppearanceSettled(u64, u64, bool, bool),
+    WindowsWindowAppearanceSettled(u64, u64, bool),
     #[cfg(target_os = "windows")]
-    WindowsBackdropRefreshReady(u64, u64, u8),
+    WindowsMainWindowRegionFailed(u64, bool, u8),
     #[cfg(target_os = "windows")]
-    WindowsBackdropRefreshFinished(u64, u64, u8, Option<bool>),
+    WindowsMainWindowRegionRetry(u64, bool, u8),
     #[cfg(target_os = "windows")]
     WindowMaximizeAppearanceWatchdog(window::Id, u64),
     #[cfg(target_os = "windows")]
-    WindowMaximizeAppearanceWatchdogState(window::Id, u64, bool),
+    WindowMaximizeAppearanceWatchdogState(window::Id, u64, bool, Option<bool>),
     WindowClose,
     StartSidebarResize,
     StartPreviewResize(PaneId),
@@ -456,6 +499,7 @@ enum Message {
     ClearFileDragClickSuppression,
     WindowUnfocused(window::Id),
     WindowResized(window::Id, Size),
+    MainWindowSizeObserved(window::Id, Size, bool),
     #[cfg(debug_assertions)]
     DebugAddArchive(usize),
     Noop,
@@ -611,7 +655,9 @@ enum ContextCommand {
     EjectDrive,
     FormatDrive,
     ScanWithDefender,
+    ToolsMenu,
     DuplicateCleanup,
+    StorageAnalysis,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -627,6 +673,7 @@ enum ContextSubmenuKind {
     New,
     OpenWith,
     SendTo,
+    Tools,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -643,7 +690,11 @@ struct DuplicateCleanupState {
     root: PathBuf,
     entries: Vec<DuplicateFile>,
     extension_counts: HashMap<String, usize>,
-    render_limit: usize,
+    extension_group_starts: Vec<usize>,
+    table_scroll_offset_y: f32,
+    table_viewport_height: f32,
+    table_scroll_velocity_y: f32,
+    table_scroll_sampled_at: Option<Instant>,
     selected: HashSet<PathBuf>,
     all_candidates_selected: bool,
     highlighted: Option<PathBuf>,
@@ -652,7 +703,7 @@ struct DuplicateCleanupState {
     context_position: Point,
     window_size: Size,
     window_maximized: bool,
-    column_widths: [f32; 6],
+    column_widths: [f32; 7],
     column_resize: Option<DuplicateColumnResize>,
     scanned: usize,
     total: usize,
@@ -669,6 +720,130 @@ struct DuplicateCleanupState {
 
 #[derive(Clone, Copy)]
 struct DuplicateColumnResize {
+    column: usize,
+    start_x: f32,
+    start_width: f32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageAnalysisPhase {
+    Scanning,
+    Complete,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageDuplicateEstimatePhase {
+    Waiting,
+    Counting,
+    Scanning,
+    Complete,
+    Cancelled,
+    Failed,
+}
+
+struct StorageDuplicateEstimate {
+    phase: StorageDuplicateEstimatePhase,
+    scanned: usize,
+    total: usize,
+    summary: StorageAnalysisSummary,
+    receiver: Option<Receiver<DuplicateScanEvent>>,
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Default for StorageDuplicateEstimate {
+    fn default() -> Self {
+        Self {
+            phase: StorageDuplicateEstimatePhase::Waiting,
+            scanned: 0,
+            total: 0,
+            summary: StorageAnalysisSummary::default(),
+            receiver: None,
+            cancel: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StorageCategorySortColumn {
+    Name,
+    Type,
+    Size,
+    Created,
+    Modified,
+    Location,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct StorageExtensionUsage {
+    extension: Option<String>,
+    bytes: u64,
+    files: u64,
+}
+
+struct StorageAnalysisState {
+    pane: PaneId,
+    root: PathBuf,
+    summary: StorageAnalysisSummary,
+    files: StorageFiles,
+    category_colors: StorageCategoryColors,
+    donut_pointer: Option<Point>,
+    duplicate_donut_pointer: Option<Point>,
+    overview_selected_category: Option<StorageCategory>,
+    overview_extensions: Vec<StorageExtensionUsage>,
+    overview_selected_extension: Option<usize>,
+    overview_extension_scroll_offset_y: f32,
+    overview_extension_viewport_height: f32,
+    overview_extension_scroll_velocity_y: f32,
+    overview_extension_scroll_sampled_at: Option<Instant>,
+    selected_category: Option<StorageCategory>,
+    category_highlighted: Option<PathBuf>,
+    category_pointer: Point,
+    category_context_path: Option<PathBuf>,
+    category_context_position: Point,
+    category_column_widths: [f32; 6],
+    category_column_resize: Option<StorageCategoryColumnResize>,
+    category_sort_column: StorageCategorySortColumn,
+    category_sort_ascending: bool,
+    category_filter: String,
+    category_filter_matches: Option<Vec<usize>>,
+    category_scroll_offset_y: f32,
+    category_viewport_height: f32,
+    category_scroll_velocity_y: f32,
+    category_scroll_sampled_at: Option<Instant>,
+    window_size: Size,
+    window_maximized: bool,
+    scrollbar_vertical_hovered: bool,
+    scrollbar_reveal_progress: f32,
+    scrollbar_reveal_until: Option<Instant>,
+    scanned: usize,
+    skipped: usize,
+    current_path: Option<PathBuf>,
+    phase: StorageAnalysisPhase,
+    error: Option<String>,
+    receiver: Receiver<StorageAnalysisEvent>,
+    cancel: Arc<AtomicBool>,
+    duplicate_estimate: StorageDuplicateEstimate,
+}
+
+impl StorageAnalysisState {
+    fn cancel_workers(&self) {
+        self.cancel.store(true, AtomicOrdering::Relaxed);
+        if let Some(cancel) = self.duplicate_estimate.cancel.as_ref() {
+            cancel.store(true, AtomicOrdering::Relaxed);
+        }
+    }
+}
+
+impl Drop for StorageAnalysisState {
+    fn drop(&mut self) {
+        self.cancel_workers();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StorageCategoryColumnResize {
     column: usize,
     start_x: f32,
     start_width: f32,
@@ -691,6 +866,8 @@ enum KeyboardShortcut {
     GoBack,
     GoForward,
     Open,
+    SwitchPaneFocus,
+    FocusSearch,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -704,6 +881,7 @@ enum KeyboardMenu {
     Context,
     ContextOpenWith,
     ContextSendTo,
+    ContextTools,
     ContextArchive,
     ContextExtract,
     ContextNew,
@@ -1272,6 +1450,7 @@ struct PaneState {
     search_mode: SearchMode,
     selected: HashSet<PathBuf>,
     selection_anchor: Option<usize>,
+    keyboard_selection_cursor: Option<usize>,
     // These overrides exist only while displaying This PC or the network
     // root. They keep that special presentation from overwriting the view and
     // grouping selected for ordinary folders in the same tab.
@@ -1299,8 +1478,10 @@ struct PaneState {
     scrollbar_reveal_progress: f32,
     scrollbar_reveal_until: Option<Instant>,
     has_vertical_overflow: bool,
-    render_limit: usize,
     scroll_offset_y: f32,
+    scroll_viewport_height: f32,
+    scroll_velocity_y: f32,
+    scroll_sampled_at: Option<Instant>,
     column_widths: ColumnWidthOverrides,
     text_preview: Option<TextPreviewState>,
 }
@@ -1316,6 +1497,7 @@ impl Default for PaneState {
             search_mode: SearchMode::Quick,
             selected: HashSet::new(),
             selection_anchor: None,
+            keyboard_selection_cursor: None,
             fixed_root_view_override: None,
             fixed_root_group_override: None,
             fixed_root_group_ascending_override: None,
@@ -1340,8 +1522,10 @@ impl Default for PaneState {
             scrollbar_reveal_progress: 0.0,
             scrollbar_reveal_until: None,
             has_vertical_overflow: false,
-            render_limit: INITIAL_RENDER_LIMIT,
             scroll_offset_y: 0.0,
+            scroll_viewport_height: 0.0,
+            scroll_velocity_y: 0.0,
+            scroll_sampled_at: None,
             column_widths: ColumnWidthOverrides::default(),
             text_preview: None,
         }
@@ -1349,6 +1533,13 @@ impl Default for PaneState {
 }
 
 impl PaneState {
+    fn reset_scroll_position(&mut self) {
+        self.scroll_offset_y = 0.0;
+        self.scroll_viewport_height = 0.0;
+        self.scroll_velocity_y = 0.0;
+        self.scroll_sampled_at = None;
+    }
+
     fn mark_entries_changed(&mut self) {
         self.entries_epoch = self.entries_epoch.wrapping_add(1);
         self.display_order.borrow_mut().signature = None;
@@ -1369,6 +1560,7 @@ struct DisplayOrderSignature {
 struct DisplayOrderCache {
     signature: Option<DisplayOrderSignature>,
     indices: Vec<usize>,
+    group_starts: Vec<usize>,
 }
 
 #[derive(Clone, Debug)]

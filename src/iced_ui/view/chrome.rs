@@ -12,23 +12,36 @@ struct TabVisualState {
 impl BExplorerIced {
     pub(super) fn title_tabs_area(&self, palette: Palette) -> Element<'_, Message> {
         if let Some(split) = &self.split {
-            let primary = ((split.ratio * 1000.0).round() as u16).clamp(1, 999);
-            let secondary = 1000_u16.saturating_sub(primary).max(1);
+            let title_start = self.title_tabs_start_x();
+            let content_start = if self.sidebar_is_rendered() && !self.uses_split_sidebars() {
+                self.current_sidebar_width()
+            } else {
+                0.0
+            };
+            let primary_width = split_title_primary_width(
+                self.window_size.width,
+                title_start,
+                content_start,
+                split.ratio,
+                SPLIT_DIVIDER_WIDTH,
+            );
             return row![
                 container(row![
                     self.title_tabs(PaneId::Primary, palette),
                     self.title_drag_gap()
                 ])
-                .width(Length::FillPortion(primary))
-                .height(TITLE_HEIGHT),
+                .width(primary_width)
+                .height(TITLE_HEIGHT)
+                .clip(true),
                 Space::new().width(SPLIT_DIVIDER_WIDTH).height(TITLE_HEIGHT),
                 container(row![
                     self.title_tabs(PaneId::Secondary, palette),
                     self.title_drag_gap(),
                     Space::new().width(self.title_controls_width()),
                 ])
-                .width(Length::FillPortion(secondary))
-                .height(TITLE_HEIGHT),
+                .width(Length::Fill)
+                .height(TITLE_HEIGHT)
+                .clip(true),
             ]
             .height(TITLE_HEIGHT)
             .width(Length::Fill)
@@ -100,11 +113,16 @@ impl BExplorerIced {
                 palette,
             ));
         }
-        tabs = tabs.push(icon_button(
-            "add",
-            Message::NewTab(pane),
+        tabs = tabs.push(delayed_title_tooltip(
+            icon_button(
+                "add",
+                Message::NewTab(pane),
+                palette,
+                false,
+                self.font_size(),
+            ),
+            self.localized("Nueva pestaña", "New tab"),
             palette,
-            false,
             self.font_size(),
         ));
         container(
@@ -165,13 +183,7 @@ impl BExplorerIced {
             .align_y(Alignment::Center)
             .width(Length::Fill);
 
-        let label = row![
-            container(leading)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .align_x(Horizontal::Left)
-                .center_y(Length::Fill)
-                .clip(true),
+        let close_tab = delayed_title_tooltip(
             Button::new(
                 container(inline_icon(
                     "x",
@@ -188,6 +200,19 @@ impl BExplorerIced {
             .padding(0)
             .on_press(Message::CloseTab(pane, slot))
             .style(move |_, status| button_style(palette, false, status)),
+            self.localized("Cerrar pestaña", "Close tab"),
+            palette,
+            self.font_size(),
+        );
+
+        let label = row![
+            container(leading)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(Horizontal::Left)
+                .center_y(Length::Fill)
+                .clip(true),
+            close_tab,
         ]
         .width(Length::Fill)
         .height(Length::Fill)

@@ -38,7 +38,7 @@ impl BExplorerIced {
 
         let title_drag_area = mouse_area(
             container(
-                text(self.localized("Limpieza de duplicados", "Duplicate cleanup"))
+                text(self.localized("Limpieza de archivos duplicados", "Duplicate file cleanup"))
                     .size(font_size)
                     .color(palette.text)
                     .align_x(Horizontal::Center)
@@ -192,7 +192,7 @@ impl BExplorerIced {
             .size(self.ui_metric(16.0))
             .on_toggle(Message::SelectAllDuplicateCandidates)
             .style(move |_, status| duplicate_checkbox_style(palette, status));
-        let mut column_widths = std::array::from_fn::<_, 6, _>(|index| {
+        let mut column_widths = std::array::from_fn::<_, 7, _>(|index| {
             state.column_widths[index].max(duplicate_table_column_min_width(
                 index,
                 font_size,
@@ -201,9 +201,10 @@ impl BExplorerIced {
         });
         let available_table_width = (window_size.width - self.ui_metric(30.0)).max(0.0);
         let current_table_width = column_widths.iter().sum::<f32>();
-        column_widths[5] += (available_table_width - current_table_width).max(0.0);
+        column_widths[6] += (available_table_width - current_table_width).max(0.0);
         let [
             name_column_width,
+            type_column_width,
             size_column_width,
             created_column_width,
             modified_column_width,
@@ -226,37 +227,44 @@ impl BExplorerIced {
         let table_header = row![
             table_header_content_cell(name_header, name_column_width, 0, palette, font_size),
             table_header_cell(
+                self.localized("Tipo", "Type"),
+                type_column_width,
+                1,
+                palette,
+                font_size
+            ),
+            table_header_cell(
                 self.localized("Tamaño", "Size"),
                 size_column_width,
-                1,
+                2,
                 palette,
                 font_size
             ),
             table_header_cell(
                 self.localized("Fecha de creación", "Creation date"),
                 created_column_width,
-                2,
+                3,
                 palette,
                 font_size,
             ),
             table_header_cell(
                 self.localized("Fecha de modificación", "Modification date"),
                 modified_column_width,
-                3,
+                4,
                 palette,
                 font_size,
             ),
             table_header_cell(
                 self.localized("Coincidencia", "Match"),
                 match_column_width,
-                4,
+                5,
                 palette,
                 font_size
             ),
             table_header_cell(
                 self.localized("Ubicación", "Location"),
                 location_column_width,
-                5,
+                6,
                 palette,
                 font_size
             ),
@@ -266,45 +274,111 @@ impl BExplorerIced {
         .align_y(Alignment::Center);
 
         let total_entries = state.entries.len();
-        let render_limit = state.render_limit.min(total_entries);
-        let mut rows = column![].width(Length::Fill);
-        let mut previous_extension: Option<&str> = None;
-        for entry in state.entries.iter().take(render_limit) {
-            if previous_extension != Some(entry.extension.as_str()) {
-                let count = state
-                    .extension_counts
-                    .get(&entry.extension)
-                    .copied()
-                    .unwrap_or_default();
-                let extension = if entry.extension.is_empty() {
-                    self.localized("SIN EXTENSIÓN", "NO EXTENSION").to_owned()
-                } else {
-                    format!(".{}", entry.extension.to_uppercase())
-                };
-                let group_label = if self.is_spanish() {
-                    format!("{extension} · {count} archivo(s)")
-                } else {
-                    format!("{extension} · {count} file(s)")
-                };
-                rows = rows.push(
-                    container(
-                        text(group_label)
-                            .size(font_size)
-                            .color(palette.text)
-                            .wrapping(iced::widget::text::Wrapping::None),
-                    )
-                    .width(Length::Fixed(table_content_width))
-                    .height(Length::Fixed(self.ui_metric(36.0)))
-                    .padding([0.0, self.ui_metric(8.0)])
-                    .align_y(Alignment::Center)
-                    .style(move |_| {
-                        container::Style::default()
-                            .background(mix_color(palette.header_bg, palette.table_bg, 0.32))
-                            .border(border::rounded(0).color(palette.strong_border).width(1))
-                    }),
-                );
-                previous_extension = Some(entry.extension.as_str());
+        enum VisibleDuplicateItem {
+            Group(usize),
+            Entry(usize),
+        }
+        let row_height = self.ui_metric(DUPLICATE_TABLE_ROW_HEIGHT);
+        let group_height = self.ui_metric(36.0);
+        let group_count = state.extension_group_starts.len();
+        let total_height = total_entries as f32 * row_height + group_count as f32 * group_height;
+        let (window_start, window_end) = virtual_table_pixel_window(
+            state.table_scroll_offset_y,
+            state.table_viewport_height,
+            state.table_scroll_velocity_y,
+            row_height,
+        );
+        let mut visible_items = Vec::new();
+        let mut first_visible_y = None;
+        let mut last_visible_y = 0.0_f32;
+        let mut low = 0_usize;
+        let mut high = total_entries;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let groups_through_entry = state
+                .extension_group_starts
+                .partition_point(|start| *start <= middle);
+            let entry_bottom =
+                (middle + 1) as f32 * row_height + groups_through_entry as f32 * group_height;
+            if entry_bottom < window_start {
+                low = middle + 1;
+            } else {
+                high = middle;
             }
+        }
+        for index in low..total_entries {
+            let groups_before = state
+                .extension_group_starts
+                .partition_point(|start| *start < index);
+            let is_group_start = state.extension_group_starts.get(groups_before) == Some(&index);
+            let mut item_start = index as f32 * row_height + groups_before as f32 * group_height;
+            if is_group_start {
+                let header_end = item_start + group_height;
+                if header_end >= window_start && item_start <= window_end {
+                    first_visible_y.get_or_insert(item_start);
+                    visible_items.push(VisibleDuplicateItem::Group(index));
+                    last_visible_y = header_end;
+                }
+                item_start = header_end;
+            }
+            let item_end = item_start + row_height;
+            if item_end >= window_start && item_start <= window_end {
+                first_visible_y.get_or_insert(item_start);
+                visible_items.push(VisibleDuplicateItem::Entry(index));
+                last_visible_y = item_end;
+            } else if item_start > window_end && first_visible_y.is_some() {
+                break;
+            }
+        }
+        let mut rows = column![].width(Length::Fill);
+        if let Some(before) = first_visible_y.filter(|height| *height > 0.0) {
+            rows = rows.push(
+                Space::new()
+                    .width(Length::Fixed(table_content_width))
+                    .height(Length::Fixed(before)),
+            );
+        }
+        for item in visible_items {
+            let index = match item {
+                VisibleDuplicateItem::Group(index) => {
+                    let entry = &state.entries[index];
+                    let count = state
+                        .extension_counts
+                        .get(&entry.extension)
+                        .copied()
+                        .unwrap_or_default();
+                    let extension = if entry.extension.is_empty() {
+                        self.localized("SIN EXTENSIÓN", "NO EXTENSION").to_owned()
+                    } else {
+                        format!(".{}", entry.extension.to_uppercase())
+                    };
+                    let group_label = if self.is_spanish() {
+                        format!("{extension} · {count} archivo(s)")
+                    } else {
+                        format!("{extension} · {count} file(s)")
+                    };
+                    rows = rows.push(
+                        container(
+                            text(group_label)
+                                .size(font_size)
+                                .color(palette.text)
+                                .wrapping(iced::widget::text::Wrapping::None),
+                        )
+                        .width(Length::Fixed(table_content_width))
+                        .height(Length::Fixed(self.ui_metric(36.0)))
+                        .padding([0.0, self.ui_metric(8.0)])
+                        .align_y(Alignment::Center)
+                        .style(move |_| {
+                            container::Style::default()
+                                .background(mix_color(palette.header_bg, palette.table_bg, 0.32))
+                                .border(border::rounded(0).color(palette.strong_border).width(1))
+                        }),
+                    );
+                    continue;
+                }
+                VisibleDuplicateItem::Entry(index) => index,
+            };
+            let entry = &state.entries[index];
             let path = entry.path.clone();
             let checked = state.selected.contains(&entry.path);
             let checkbox = iced::widget::checkbox(checked)
@@ -329,6 +403,9 @@ impl BExplorerIced {
                 .parent()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| "—".into());
+            let type_label = self.localized_entry_type_label(
+                &crate::iced_ui::duplicate_cleanup::duplicate_file_entry(entry),
+            );
             let row_content = row![
                 container(
                     row![
@@ -344,6 +421,7 @@ impl BExplorerIced {
                 .width(Length::Fixed(name_column_width))
                 .padding([0.0, self.ui_metric(8.0)])
                 .clip(true),
+                table_value_cell(type_label, type_column_width, palette, font_size),
                 table_value_cell(
                     format_size(Some(entry.size)),
                     size_column_width,
@@ -393,19 +471,17 @@ impl BExplorerIced {
                 .interaction(mouse::Interaction::Pointer),
             );
         }
-        if render_limit < total_entries {
-            let label = if self.is_spanish() {
-                format!("Mostrando {render_limit} de {total_entries}. Desplázate para cargar más.")
-            } else {
-                format!("Showing {render_limit} of {total_entries}. Scroll to load more.")
-            };
-            let footer_height = self.ui_metric(38.0);
+        if first_visible_y.is_none() && total_height > 0.0 {
             rows = rows.push(
-                container(text(label).size(font_size).color(palette.muted_text))
+                Space::new()
                     .width(Length::Fixed(table_content_width))
-                    .height(Length::Fixed(footer_height))
-                    .center_x(Length::Fixed(table_content_width))
-                    .center_y(Length::Fixed(footer_height)),
+                    .height(Length::Fixed(total_height)),
+            );
+        } else if last_visible_y < total_height {
+            rows = rows.push(
+                Space::new()
+                    .width(Length::Fixed(table_content_width))
+                    .height(Length::Fixed(total_height - last_visible_y)),
             );
         }
         if state.entries.is_empty() {
@@ -443,14 +519,15 @@ impl BExplorerIced {
         .height(Length::Fixed(self.ui_metric(DUPLICATE_TABLE_HEADER_HEIGHT)));
         let table_rows = scrollable(rows.width(Length::Fixed(table_content_width)))
             .direction(scrollable::Direction::Both {
-                vertical: scrollable::Scrollbar::default(),
-                horizontal: scrollable::Scrollbar::default(),
+                vertical: explorer_scrollbar(1.0),
+                horizontal: explorer_scrollbar(1.0),
             })
             .width(Length::Fill)
             .height(Length::Fill)
             .on_scroll(|viewport| Message::DuplicateTableScrolled {
                 offset_x: viewport.absolute_offset().x,
-                relative_y: viewport.relative_offset().y,
+                offset_y: viewport.absolute_offset().y,
+                viewport_height: viewport.bounds().height,
             })
             .style(move |theme, status| explorer_scrollable_style(palette, theme, status, 1.0));
         let table = container(column![header, table_rows].height(Length::Fill))
@@ -713,7 +790,7 @@ fn table_header_content_cell<'a>(
     .into()
 }
 
-fn table_value_cell(
+pub(super) fn table_value_cell(
     value: String,
     width: f32,
     palette: Palette,
@@ -796,7 +873,7 @@ where
     .into()
 }
 
-fn dialog_action_button<'a>(
+pub(super) fn dialog_action_button<'a>(
     label: &'a str,
     message: Option<Message>,
     primary: bool,
@@ -817,7 +894,7 @@ fn dialog_action_button<'a>(
     }
 }
 
-fn format_duplicate_time(time: Option<std::time::SystemTime>, spanish: bool) -> String {
+pub(super) fn format_duplicate_time(time: Option<std::time::SystemTime>, spanish: bool) -> String {
     let Some(time) = time else {
         return "—".into();
     };

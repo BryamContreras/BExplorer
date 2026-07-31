@@ -116,6 +116,9 @@ impl BExplorerIced {
         self.context_send_to_submenu = false;
         self.context_send_to_parent_hovered = false;
         self.context_send_to_submenu_hovered = false;
+        self.context_tools_submenu = false;
+        self.context_tools_parent_hovered = false;
+        self.context_tools_submenu_hovered = false;
         self.context_extract_submenu = false;
         self.context_new_submenu = false;
         self.context_archive_parent_hovered = false;
@@ -322,6 +325,27 @@ impl BExplorerIced {
                 .iter()
                 .map(|target| target.label().to_owned())
                 .collect(),
+            ContextSubmenuKind::Tools => {
+                let context_entry = self.context_entry(menu.pane, menu.target);
+                let storage_analysis_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::storage_analysis::storage_analysis_available_for_entry,
+                );
+                let duplicate_cleanup_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry,
+                );
+                context_tools_commands(storage_analysis_available, duplicate_cleanup_available)
+                    .into_iter()
+                    .map(|command| match command {
+                        ContextCommand::StorageAnalysis => self
+                            .localized("Análisis de almacenamiento", "Storage analysis")
+                            .to_owned(),
+                        ContextCommand::DuplicateCleanup => self
+                            .localized("Limpieza de archivos duplicados", "Duplicate file cleanup")
+                            .to_owned(),
+                        _ => unreachable!("tools submenu only contains tool commands"),
+                    })
+                    .collect()
+            }
         };
         let font_size = self.font_size();
         let width = view::context_submenu_width(&labels, font_size);
@@ -330,6 +354,7 @@ impl BExplorerIced {
             ContextSubmenuKind::Extract | ContextSubmenuKind::New => {
                 context_submenu_rows_height(2, font_size)
             }
+            ContextSubmenuKind::Tools => context_submenu_rows_height(labels.len(), font_size),
             ContextSubmenuKind::OpenWith | ContextSubmenuKind::SendTo => {
                 context_submenu_rows_height(labels.len(), font_size)
                     .min(scaled_ui_metric(320.0, font_size))
@@ -344,16 +369,36 @@ impl BExplorerIced {
         };
         let extra_archive_rows = usize::from(!menu.send_to_targets.is_empty())
             + usize::from(self.pane(menu.pane).folder_entries.is_some());
+        let context_entry = self.context_entry(menu.pane, menu.target);
+        let drive_entry = context_entry
+            .as_ref()
+            .is_some_and(|entry| entry.kind == EntryKind::Drive);
+        let tools_rows = usize::from(
+            context_entry.as_ref().is_some_and(
+                crate::iced_ui::storage_analysis::storage_analysis_available_for_entry,
+            ) || context_entry.as_ref().is_some_and(
+                crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry,
+            ),
+        );
         let offset_y = match kind {
             ContextSubmenuKind::Archive => {
                 context_submenu_parent_offset(true, 2 + extra_archive_rows, 2, font_size)
             }
-            ContextSubmenuKind::Extract => {
-                context_submenu_parent_offset(true, 3 + extra_archive_rows, 2, font_size)
-            }
+            ContextSubmenuKind::Extract => context_submenu_parent_offset(
+                true,
+                3 + tools_rows + extra_archive_rows,
+                2,
+                font_size,
+            ),
             ContextSubmenuKind::New => context_submenu_parent_offset(true, 1, 1, font_size),
             ContextSubmenuKind::OpenWith => context_submenu_parent_offset(true, 1, 1, font_size),
             ContextSubmenuKind::SendTo => context_submenu_parent_offset(true, 2, 1, font_size),
+            ContextSubmenuKind::Tools => context_tools_submenu_parent_offset(
+                matches!(menu.target, ContextTarget::SidebarDrive(_)),
+                drive_entry,
+                extra_archive_rows,
+                font_size,
+            ),
         };
         let submenu_y =
             (y + offset_y).clamp(8.0, (self.window_size.height - height - 8.0).max(8.0));
@@ -565,6 +610,9 @@ impl BExplorerIced {
         self.context_send_to_submenu = false;
         self.context_send_to_parent_hovered = false;
         self.context_send_to_submenu_hovered = false;
+        self.context_tools_submenu = false;
+        self.context_tools_parent_hovered = false;
+        self.context_tools_submenu_hovered = false;
         self.context_extract_submenu = false;
         self.context_new_submenu = false;
         self.context_archive_parent_hovered = false;
@@ -733,11 +781,13 @@ impl BExplorerIced {
                 let duplicate_cleanup_available = context_entry.as_ref().is_some_and(
                     crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry,
                 );
+                let storage_analysis_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::storage_analysis::storage_analysis_available_for_entry,
+                );
+                let tools_available = duplicate_cleanup_available || storage_analysis_available;
                 menu_height(
                     false,
-                    usize::from(ejectable)
-                        + usize::from(formatable)
-                        + usize::from(duplicate_cleanup_available),
+                    usize::from(ejectable) + usize::from(formatable) + usize::from(tools_available),
                     0,
                 )
             }
@@ -746,6 +796,10 @@ impl BExplorerIced {
                 let duplicate_cleanup_available = context_entry.as_ref().is_some_and(
                     crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry,
                 );
+                let storage_analysis_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::storage_analysis::storage_analysis_available_for_entry,
+                );
+                let tools_available = duplicate_cleanup_available || storage_analysis_available;
                 let drive_entry = context_entry
                     .as_ref()
                     .is_some_and(|entry| entry.kind == EntryKind::Drive);
@@ -757,10 +811,10 @@ impl BExplorerIced {
                                 + usize::from(
                                     entry.drive_kind.is_some_and(DriveKind::is_formatable),
                                 )
-                                + usize::from(duplicate_cleanup_available)
+                                + usize::from(tools_available)
                         })
                         .unwrap_or(0);
-                    return menu_height(true, 2 + action_rows, 1);
+                    return menu_height(true, 3 + action_rows, 1);
                 }
                 let has_extract_action = context_entry.as_ref().is_some_and(|entry| {
                     crate::fs::archive_listing::has_extractable_archive_extension(&entry.path)
@@ -785,7 +839,7 @@ impl BExplorerIced {
                     + usize::from(!menu.send_to_targets.is_empty())
                     + usize::from(has_extract_action)
                     + usize::from(terminal_available)
-                    + usize::from(duplicate_cleanup_available)
+                    + usize::from(tools_available)
                     + advanced_rows;
                 menu_height(true, rows, 4)
             }
@@ -855,6 +909,7 @@ impl BExplorerIced {
             self.context_send_to_submenu = false;
             self.context_extract_submenu = false;
             self.context_new_submenu = false;
+            self.context_tools_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::Archive);
         }
         if command == ContextCommand::ExtractMenu {
@@ -865,6 +920,7 @@ impl BExplorerIced {
             self.context_send_to_submenu = false;
             self.context_extract_submenu = true;
             self.context_new_submenu = false;
+            self.context_tools_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::Extract);
         }
         if command == ContextCommand::OpenWithMenu {
@@ -875,6 +931,7 @@ impl BExplorerIced {
             self.context_archive_submenu = false;
             self.context_extract_submenu = false;
             self.context_new_submenu = false;
+            self.context_tools_submenu = false;
             return Task::batch([
                 self.request_context_submenu_backdrop(ContextSubmenuKind::OpenWith),
                 self.queue_open_with_application_icons(menu.pane, menu.target),
@@ -888,6 +945,7 @@ impl BExplorerIced {
             self.context_archive_submenu = false;
             self.context_extract_submenu = false;
             self.context_new_submenu = false;
+            self.context_tools_submenu = false;
             return Task::batch([
                 self.request_context_submenu_backdrop(ContextSubmenuKind::SendTo),
                 self.queue_current_send_to_target_icons(),
@@ -900,7 +958,19 @@ impl BExplorerIced {
             self.context_send_to_submenu = false;
             self.context_archive_submenu = false;
             self.context_extract_submenu = false;
+            self.context_tools_submenu = false;
             return self.request_context_submenu_backdrop(ContextSubmenuKind::New);
+        }
+        if command == ContextCommand::ToolsMenu {
+            self.keyboard_menu_selection = None;
+            self.context_tools_submenu =
+                self.context_submenu_backdrop_ready(ContextSubmenuKind::Tools);
+            self.context_open_with_submenu = false;
+            self.context_send_to_submenu = false;
+            self.context_archive_submenu = false;
+            self.context_extract_submenu = false;
+            self.context_new_submenu = false;
+            return self.request_context_submenu_backdrop(ContextSubmenuKind::Tools);
         }
         self.dismiss_context_menu();
         match command {
@@ -1029,9 +1099,11 @@ impl BExplorerIced {
                 let paths = self.context_paths(menu.pane, menu.target);
                 self.start_defender_scan(menu.pane, paths)
             }
+            ContextCommand::ToolsMenu => Task::none(),
             ContextCommand::DuplicateCleanup => {
                 self.start_duplicate_cleanup(menu.pane, menu.target)
             }
+            ContextCommand::StorageAnalysis => self.start_storage_analysis(menu.pane, menu.target),
         }
     }
 

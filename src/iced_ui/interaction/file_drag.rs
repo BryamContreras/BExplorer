@@ -62,6 +62,7 @@ impl BExplorerIced {
             explorer::is_trash_item_path(&entry.path),
             &entry.kind,
         );
+        let entry_kind = entry.kind.clone();
         let path = entry.path.clone();
 
         if self
@@ -84,13 +85,40 @@ impl BExplorerIced {
                 state.selected.insert(path);
             }
             state.selection_anchor = Some(index);
+            state.keyboard_selection_cursor = Some(index);
             self.last_entry_click = None;
             return Task::batch([commit_task, self.queue_selected_preview(pane)]);
         }
+
+        let clicked_at = Instant::now();
+        let already_selected =
+            self.pane(pane).selected.len() == 1 && self.pane(pane).selected.contains(&path);
+        let request_rename = entry_click_requests_rename(
+            self.last_entry_click.as_ref(),
+            pane,
+            &path,
+            already_selected,
+        ) && entry_kind != EntryKind::Drive
+            && !explorer::is_virtual_path(&path)
+            && !crate::fs::archive_listing::is_inside_archive(&path);
+        self.last_entry_click = Some(EntryClickState {
+            pane,
+            path: path.clone(),
+            at: clicked_at,
+        });
+        let rename_task = if request_rename {
+            let rename_path = path.clone();
+            Task::perform(delay(ENTRY_CLICK_RENAME_DELAY), move |_| {
+                Message::BeginClickRename(pane, rename_path, clicked_at)
+            })
+        } else {
+            Task::none()
+        };
+
         if !drag_allowed {
             self.select_single(pane, index);
             self.rubber_band = None;
-            return Task::batch([commit_task, self.queue_selected_preview(pane)]);
+            return Task::batch([commit_task, self.queue_selected_preview(pane), rename_task]);
         }
         let collapse_selection_on_click =
             self.pane(pane).selected.len() > 1 && self.pane(pane).selected.contains(&path);
@@ -124,7 +152,7 @@ impl BExplorerIced {
             sidebar_destination: None,
             dragging: false,
         });
-        let mut tasks = vec![commit_task, self.queue_selected_preview(pane)];
+        let mut tasks = vec![commit_task, self.queue_selected_preview(pane), rename_task];
         for entry in &source_entries {
             tasks.extend(self.queue_entry_images(entry));
         }
@@ -138,6 +166,7 @@ impl BExplorerIced {
         let Some(drag) = self.file_drag.take() else {
             return Task::none();
         };
+        self.last_entry_click = None;
         self.fade_out_file_drag_overlay(&drag);
 
         let pane = drag.source_pane;
@@ -444,6 +473,7 @@ impl BExplorerIced {
         let state = self.pane_mut(pane);
         state.selected = selected;
         state.selection_anchor = anchor;
+        state.keyboard_selection_cursor = anchor;
     }
 
     pub(in crate::iced_ui) fn rubber_band_intersecting_indices(
@@ -475,8 +505,22 @@ impl BExplorerIced {
             .detail_column_widths(pane, (self.font_size() - 0.5).max(11.0))
             .total_width();
         let mut selected = Vec::new();
-        let render_limit = self.pane(pane).render_limit;
-        for index in self.filtered_entries(pane).into_iter().take(render_limit) {
+        let entries = self.filtered_entries_ref(pane);
+        let state = self.pane(pane);
+        let (start, end) = if group_mode == GroupMode::None {
+            let range = virtual_table_range(
+                entries.len(),
+                self.detail_row_height(),
+                (state.scroll_offset_y - self.detail_header_height()).max(0.0),
+                state.scroll_viewport_height,
+                state.scroll_velocity_y,
+            );
+            y += range.before;
+            (range.start, range.end)
+        } else {
+            (0, entries.len())
+        };
+        for &index in &entries[start..end] {
             let Some(entry) = self.pane(pane).entries.get(index) else {
                 continue;
             };
@@ -497,6 +541,9 @@ impl BExplorerIced {
                 selected.push(index);
             }
             y += self.detail_row_height();
+            if group_mode != GroupMode::None && y > rect.y + rect.height {
+                break;
+            }
         }
         selected
     }
@@ -511,46 +558,87 @@ impl BExplorerIced {
         let layout = self.visual_layout_for_pane(pane, mode);
         let metrics = layout.metrics;
         let mut selected = Vec::new();
-        let mut y = if group_mode == GroupMode::None {
-            metrics.grid_padding
+        let group_starts = if group_mode == GroupMode::None {
+            Vec::new()
         } else {
-            0.0
-        } - self.pane(pane).scroll_offset_y;
-        let mut col = 0_usize;
-        let mut current_group: Option<String> = None;
-
-        let render_limit = self.pane(pane).render_limit;
-        for index in self.filtered_entries(pane).into_iter().take(render_limit) {
-            let Some(entry) = self.pane(pane).entries.get(index) else {
-                continue;
-            };
-            if group_mode != GroupMode::None {
-                let group = entry_group_label(entry, group_mode);
-                if current_group.as_ref() != Some(&group) {
-                    if col > 0 {
-                        y += metrics.cell_height + metrics.spacing;
-                        col = 0;
-                    }
-                    current_group = Some(group);
-                    y += self.detail_group_height() + metrics.spacing;
+            self.filtered_entry_group_starts(pane)
+        };
+        let entries = self.filtered_entries_ref(pane);
+        let total = entries.len();
+        let state = self.pane(pane);
+        let scroll_offset = state.scroll_offset_y;
+        let row_extent = metrics.cell_height + metrics.spacing;
+        let test_grid_row = |start: usize, end: usize, row_y: f32, selected: &mut Vec<usize>| {
+            for (column, position) in (start..end).enumerate() {
+                let x =
+                    metrics.grid_padding + column as f32 * (metrics.cell_width + metrics.spacing);
+                let item_rect = Rectangle {
+                    x,
+                    y: row_y - scroll_offset,
+                    width: metrics.cell_width,
+                    height: metrics.cell_height,
+                };
+                if rects_intersect(rect, item_rect)
+                    && let Some(index) = entries.get(position).copied()
+                {
+                    selected.push(index);
                 }
             }
+        };
 
-            let x = metrics.grid_padding + col as f32 * (metrics.cell_width + metrics.spacing);
-            let item_rect = Rectangle {
-                x,
-                y,
-                width: metrics.cell_width,
-                height: metrics.cell_height,
-            };
-            if rects_intersect(rect, item_rect) {
-                selected.push(index);
+        if group_mode == GroupMode::None {
+            let row_count = total.div_ceil(layout.columns);
+            let content_start = (rect.y + scroll_offset - metrics.grid_padding).max(0.0);
+            let content_end =
+                (rect.y + rect.height + scroll_offset - metrics.grid_padding).max(0.0);
+            let first_row = ((content_start / row_extent).floor() as usize).min(row_count);
+            let last_row = ((content_end / row_extent).ceil() as usize)
+                .saturating_add(1)
+                .min(row_count);
+            for row_index in first_row..last_row {
+                let start = row_index * layout.columns;
+                let end = (start + layout.columns).min(total);
+                test_grid_row(
+                    start,
+                    end,
+                    metrics.grid_padding + row_index as f32 * row_extent,
+                    &mut selected,
+                );
             }
-
-            col += 1;
-            if col >= layout.columns {
-                col = 0;
-                y += metrics.cell_height + metrics.spacing;
+        } else {
+            let group_extent = self.detail_group_height() + metrics.spacing;
+            let content_start = (rect.y + scroll_offset).max(0.0);
+            let content_end = (rect.y + rect.height + scroll_offset).max(0.0);
+            let mut y = 0.0_f32;
+            for (group_index, &group_start) in group_starts.iter().enumerate() {
+                let group_end = group_starts.get(group_index + 1).copied().unwrap_or(total);
+                let group_rows = (group_end - group_start).div_ceil(layout.columns);
+                let rows_start = y + group_extent;
+                let block_height = group_extent + group_rows as f32 * row_extent;
+                if y + block_height < content_start {
+                    y += block_height;
+                    continue;
+                }
+                if y > content_end {
+                    break;
+                }
+                let first_row = (((content_start - rows_start).max(0.0) / row_extent).floor()
+                    as usize)
+                    .min(group_rows);
+                let last_row = (((content_end - rows_start).max(0.0) / row_extent).ceil() as usize)
+                    .saturating_add(1)
+                    .min(group_rows);
+                for row_index in first_row..last_row {
+                    let start = group_start + row_index * layout.columns;
+                    let end = (start + layout.columns).min(group_end);
+                    test_grid_row(
+                        start,
+                        end,
+                        rows_start + row_index as f32 * row_extent,
+                        &mut selected,
+                    );
+                }
+                y += block_height;
             }
         }
 

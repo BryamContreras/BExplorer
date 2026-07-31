@@ -1,6 +1,6 @@
 [package]
 name = "bexplorer"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2024"
 rust-version = "1.92"
 description = "A native Rust file explorer for Windows and Linux."
@@ -75,6 +75,10 @@ iced_winit = { path = "vendor/iced-winit" }
 # Keep an 8-bit-alpha surface preference and match Iced's premultiplied output
 # so Wayland transparency remains smooth and correctly composed.
 iced_wgpu = { path = "vendor/iced-wgpu" }
+# Iced 0.14 fixes the minimum scrollbar thumb length at 2 px. Keep a tiny
+# extension in-tree so very large virtualized folders still expose a thumb
+# that can grow into an easy drag target on hover.
+iced_widget = { path = "vendor/iced-widget" }
 
 [profile.dev]
 # `cargo run` is used during day-to-day development. A modest optimization

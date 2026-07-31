@@ -58,8 +58,8 @@ pub enum ShortcutAction {
     GoForward,
     EditAddress,
     Open,
-    MoveUp,
-    MoveDown,
+    SwitchPaneFocus,
+    FocusSearch,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,8 +109,8 @@ pub struct ShortcutConfig {
     #[serde(default = "default_edit_address_shortcut")]
     pub edit_address: ShortcutBinding,
     pub open: ShortcutBinding,
-    pub move_up: ShortcutBinding,
-    pub move_down: ShortcutBinding,
+    pub switch_pane_focus: ShortcutBinding,
+    pub focus_search: ShortcutBinding,
 }
 
 impl ShortcutConfig {
@@ -132,8 +132,8 @@ impl ShortcutConfig {
             ShortcutAction::GoForward => &self.go_forward,
             ShortcutAction::EditAddress => &self.edit_address,
             ShortcutAction::Open => &self.open,
-            ShortcutAction::MoveUp => &self.move_up,
-            ShortcutAction::MoveDown => &self.move_down,
+            ShortcutAction::SwitchPaneFocus => &self.switch_pane_focus,
+            ShortcutAction::FocusSearch => &self.focus_search,
         }
     }
 
@@ -155,8 +155,8 @@ impl ShortcutConfig {
             ShortcutAction::GoForward => self.go_forward = binding,
             ShortcutAction::EditAddress => self.edit_address = binding,
             ShortcutAction::Open => self.open = binding,
-            ShortcutAction::MoveUp => self.move_up = binding,
-            ShortcutAction::MoveDown => self.move_down = binding,
+            ShortcutAction::SwitchPaneFocus => self.switch_pane_focus = binding,
+            ShortcutAction::FocusSearch => self.focus_search = binding,
         }
     }
 }
@@ -180,8 +180,8 @@ impl Default for ShortcutConfig {
             go_forward: ShortcutBinding::new("ArrowRight", false, true, false),
             edit_address: ShortcutBinding::new("L", true, false, false),
             open: ShortcutBinding::new("Enter", false, false, false),
-            move_up: ShortcutBinding::new("ArrowUp", false, false, false),
-            move_down: ShortcutBinding::new("ArrowDown", false, false, false),
+            switch_pane_focus: ShortcutBinding::new("Tab", false, false, false),
+            focus_search: ShortcutBinding::new("B", true, false, false),
         }
     }
 }
@@ -236,6 +236,9 @@ pub struct AppConfig {
     pub show_split_preview_panels: bool,
     pub show_preview_panel: bool,
     pub sidebar_visible: bool,
+    pub show_sidebar_bookmarks: bool,
+    pub show_sidebar_network: bool,
+    pub show_sidebar_recents: bool,
     pub default_view: ViewMode,
     pub storage_view: ViewMode,
     pub network_view: ViewMode,
@@ -276,6 +279,9 @@ impl Default for AppConfig {
             show_split_preview_panels: false,
             show_preview_panel: false,
             sidebar_visible: true,
+            show_sidebar_bookmarks: true,
+            show_sidebar_network: true,
+            show_sidebar_recents: true,
             default_view: ViewMode::Details,
             storage_view: ViewMode::Tiles,
             network_view: ViewMode::Tiles,
@@ -398,8 +404,46 @@ mod tests {
         assert_eq!(config.accent_color, [3, 117, 172]);
         assert_eq!(config.vibrancy, VibrancyMode::None);
         assert!(!config.window_maximized);
+        assert!(config.show_sidebar_bookmarks);
+        assert!(config.show_sidebar_network);
+        assert!(config.show_sidebar_recents);
         assert!(config.show_extensions);
         assert!(config.show_hidden);
         assert!(!config.show_hidden_system_drives);
+        assert_eq!(
+            config.shortcuts.switch_pane_focus,
+            ShortcutBinding::new("Tab", false, false, false)
+        );
+        assert_eq!(
+            config.shortcuts.focus_search,
+            ShortcutBinding::new("B", true, false, false)
+        );
+    }
+
+    #[test]
+    fn older_configs_keep_optional_sidebar_sections_visible() {
+        let config: AppConfig = serde_json::from_str(r#"{"language":"es"}"#)
+            .expect("legacy configuration should use defaults for new fields");
+
+        assert!(config.show_sidebar_bookmarks);
+        assert!(config.show_sidebar_network);
+        assert!(config.show_sidebar_recents);
+    }
+
+    #[test]
+    fn legacy_arrow_bindings_migrate_to_pane_and_search_defaults() {
+        let config: AppConfig = serde_json::from_str(
+            r#"{"shortcuts":{"move_up":{"key":"ArrowUp","ctrl":false,"alt":false,"shift":false},"move_down":{"key":"ArrowDown","ctrl":false,"alt":false,"shift":false}}}"#,
+        )
+        .expect("legacy shortcut configuration should remain loadable");
+
+        assert_eq!(
+            config.shortcuts.switch_pane_focus,
+            ShortcutBinding::new("Tab", false, false, false)
+        );
+        assert_eq!(
+            config.shortcuts.focus_search,
+            ShortcutBinding::new("B", true, false, false)
+        );
     }
 }

@@ -300,7 +300,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bexplorer"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "arboard",
  "base64",
@@ -1756,8 +1756,6 @@ dependencies = [
 [[package]]
 name = "iced_widget"
 version = "0.14.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1596afa0d3109c2618e8bc12bae6c11d3064df8f95c42dfce570397dbe957ab"
 dependencies = [
  "iced_renderer",
  "log",

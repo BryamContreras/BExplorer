@@ -68,6 +68,27 @@ struct ScannedFile {
 /// Scan a local directory recursively. Directory links are not followed, so a
 /// symlink cycle cannot make the cleanup scan recurse forever.
 pub fn scan_folder(root: PathBuf, sender: Sender<DuplicateScanEvent>, cancel: Arc<AtomicBool>) {
+    scan_folder_impl(root, sender, cancel, true, None);
+}
+
+/// Scan a directory for a final duplicate-space estimate without publishing
+/// heavyweight candidate snapshots while the scan is still in progress.
+pub fn scan_folder_for_estimate(
+    root: PathBuf,
+    known_total: usize,
+    sender: Sender<DuplicateScanEvent>,
+    cancel: Arc<AtomicBool>,
+) {
+    scan_folder_impl(root, sender, cancel, false, Some(known_total));
+}
+
+fn scan_folder_impl(
+    root: PathBuf,
+    sender: Sender<DuplicateScanEvent>,
+    cancel: Arc<AtomicBool>,
+    publish_candidate_snapshots: bool,
+    known_total: Option<usize>,
+) {
     if !root.is_dir() {
         let _ = sender.send(DuplicateScanEvent::Failed(format!(
             "{} is not a directory",
@@ -76,27 +97,41 @@ pub fn scan_folder(root: PathBuf, sender: Sender<DuplicateScanEvent>, cancel: Ar
         return;
     }
 
-    let mut total = 0_usize;
-    for entry in WalkDir::new(&root).follow_links(false) {
-        if cancel.load(AtomicOrdering::Relaxed) {
-            let _ = sender.send(DuplicateScanEvent::Cancelled);
-            return;
-        }
-        if entry.is_ok_and(|entry| entry.file_type().is_file()) {
-            total += 1;
-            if total.is_multiple_of(SNAPSHOT_FILE_INTERVAL) {
-                let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
+    let total = if let Some(total) = known_total {
+        let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
+        total
+    } else {
+        let mut total = 0_usize;
+        for entry in WalkDir::new(&root)
+            .follow_links(false)
+            .follow_root_links(true)
+            .same_file_system(true)
+        {
+            if cancel.load(AtomicOrdering::Relaxed) {
+                let _ = sender.send(DuplicateScanEvent::Cancelled);
+                return;
+            }
+            if entry.is_ok_and(|entry| entry.file_type().is_file()) {
+                total += 1;
+                if total.is_multiple_of(SNAPSHOT_FILE_INTERVAL) {
+                    let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
+                }
             }
         }
-    }
-    let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
+        let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
+        total
+    };
 
     let mut files = Vec::with_capacity(total);
     let mut scanned = 0_usize;
     let mut skipped = 0_usize;
     let mut last_snapshot = Instant::now();
     let mut last_candidate_snapshot = Instant::now();
-    for entry in WalkDir::new(&root).follow_links(false) {
+    for entry in WalkDir::new(&root)
+        .follow_links(false)
+        .follow_root_links(true)
+        .same_file_system(true)
+    {
         if cancel.load(AtomicOrdering::Relaxed) {
             let _ = sender.send(DuplicateScanEvent::Cancelled);
             return;
@@ -119,9 +154,18 @@ pub fn scan_folder(root: PathBuf, sender: Sender<DuplicateScanEvent>, cancel: Ar
         let should_publish = scanned.is_multiple_of(SNAPSHOT_FILE_INTERVAL)
             || last_snapshot.elapsed() >= SNAPSHOT_TIME_INTERVAL;
         if should_publish {
-            let should_refresh_candidates =
-                should_refresh_candidate_snapshot(scanned, last_candidate_snapshot.elapsed());
-            let duplicates = should_refresh_candidates.then(|| classify_duplicates(&files));
+            let should_refresh_candidates = publish_candidate_snapshots
+                && should_refresh_candidate_snapshot(scanned, last_candidate_snapshot.elapsed());
+            let duplicates = if should_refresh_candidates {
+                let Some(duplicates) = classify_duplicates_cancellable(&files, Some(&cancel))
+                else {
+                    let _ = sender.send(DuplicateScanEvent::Cancelled);
+                    return;
+                };
+                Some(duplicates)
+            } else {
+                None
+            };
             let _ = sender.send(DuplicateScanEvent::Progress {
                 scanned,
                 total,
@@ -136,7 +180,10 @@ pub fn scan_folder(root: PathBuf, sender: Sender<DuplicateScanEvent>, cancel: Ar
         }
     }
 
-    let duplicates = classify_duplicates(&files);
+    let Some(duplicates) = classify_duplicates_cancellable(&files, Some(&cancel)) else {
+        let _ = sender.send(DuplicateScanEvent::Cancelled);
+        return;
+    };
     let _ = sender.send(DuplicateScanEvent::Finished {
         scanned,
         total,
@@ -176,16 +223,31 @@ fn scanned_file(path: &Path) -> std::io::Result<ScannedFile> {
     })
 }
 
+#[cfg(test)]
 fn classify_duplicates(files: &[ScannedFile]) -> Vec<DuplicateFile> {
+    classify_duplicates_cancellable(files, None).expect("uncancelled duplicate classification")
+}
+
+fn classify_duplicates_cancellable(
+    files: &[ScannedFile],
+    cancel: Option<&AtomicBool>,
+) -> Option<Vec<DuplicateFile>> {
     if files.len() < 2 {
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     let mut union = DisjointSet::new(files.len());
-    let mut exact = HashMap::<(&str, &str, u64), usize>::new();
+    let mut exact = HashMap::<(&str, &str, u64), (usize, usize)>::new();
     for (index, file) in files.iter().enumerate() {
-        if let Some(previous) = exact.insert((&file.name, &file.extension, file.size), index) {
-            union.join(previous, index);
+        if duplicate_classification_cancelled(cancel, index) {
+            return None;
+        }
+        let key = (&*file.name, &*file.extension, file.size);
+        if let Some((previous, count)) = exact.get_mut(&key) {
+            union.join(*previous, index);
+            *count = count.saturating_add(1);
+        } else {
+            exact.insert(key, (index, 1));
         }
     }
 
@@ -194,11 +256,17 @@ fn classify_duplicates(files: &[ScannedFile]) -> Vec<DuplicateFile> {
         by_extension.entry(&file.extension).or_default().push(index);
     }
     for indexes in by_extension.values_mut() {
+        if cancel.is_some_and(|cancel| cancel.load(AtomicOrdering::Relaxed)) {
+            return None;
+        }
         // Explorer and browsers commonly preserve both files by adding
         // localized copy markers or numeric counters. Group those names by
         // their stable base even when the unsuffixed original is absent.
         let mut copy_families = HashMap::<&str, usize>::new();
-        for &index in indexes.iter() {
+        for (position, &index) in indexes.iter().enumerate() {
+            if duplicate_classification_cancelled(cancel, position) {
+                return None;
+            }
             let family = copy_family_stem(&files[index].stem);
             if family.chars().count() < MINIMUM_PREFIX_LENGTH {
                 continue;
@@ -210,7 +278,10 @@ fn classify_duplicates(files: &[ScannedFile]) -> Vec<DuplicateFile> {
 
         indexes.sort_unstable_by(|left, right| files[*left].stem.cmp(&files[*right].stem));
         let mut base: Option<usize> = None;
-        for &index in indexes.iter() {
+        for (position, &index) in indexes.iter().enumerate() {
+            if duplicate_classification_cancelled(cancel, position) {
+                return None;
+            }
             let stem = &files[index].stem;
             if stem.chars().count() < MINIMUM_PREFIX_LENGTH {
                 base = Some(index);
@@ -231,24 +302,32 @@ fn classify_duplicates(files: &[ScannedFile]) -> Vec<DuplicateFile> {
 
     let mut groups = HashMap::<usize, Vec<usize>>::new();
     for index in 0..files.len() {
+        if duplicate_classification_cancelled(cancel, index) {
+            return None;
+        }
         let root = union.root(index);
         groups.entry(root).or_default().push(index);
     }
 
     let mut result = Vec::new();
-    for mut indexes in groups.into_values().filter(|group| group.len() > 1) {
+    for (group_index, mut indexes) in groups
+        .into_values()
+        .filter(|group| group.len() > 1)
+        .enumerate()
+    {
+        if duplicate_classification_cancelled(cancel, group_index) {
+            return None;
+        }
         indexes.sort_unstable_by(|left, right| compare_file_age(&files[*left], &files[*right]));
         let original = indexes[0];
         for index in indexes {
             let file = &files[index];
             let kind = if index == original {
                 DuplicateKind::Original
-            } else if files.iter().enumerate().any(|(other_index, other)| {
-                other_index != index
-                    && other.name == file.name
-                    && other.extension == file.extension
-                    && other.size == file.size
-            }) {
+            } else if exact
+                .get(&(&*file.name, &*file.extension, file.size))
+                .is_some_and(|(_, count)| *count > 1)
+            {
                 DuplicateKind::Exact
             } else {
                 DuplicateKind::Possible
@@ -269,7 +348,12 @@ fn classify_duplicates(files: &[ScannedFile]) -> Vec<DuplicateFile> {
             .cmp(&right.extension)
             .then_with(|| compare_duplicate_age(left, right))
     });
-    result
+    Some(result)
+}
+
+fn duplicate_classification_cancelled(cancel: Option<&AtomicBool>, index: usize) -> bool {
+    index.is_multiple_of(SNAPSHOT_FILE_INTERVAL)
+        && cancel.is_some_and(|cancel| cancel.load(AtomicOrdering::Relaxed))
 }
 
 fn names_share_candidate_prefix(shorter: &str, longer: &str) -> bool {
@@ -377,7 +461,9 @@ impl DisjointSet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::{Compression, GzBuilder};
     use std::fs;
+    use std::io::Write;
     use std::sync::mpsc;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -417,6 +503,14 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].kind, DuplicateKind::Original);
         assert_eq!(entries[1].kind, DuplicateKind::Exact);
+    }
+
+    #[test]
+    fn final_classification_honors_cancellation() {
+        let files = [file("photo.jpg", 120, 20), file("photo.jpg", 120, 10)];
+        let cancel = AtomicBool::new(true);
+
+        assert!(classify_duplicates_cancellable(&files, Some(&cancel)).is_none());
     }
 
     #[test]
@@ -596,6 +690,70 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn estimate_scan_uses_the_known_total_and_reaches_completion() {
+        let root = temporary_folder();
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("first.txt"), b"first").unwrap();
+        fs::write(root.join("second.txt"), b"second").unwrap();
+        let (sender, receiver) = mpsc::channel();
+
+        scan_folder_for_estimate(root.clone(), 2, sender, Arc::new(AtomicBool::new(false)));
+
+        let events = receiver.into_iter().collect::<Vec<_>>();
+        assert!(matches!(
+            events.first(),
+            Some(DuplicateScanEvent::Counting { files_found: 2 })
+        ));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            DuplicateScanEvent::Finished {
+                scanned: 2,
+                total: 2,
+                ..
+            }
+        )));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn compressed_archive_is_scanned_as_one_file_without_visiting_internal_names() {
+        let root = temporary_folder();
+        fs::create_dir_all(&root).unwrap();
+        let archive_path = root.join("archive.gz");
+        let archive_file = fs::File::create(&archive_path).unwrap();
+        let mut archive = GzBuilder::new()
+            .filename("inside.txt")
+            .write(archive_file, Compression::default());
+        archive.write_all(b"same").unwrap();
+        archive.finish().unwrap();
+        fs::write(root.join("inside.txt"), b"same").unwrap();
+        let (sender, receiver) = mpsc::channel();
+
+        scan_folder(root.clone(), sender, Arc::new(AtomicBool::new(false)));
+
+        let (scanned, total, duplicates) = receiver
+            .into_iter()
+            .find_map(|event| match event {
+                DuplicateScanEvent::Finished {
+                    scanned,
+                    total,
+                    duplicates,
+                    ..
+                } => Some((scanned, total, duplicates)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(scanned, 2);
+        assert_eq!(total, 2);
+        assert!(
+            duplicates.is_empty(),
+            "the internal inside.txt must not be compared with the real file"
+        );
+
         fs::remove_dir_all(root).unwrap();
     }
 

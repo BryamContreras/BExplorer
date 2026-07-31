@@ -254,65 +254,157 @@ impl BExplorerIced {
         .align_y(Alignment::Center)
         .width(Length::Fixed(table_width));
 
-        let entries = self.filtered_entries(pane);
-        let total = entries.len();
-        let render_limit = self.pane(pane).render_limit.min(total);
-        let mut rows = column![header].width(Length::Fixed(table_width));
         let group_mode = self.effective_group_mode(pane);
-        let mut current_group: Option<String> = None;
-        for index in entries.into_iter().take(render_limit) {
-            let Some(entry) = self.pane(pane).entries.get(index) else {
-                continue;
-            };
-            if group_mode != GroupMode::None {
-                let group = self.localized_entry_group_label(entry, group_mode);
-                if current_group.as_ref() != Some(&group) {
-                    current_group = Some(group.clone());
-                    rows = rows.push(file_group_header(
-                        group,
-                        palette,
-                        self.font_size(),
-                        self.detail_group_height(),
-                    ));
+        let group_starts = if group_mode == GroupMode::None {
+            Vec::new()
+        } else {
+            self.filtered_entry_group_starts(pane)
+        };
+        let entries = self.filtered_entries_ref(pane);
+        let total = entries.len();
+        let mut rows = column![header].width(Length::Fixed(table_width));
+        let state = self.pane(pane);
+        let row_offset = (state.scroll_offset_y - self.detail_header_height()).max(0.0);
+        let viewport_height = state.scroll_viewport_height;
+        let velocity_y = state.scroll_velocity_y;
+        if group_mode == GroupMode::None {
+            let range = virtual_table_range(
+                total,
+                self.detail_row_height(),
+                row_offset,
+                viewport_height,
+                velocity_y,
+            );
+            if range.before > 0.0 {
+                rows = rows.push(
+                    Space::new()
+                        .width(Length::Fixed(table_width))
+                        .height(Length::Fixed(range.before)),
+                );
+            }
+            for &index in &entries[range.start..range.end] {
+                if let Some(entry) = self.pane(pane).entries.get(index) {
+                    rows = rows.push(self.file_row(pane, index, entry, palette, widths));
                 }
             }
-            rows = rows.push(self.file_row(pane, index, entry, palette, widths));
-        }
-        if render_limit < total {
-            rows = rows.push(render_progress_footer(
-                render_limit,
-                total,
-                palette,
-                self.font_size(),
-            ));
+            if range.after > 0.0 {
+                rows = rows.push(
+                    Space::new()
+                        .width(Length::Fixed(table_width))
+                        .height(Length::Fixed(range.after)),
+                );
+            }
+        } else {
+            let row_height = self.detail_row_height();
+            let group_height = self.detail_group_height();
+            let total_height = total as f32 * row_height + group_starts.len() as f32 * group_height;
+            let (window_start, window_end) =
+                virtual_table_pixel_window(row_offset, viewport_height, velocity_y, row_height);
+            let mut rendered_start = None;
+            let mut rendered_end = 0.0_f32;
+            let mut low = 0_usize;
+            let mut high = total;
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let groups_through_entry = group_starts.partition_point(|start| *start <= middle);
+                let entry_bottom =
+                    (middle + 1) as f32 * row_height + groups_through_entry as f32 * group_height;
+                if entry_bottom < window_start {
+                    low = middle + 1;
+                } else {
+                    high = middle;
+                }
+            }
+            for position in low..total {
+                let index = entries[position];
+                let Some(entry) = self.pane(pane).entries.get(index) else {
+                    continue;
+                };
+                let groups_before = group_starts.partition_point(|start| *start < position);
+                let is_group_start = group_starts.get(groups_before) == Some(&position);
+                let mut item_start =
+                    position as f32 * row_height + groups_before as f32 * group_height;
+                if is_group_start {
+                    let header_end = item_start + group_height;
+                    if header_end >= window_start && item_start <= window_end {
+                        if rendered_start.is_none() {
+                            rendered_start = Some(item_start);
+                            if item_start > 0.0 {
+                                rows = rows.push(
+                                    Space::new()
+                                        .width(Length::Fixed(table_width))
+                                        .height(Length::Fixed(item_start)),
+                                );
+                            }
+                        }
+                        rows = rows.push(file_group_header(
+                            self.localized_entry_group_label(entry, group_mode),
+                            palette,
+                            self.font_size(),
+                            group_height,
+                        ));
+                        rendered_end = header_end;
+                    }
+                    item_start = header_end;
+                }
+                let item_end = item_start + row_height;
+                if item_end >= window_start && item_start <= window_end {
+                    if rendered_start.is_none() {
+                        rendered_start = Some(item_start);
+                        if item_start > 0.0 {
+                            rows = rows.push(
+                                Space::new()
+                                    .width(Length::Fixed(table_width))
+                                    .height(Length::Fixed(item_start)),
+                            );
+                        }
+                    }
+                    rows = rows.push(self.file_row(pane, index, entry, palette, widths));
+                    rendered_end = item_end;
+                } else if item_start > window_end && rendered_start.is_some() {
+                    break;
+                }
+            }
+            if rendered_start.is_none() && total_height > 0.0 {
+                rows = rows.push(
+                    Space::new()
+                        .width(Length::Fixed(table_width))
+                        .height(Length::Fixed(total_height)),
+                );
+            } else if rendered_end < total_height {
+                rows = rows.push(
+                    Space::new()
+                        .width(Length::Fixed(table_width))
+                        .height(Length::Fixed(total_height - rendered_end)),
+                );
+            }
         }
 
         // The Scrollable must remain in the widget tree while Ctrl is held so
         // its offset survives modifier-only updates. The overlay intercepts
         // Ctrl+wheel without changing the tree that owns the scroll state.
+        let pane_state = self.pane(pane);
+        let scrollbar_reveal_progress = pane_state.scrollbar_reveal_progress;
+        let vertical_scrollbar_expansion = f32::from(pane_state.scrollbar_vertical_hovered);
+        let horizontal_scrollbar_expansion = f32::from(pane_state.scrollbar_horizontal_hovered);
         let scroller: Element<'_, Message> = scrollable(rows)
             .id(pane_scroll_id(pane))
             .direction(scrollable::Direction::Both {
-                vertical: scrollable::Scrollbar::default(),
-                horizontal: scrollable::Scrollbar::default(),
+                vertical: explorer_scrollbar(vertical_scrollbar_expansion),
+                horizontal: explorer_scrollbar(horizontal_scrollbar_expansion),
             })
             .width(Length::Fill)
             .height(Length::Fill)
             .on_scroll(move |viewport| {
                 Message::PaneScrolled(
                     pane,
-                    viewport.relative_offset().y,
                     viewport.absolute_offset().y,
+                    viewport.bounds().height,
                     viewport.content_bounds().height > viewport.bounds().height,
                 )
             })
             .style(move |theme, status| {
-                explorer_scrollable_style(
-                    palette,
-                    theme,
-                    status,
-                    self.pane(pane).scrollbar_reveal_progress,
-                )
+                explorer_scrollable_style(palette, theme, status, scrollbar_reveal_progress)
             })
             .into();
         let content: Element<'_, Message> = stack(vec![

@@ -515,6 +515,25 @@ mod tests {
     }
 
     #[test]
+    fn optional_sidebar_sections_follow_their_preferences() {
+        let mut config = AppConfig::default();
+        assert!(sidebar_section_enabled(&config, SidebarSection::Favorites));
+        assert!(sidebar_section_enabled(&config, SidebarSection::Network));
+        assert!(sidebar_section_enabled(&config, SidebarSection::Recents));
+        assert!(sidebar_section_enabled(&config, SidebarSection::Places));
+
+        config.show_sidebar_bookmarks = false;
+        config.show_sidebar_network = false;
+        config.show_sidebar_recents = false;
+
+        assert!(!sidebar_section_enabled(&config, SidebarSection::Favorites));
+        assert!(!sidebar_section_enabled(&config, SidebarSection::Network));
+        assert!(!sidebar_section_enabled(&config, SidebarSection::Recents));
+        assert!(sidebar_section_enabled(&config, SidebarSection::Places));
+        assert!(sidebar_section_enabled(&config, SidebarSection::Storage));
+    }
+
+    #[test]
     fn network_printers_use_the_printer_fallback_icon() {
         let mut printer = test_entry("Office printer", EntryKind::Drive, None);
         printer.drive_kind = Some(DriveKind::NetworkPrinter);
@@ -646,16 +665,6 @@ mod tests {
         assert_eq!(rebase_tab_indices(&[0, 1], 1), vec![0]);
         assert_eq!(rebase_tab_indices(&[2, 3], 1), vec![1, 2]);
         assert_eq!(rebase_tab_index(1, 1), None);
-    }
-
-    #[test]
-    fn incremental_rendering_eventually_reaches_every_entry() {
-        let total = 2_350;
-        let mut visible = INITIAL_RENDER_LIMIT;
-        while visible < total {
-            visible = expanded_render_limit(visible, total);
-        }
-        assert_eq!(visible, total);
     }
 
     #[test]
@@ -888,6 +897,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn detail_cells_use_the_available_width_before_ellipsizing() {
+        let font_size = 12.0;
+        for value in [
+            "bline-client-v1.0.0-build.4-setup-unsigned.exe",
+            "Aplicación ejecutable de Windows",
+            "1,023.9 MB",
+            "2026-07-30 10:10",
+        ] {
+            let available_width = estimated_ui_text_width(value, font_size) + 1.0;
+            assert_eq!(
+                ellipsize_to_glyph_width(value, available_width, font_size),
+                value
+            );
+
+            let constrained_width = (available_width - 40.0).max(32.0);
+            let shortened = ellipsize_to_glyph_width(value, constrained_width, font_size);
+            assert!(shortened.ends_with("..."));
+            assert!(estimated_ui_text_width(&shortened, font_size) <= constrained_width);
+            assert!(value.starts_with(shortened.trim_end_matches("...")));
+        }
+    }
+
+    #[test]
+    fn width_based_ellipsis_respects_wide_and_unicode_characters() {
+        for value in [
+            "WWWWWWWWWWWWWWWWWWWW",
+            "Música-configuración-über-larga.exe",
+        ] {
+            let width = 92.0;
+            let shortened = ellipsize_to_glyph_width(value, width, 12.0);
+            let prefix = shortened.trim_end_matches("...");
+
+            assert!(shortened.ends_with("..."));
+            assert!(estimated_ui_text_width(&shortened, 12.0) <= width);
+            assert!(value.starts_with(prefix));
+        }
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn long_native_titles_stay_on_one_ellipsized_line() {
@@ -998,6 +1046,17 @@ mod tests {
     }
 
     #[test]
+    fn split_sidebar_menu_label_stays_on_one_line_when_it_fits() {
+        let font_size = 14.0;
+        let menu_width = scaled_ui_metric(286.0, font_size);
+
+        assert_eq!(
+            adaptive_menu_item_height("Menu lateral en pantalla dividida", font_size, menu_width,),
+            scaled_ui_metric(32.0, font_size)
+        );
+    }
+
+    #[test]
     fn progress_cards_expand_when_large_text_needs_more_than_density_spacing() {
         assert_eq!(progress_card_height(12.0), TRANSFER_CARD_HEIGHT);
         assert!(progress_card_height(18.0) > scaled_ui_metric(TRANSFER_CARD_HEIGHT, 18.0));
@@ -1081,6 +1140,20 @@ mod tests {
     }
 
     #[test]
+    fn storage_analysis_window_is_resizable_without_an_artificial_maximum() {
+        let font_size = 13.0;
+        let expected_size = storage_analysis_window_size(font_size);
+        let expected_minimum = storage_analysis_window_min_size(font_size);
+        let settings = storage_analysis_window_settings(font_size);
+
+        assert_eq!(settings.size, expected_size);
+        assert_eq!(settings.min_size, Some(expected_minimum));
+        assert_eq!(settings.max_size, None);
+        assert!(settings.resizable);
+        assert!(!settings.exit_on_close_request);
+    }
+
+    #[test]
     fn main_window_uses_the_controlled_shutdown_path() {
         let settings = main_window_settings(Size::new(1280.0, 760.0), false);
         assert!(!settings.exit_on_close_request);
@@ -1091,6 +1164,22 @@ mod tests {
         assert!(!keep_process_after_main_window_closes(false, false));
         assert!(keep_process_after_main_window_closes(false, true));
         assert!(keep_process_after_main_window_closes(true, false));
+    }
+
+    #[test]
+    fn storage_polling_continues_after_classification_while_duplicates_run() {
+        assert!(storage_analysis_polling_required(
+            StorageAnalysisPhase::Complete,
+            StorageDuplicateEstimatePhase::Counting,
+        ));
+        assert!(storage_analysis_polling_required(
+            StorageAnalysisPhase::Complete,
+            StorageDuplicateEstimatePhase::Scanning,
+        ));
+        assert!(!storage_analysis_polling_required(
+            StorageAnalysisPhase::Complete,
+            StorageDuplicateEstimatePhase::Complete,
+        ));
     }
 
     #[test]

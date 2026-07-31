@@ -20,34 +20,63 @@ impl BExplorerIced {
         let filter_height = self.filter_control_height();
         let trash_view = self.is_trash_pane(pane);
         let toolbar = row![
-            icon_button(
-                "back",
-                Message::Back(pane),
+            delayed_title_tooltip(
+                icon_button(
+                    "back",
+                    Message::Back(pane),
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
+                self.localized("Atrás", "Back"),
                 palette,
-                false,
                 self.font_size(),
             ),
-            icon_button(
-                "next",
-                Message::Forward(pane),
+            delayed_title_tooltip(
+                icon_button(
+                    "next",
+                    Message::Forward(pane),
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
+                self.localized("Adelante", "Forward"),
                 palette,
-                false,
                 self.font_size(),
             ),
-            icon_button("up", Message::Up(pane), palette, false, self.font_size(),),
-            icon_button(
-                "bookmark",
-                Message::ToggleFavorite(pane),
+            delayed_title_tooltip(
+                icon_button("up", Message::Up(pane), palette, false, self.font_size(),),
+                self.localized("Subir una carpeta", "Go up"),
                 palette,
-                favorite_active,
+                self.font_size(),
+            ),
+            delayed_title_tooltip(
+                icon_button(
+                    "bookmark",
+                    Message::ToggleFavorite(pane),
+                    palette,
+                    favorite_active,
+                    self.font_size(),
+                ),
+                if favorite_active {
+                    self.localized("Quitar de marcadores", "Remove bookmark")
+                } else {
+                    self.localized("Añadir a marcadores", "Add bookmark")
+                },
+                palette,
                 self.font_size(),
             ),
             self.address_bar(pane, palette),
-            icon_button(
-                "refresh",
-                Message::Refresh(pane),
+            delayed_title_tooltip(
+                icon_button(
+                    "refresh",
+                    Message::Refresh(pane),
+                    palette,
+                    false,
+                    self.font_size(),
+                ),
+                self.localized("Actualizar", "Refresh"),
                 palette,
-                false,
                 self.font_size(),
             ),
         ]
@@ -264,7 +293,7 @@ impl BExplorerIced {
                 palette.strong_border
             };
             iced::widget::text_input::Style {
-                background: palette.input_bg.into(),
+                background: chrome_glass_background(palette, palette.input_bg).into(),
                 border: border::rounded(7).color(border_color).width(1),
                 icon: palette.muted_text,
                 placeholder: palette.muted_text,

@@ -10,7 +10,6 @@ pub struct MainWindowAppearanceEvent {
     pub generation: u64,
     pub revision: u64,
     pub maximized: bool,
-    pub refresh_backdrop: bool,
 }
 
 /// Returns the coalesced wake-up receiver for native main-window appearance
@@ -40,8 +39,7 @@ pub fn main_window_appearance_receiver() -> std::sync::mpsc::Receiver<()> {
     receiver
 }
 
-/// Reads the latest native appearance state and consumes the cumulative
-/// backdrop-refresh request.
+/// Reads the latest coalesced native appearance state.
 #[cfg(target_os = "windows")]
 pub fn take_main_window_appearance_event() -> MainWindowAppearanceEvent {
     use std::sync::atomic::Ordering;
@@ -50,7 +48,6 @@ pub fn take_main_window_appearance_event() -> MainWindowAppearanceEvent {
         let generation_before = MAIN_WINDOW_APPEARANCE_GENERATION.load(Ordering::Acquire);
         let revision = MAIN_WINDOW_APPEARANCE_SETTLED_REVISION.load(Ordering::Acquire);
         let maximized = MAIN_WINDOW_APPEARANCE_SETTLED_MAXIMIZED.load(Ordering::Acquire);
-        let refresh_backdrop = MAIN_WINDOW_APPEARANCE_REFRESH.swap(false, Ordering::AcqRel);
         let generation_after = MAIN_WINDOW_APPEARANCE_GENERATION.load(Ordering::Acquire);
 
         if generation_before == generation_after {
@@ -58,14 +55,7 @@ pub fn take_main_window_appearance_event() -> MainWindowAppearanceEvent {
                 generation: generation_after,
                 revision,
                 maximized,
-                refresh_backdrop,
             };
-        }
-
-        // A settle raced this snapshot. Return its cumulative refresh bit to
-        // the shared state and retry against the newest generation.
-        if refresh_backdrop {
-            MAIN_WINDOW_APPEARANCE_REFRESH.store(true, Ordering::Release);
         }
     }
 }
@@ -90,27 +80,88 @@ pub fn main_window_appearance_revision() -> u64 {
     MAIN_WINDOW_APPEARANCE_REVISION.load(Ordering::Acquire)
 }
 
+/// Whether the native window has completed its latest visible geometry burst.
+/// An unavailable hook also returns `true` so the Iced watchdog can fall back
+/// to its own authoritative window query instead of polling forever.
+#[cfg(target_os = "windows")]
+pub fn main_window_appearance_is_settled() -> bool {
+    use std::sync::atomic::Ordering;
+
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+
+    let hwnd = HWND(MAIN_WINDOW_HWND.load(Ordering::Acquire) as *mut _);
+    hwnd.is_invalid()
+        || (MAIN_WINDOW_APPEARANCE_REVISION.load(Ordering::Acquire)
+            == MAIN_WINDOW_APPEARANCE_SETTLED_REVISION.load(Ordering::Acquire)
+            && !MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire)
+            && !main_window_settle_pending()
+            && !unsafe { IsIconic(hwnd).as_bool() })
+}
+
 /// Whether a delayed main-window region update still belongs to the latest
 /// settled native transition.
 #[cfg(target_os = "windows")]
 pub fn main_window_region_update_is_current(revision: u64) -> bool {
     use std::sync::atomic::Ordering;
 
-    revision != 0
-        && MAIN_WINDOW_APPEARANCE_REVISION.load(Ordering::Acquire) == revision
-        && !MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire)
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+
+    let hwnd = HWND(MAIN_WINDOW_HWND.load(Ordering::Acquire) as *mut _);
+    let minimized = !hwnd.is_invalid() && unsafe { IsIconic(hwnd).as_bool() };
+    main_window_update_is_current(
+        revision,
+        MAIN_WINDOW_APPEARANCE_REVISION.load(Ordering::Acquire),
+        MAIN_WINDOW_APPEARANCE_SETTLED_REVISION.load(Ordering::Acquire),
+        MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire),
+        main_window_settle_pending(),
+        hwnd.is_invalid() || minimized,
+    )
 }
 
-/// Whether Acrylic can be reasserted for the supplied native revision.
-///
-/// The final HRGN must already be restored; otherwise DWM and GDI would rebuild
-/// two different visual bounds concurrently.
 #[cfg(target_os = "windows")]
-pub fn main_window_backdrop_update_is_current(revision: u64) -> bool {
+fn main_window_settle_pending() -> bool {
     use std::sync::atomic::Ordering;
 
-    main_window_region_update_is_current(revision)
-        && !MAIN_WINDOW_REGION_SUSPENDED.load(Ordering::Acquire)
+    DEFERRED_APPEARANCE_SETTLE_TIMER.load(Ordering::Acquire) != 0
+        || APPEARANCE_SETTLE_FALLBACK_TOKEN.load(Ordering::Acquire) != 0
+}
+
+/// Releases the native redraw barrier after the final HRGN reconciliation
+/// attempt failed.
+///
+/// A missing rounded region is preferable to leaving the client redraw timer
+/// spinning forever. The cache remains invalid, so the next native geometry
+/// transition will attempt to build the region again.
+#[cfg(target_os = "windows")]
+pub fn abandon_main_window_region_update(revision: u64) {
+    use std::sync::atomic::Ordering;
+
+    if !main_window_region_update_is_current(revision) {
+        return;
+    }
+
+    invalidate_main_window_region_cache();
+    MAIN_WINDOW_REGION_SUSPENDED.store(false, Ordering::Release);
+    rearm_pending_client_redraw();
+}
+
+#[cfg(target_os = "windows")]
+fn main_window_update_is_current(
+    requested_revision: u64,
+    current_revision: u64,
+    settled_revision: u64,
+    in_size_move: bool,
+    settle_pending: bool,
+    unavailable: bool,
+) -> bool {
+    requested_revision != 0
+        && current_revision == requested_revision
+        && settled_revision == requested_revision
+        && !in_size_move
+        && !settle_pending
+        && !unavailable
 }
 
 #[cfg(target_os = "windows")]
@@ -123,8 +174,7 @@ pub fn apply_small_window_corners(
     use raw_window_handle::RawWindowHandle;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{
-        DWMNCRP_DISABLED, DWMWA_NCRENDERING_POLICY, DWMWA_WINDOW_CORNER_PREFERENCE,
-        DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute,
+        DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUND, DwmSetWindowAttribute,
     };
 
     let RawWindowHandle::Win32(win32) = handle.as_raw() else {
@@ -138,16 +188,12 @@ pub fn apply_small_window_corners(
         DWMWCP_ROUND
     };
     unsafe {
-        // Winit extends the client area over native non-client styles. DWM can
-        // still compose that latent frame during Shell transitions, so disable
-        // its rendering here. The main-window hook below removes WS_CAPTION
-        // while retaining the resize and window-management styles used by Snap.
-        DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_NCRENDERING_POLICY,
-            &DWMNCRP_DISABLED as *const _ as *const _,
-            std::mem::size_of_val(&DWMNCRP_DISABLED) as u32,
-        )?;
+        // Keep DWM non-client rendering at its winit-configured default.
+        // Transparent winit windows use DwmEnableBlurBehindWindow; forcing
+        // DWMNCRP_DISABLED here invalidates that transparency path when DWM
+        // rebuilds the surface during repeated Snap/maximize transitions. The
+        // main-window hook removes WS_CAPTION/WS_EX_WINDOWEDGE and suppresses
+        // stray WM_NCPAINT instead, while preserving resize and Snap styles.
         DwmSetWindowAttribute(
             hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -204,6 +250,20 @@ pub fn apply_main_window_region(
         return Ok(());
     }
 
+    // A transition suspends the old rounded region by setting HRGN to NULL.
+    // Maximized windows also require a NULL region, so that suspension is
+    // already the final native shape. Mark it reconciled without calling
+    // SetWindowRgn(NULL) a second time (which would emit another pair of
+    // WINDOWPOS messages and extend the compositor transaction).
+    if radius <= 1 && MAIN_WINDOW_REGION_SUSPENDED.swap(false, Ordering::AcqRel) {
+        MAIN_WINDOW_REGION_CACHE_HWND.store(hwnd_value, Ordering::Release);
+        MAIN_WINDOW_REGION_CACHE_WIDTH.store(width, Ordering::Release);
+        MAIN_WINDOW_REGION_CACHE_HEIGHT.store(height, Ordering::Release);
+        MAIN_WINDOW_REGION_CACHE_RADIUS.store(radius, Ordering::Release);
+        rearm_pending_client_redraw();
+        return Ok(());
+    }
+
     // Publish the intended cache entry before SetWindowRgn. The call sends
     // WINDOWPOS messages synchronously, which can re-enter this WndProc and
     // ultimately produce WM_SIZE. The mutation guard makes those messages
@@ -219,6 +279,7 @@ pub fn apply_main_window_region(
     match result {
         Ok(()) => {
             MAIN_WINDOW_REGION_SUSPENDED.store(false, Ordering::Release);
+            rearm_pending_client_redraw();
             Ok(())
         }
         Err(error) => {
@@ -292,14 +353,21 @@ pub fn install_main_window_hooks(
         }
         AUTOPLAY_CANCEL_MESSAGE.store(registered, Ordering::Release);
     }
-    let appearance_message = DEFERRED_APPEARANCE_SETTLE_MESSAGE.load(Ordering::Acquire);
-    if appearance_message == 0 {
-        let registered = unsafe { RegisterWindowMessageW(w!("BExplorer.WindowAppearanceSettled")) };
-        if registered != 0 {
-            DEFERRED_APPEARANCE_SETTLE_MESSAGE.store(registered, Ordering::Release);
+    if APPEARANCE_SETTLE_FALLBACK_MESSAGE.load(Ordering::Acquire) == 0 {
+        let registered =
+            unsafe { RegisterWindowMessageW(w!("BExplorer.AppearanceSettleFallback")) };
+        if registered == 0 {
+            return Ok(());
         }
+        APPEARANCE_SETTLE_FALLBACK_MESSAGE.store(registered, Ordering::Release);
     }
-
+    if CLIENT_REDRAW_FALLBACK_MESSAGE.load(Ordering::Acquire) == 0 {
+        let registered = unsafe { RegisterWindowMessageW(w!("BExplorer.ClientRedrawFallback")) };
+        if registered == 0 {
+            return Ok(());
+        }
+        CLIENT_REDRAW_FALLBACK_MESSAGE.store(registered, Ordering::Release);
+    }
     if MAIN_WINDOW_HWND.load(Ordering::Acquire) != 0 {
         return Ok(());
     }
@@ -319,7 +387,13 @@ pub fn install_main_window_hooks(
     MAIN_WINDOW_HWND.store(hwnd_value, Ordering::Release);
     MAIN_WINDOW_ACTIVE.store(unsafe { GetForegroundWindow() == hwnd }, Ordering::Release);
     reset_main_window_transition_state(hwnd);
-    remove_native_frame_styles(hwnd)
+    let frame_result = remove_native_frame_styles(hwnd);
+    // SWP_FRAMECHANGED below intentionally keeps the current size, so Windows
+    // is not required to emit WM_SIZE. Establish an initial settled baseline
+    // explicitly; otherwise the logical watchdog could wait for a resize that
+    // never arrives.
+    defer_main_window_appearance_settle(hwnd);
+    frame_result
 }
 
 #[cfg(target_os = "windows")]
@@ -362,23 +436,52 @@ fn remove_native_frame_styles(
 static AUTOPLAY_CANCEL_MESSAGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[cfg(target_os = "windows")]
+static APPEARANCE_SETTLE_FALLBACK_MESSAGE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "windows")]
+static APPEARANCE_SETTLE_FALLBACK_TOKEN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(target_os = "windows")]
+static CLIENT_REDRAW_FALLBACK_MESSAGE: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "windows")]
+static CLIENT_REDRAW_FALLBACK_TOKEN: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(target_os = "windows")]
 static DEFERRED_CLIENT_REDRAW_TIMER: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(target_os = "windows")]
+static DEFERRED_CLIENT_REDRAW_TIMER_SEQUENCE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(target_os = "windows")]
+static MAIN_WINDOW_CLIENT_REDRAW_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
 const DEFERRED_CLIENT_REDRAW_DELAY_MS: u32 = 20;
 
 #[cfg(target_os = "windows")]
-static DEFERRED_APPEARANCE_SETTLE_MESSAGE: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(0);
+static DEFERRED_APPEARANCE_SETTLE_TIMER: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(target_os = "windows")]
-static DEFERRED_APPEARANCE_SETTLE_PENDING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static DEFERRED_APPEARANCE_SETTLE_TIMER_SEQUENCE: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(target_os = "windows")]
-static DEFERRED_APPEARANCE_REFRESH_PENDING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+const DEFERRED_APPEARANCE_SETTLE_DELAY_MS: u32 = 90;
+
+#[cfg(target_os = "windows")]
+const CLIENT_REDRAW_TIMER_NAMESPACE: usize = 0xA000_0000;
+
+#[cfg(target_os = "windows")]
+const APPEARANCE_SETTLE_TIMER_NAMESPACE: usize = 0xB000_0000;
 
 #[cfg(target_os = "windows")]
 static MAIN_WINDOW_APPEARANCE_SENDER: std::sync::OnceLock<
@@ -402,36 +505,12 @@ static MAIN_WINDOW_APPEARANCE_SETTLED_MAXIMIZED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
-static MAIN_WINDOW_APPEARANCE_REFRESH: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "windows")]
 static MAIN_WINDOW_NATIVE_MAXIMIZED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
 #[cfg(target_os = "windows")]
 static MAIN_WINDOW_IN_SIZE_MOVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "windows")]
-static MAIN_WINDOW_SIZE_MOVE_SAW_SIZING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "windows")]
-static MAIN_WINDOW_SIZE_MOVE_DPI_CHANGED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "windows")]
-static MAIN_WINDOW_SIZE_MOVE_STARTED_MAXIMIZED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-#[cfg(target_os = "windows")]
-static MAIN_WINDOW_SIZE_MOVE_START_WIDTH: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(0);
-
-#[cfg(target_os = "windows")]
-static MAIN_WINDOW_SIZE_MOVE_START_HEIGHT: std::sync::atomic::AtomicI32 =
-    std::sync::atomic::AtomicI32::new(0);
 
 #[cfg(target_os = "windows")]
 static MAIN_WINDOW_REGION_MUTATING: std::sync::atomic::AtomicBool =
@@ -469,6 +548,16 @@ static MAIN_WINDOW_PREV_WNDPROC: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 
 #[cfg(target_os = "windows")]
+fn next_window_timer_id(sequence: &std::sync::atomic::AtomicUsize, namespace: usize) -> usize {
+    use std::sync::atomic::Ordering;
+
+    const GENERATION_MASK: usize = 0x0FFF_FFFF;
+
+    let generation = sequence.fetch_add(1, Ordering::AcqRel).wrapping_add(1) & GENERATION_MASK;
+    namespace | generation.max(1)
+}
+
+#[cfg(target_os = "windows")]
 fn advance_main_window_appearance_revision() -> u64 {
     use std::sync::atomic::Ordering;
 
@@ -496,14 +585,8 @@ fn reset_main_window_transition_state(hwnd: windows::Win32::Foundation::HWND) {
     advance_main_window_appearance_revision();
     MAIN_WINDOW_NATIVE_MAXIMIZED.store(unsafe { IsZoomed(hwnd).as_bool() }, Ordering::Release);
     MAIN_WINDOW_IN_SIZE_MOVE.store(false, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_SAW_SIZING.store(false, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_DPI_CHANGED.store(false, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_STARTED_MAXIMIZED.store(false, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_START_WIDTH.store(0, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_START_HEIGHT.store(0, Ordering::Release);
-    DEFERRED_APPEARANCE_SETTLE_PENDING.store(false, Ordering::Release);
-    DEFERRED_APPEARANCE_REFRESH_PENDING.store(false, Ordering::Release);
-    MAIN_WINDOW_APPEARANCE_REFRESH.store(false, Ordering::Release);
+    cancel_appearance_settle(hwnd);
+    cancel_client_redraw(hwnd);
     MAIN_WINDOW_REGION_MUTATING.store(false, Ordering::Release);
     MAIN_WINDOW_REGION_SUSPENDED.store(false, Ordering::Release);
     invalidate_main_window_region_cache();
@@ -534,33 +617,16 @@ fn main_window_outer_size(hwnd: windows::Win32::Foundation::HWND) -> Option<(i32
 }
 
 #[cfg(target_os = "windows")]
-fn size_move_needs_backdrop_refresh(
-    started_maximized: bool,
-    maximized: bool,
-    saw_sizing: bool,
-    size_changed: bool,
-    dpi_changed: bool,
-) -> bool {
-    dpi_changed || maximized != started_maximized || (!saw_sizing && size_changed)
-}
-
-#[cfg(target_os = "windows")]
 fn begin_main_window_size_move(hwnd: windows::Win32::Foundation::HWND) {
     use std::sync::atomic::Ordering;
 
     use windows::Win32::UI::WindowsAndMessaging::IsZoomed;
 
+    cancel_appearance_settle(hwnd);
     advance_main_window_appearance_revision();
     let maximized = unsafe { IsZoomed(hwnd).as_bool() };
-    let (width, height) = main_window_outer_size(hwnd).unwrap_or_default();
     MAIN_WINDOW_NATIVE_MAXIMIZED.store(maximized, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_STARTED_MAXIMIZED.store(maximized, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_START_WIDTH.store(width, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_START_HEIGHT.store(height, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_SAW_SIZING.store(false, Ordering::Release);
-    MAIN_WINDOW_SIZE_MOVE_DPI_CHANGED.store(false, Ordering::Release);
     MAIN_WINDOW_IN_SIZE_MOVE.store(true, Ordering::Release);
-    suspend_main_window_region(hwnd);
 }
 
 #[cfg(target_os = "windows")]
@@ -572,10 +638,7 @@ fn prepare_main_window_position_change(
 
     use windows::Win32::UI::WindowsAndMessaging::{SWP_NOSIZE, WINDOWPOS};
 
-    if lparam.0 == 0
-        || MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire)
-        || MAIN_WINDOW_REGION_MUTATING.load(Ordering::Acquire)
-    {
+    if lparam.0 == 0 || MAIN_WINDOW_REGION_MUTATING.load(Ordering::Acquire) {
         return;
     }
 
@@ -590,11 +653,24 @@ fn prepare_main_window_position_change(
         return;
     }
 
+    if MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire) {
+        // A pure title-bar move must not churn the HRGN. Suspend it only when
+        // the interactive transaction actually changes size (border resize,
+        // restore-from-maximized, or top-edge Snap).
+        suspend_main_window_region(hwnd);
+        return;
+    }
+
     // ShowWindow/window::maximize and system shortcuts do not enter the modal
     // size/move loop. Remove the old-size HRGN before Windows grows the native
     // surface so it cannot clip the new renderer frame.
+    cancel_appearance_settle(hwnd);
     advance_main_window_appearance_revision();
     suspend_main_window_region(hwnd);
+    // WINDOWPOSCHANGED/WM_SIZE normally rearm this deadline. Arming it here as
+    // well guarantees liveness if Windows cancels the transaction after only
+    // sending WINDOWPOSCHANGING.
+    defer_main_window_appearance_settle(hwnd);
 }
 
 #[cfg(target_os = "windows")]
@@ -607,9 +683,18 @@ fn suspend_main_window_region(hwnd: windows::Win32::Foundation::HWND) {
         return;
     }
 
+    let hwnd_value = hwnd.0 as isize;
+    let already_unclipped = MAIN_WINDOW_REGION_CACHE_HWND.load(Ordering::Acquire) == hwnd_value
+        && MAIN_WINDOW_REGION_CACHE_RADIUS.load(Ordering::Acquire) <= 1;
+
     // Invalidate before entering SetWindowRgn because it synchronously emits
     // WINDOWPOS messages. A later settle must always rebuild the final region.
     invalidate_main_window_region_cache();
+    if already_unclipped {
+        // A maximized window already owns no HRGN. Mark the new transaction as
+        // suspended without asking USER32/DWM to remove the same region again.
+        return;
+    }
     MAIN_WINDOW_REGION_MUTATING.store(true, Ordering::Release);
     let changed = unsafe { SetWindowRgn(hwnd, HRGN::default(), false) } != 0;
     MAIN_WINDOW_REGION_MUTATING.store(false, Ordering::Release);
@@ -626,26 +711,8 @@ fn finish_main_window_size_move(hwnd: windows::Win32::Foundation::HWND) {
 
     MAIN_WINDOW_IN_SIZE_MOVE.store(false, Ordering::Release);
     let maximized = unsafe { IsZoomed(hwnd).as_bool() };
-    let started_maximized = MAIN_WINDOW_SIZE_MOVE_STARTED_MAXIMIZED.load(Ordering::Acquire);
-    let saw_sizing = MAIN_WINDOW_SIZE_MOVE_SAW_SIZING.load(Ordering::Acquire);
-    let dpi_changed = MAIN_WINDOW_SIZE_MOVE_DPI_CHANGED.load(Ordering::Acquire);
-    let start_width = MAIN_WINDOW_SIZE_MOVE_START_WIDTH.load(Ordering::Acquire);
-    let start_height = MAIN_WINDOW_SIZE_MOVE_START_HEIGHT.load(Ordering::Acquire);
-    let size_changed = main_window_outer_size(hwnd)
-        .is_some_and(|(width, height)| width != start_width || height != start_height);
-
-    // A border resize only needs its final HRGN. A title-bar transaction whose
-    // size changed is a Snap operation; maximize/restore and DPI transitions
-    // also rebuild DWM's visual and therefore request a backdrop refresh.
-    let refresh_backdrop = size_move_needs_backdrop_refresh(
-        started_maximized,
-        maximized,
-        saw_sizing,
-        size_changed,
-        dpi_changed,
-    );
     MAIN_WINDOW_NATIVE_MAXIMIZED.store(maximized, Ordering::Release);
-    defer_main_window_appearance_settle(hwnd, refresh_backdrop);
+    defer_main_window_appearance_settle(hwnd);
 }
 
 #[cfg(target_os = "windows")]
@@ -654,7 +721,21 @@ fn observe_main_window_size(hwnd: windows::Win32::Foundation::HWND, size_kind: u
 
     use windows::Win32::UI::WindowsAndMessaging::{SIZE_MAXIMIZED, SIZE_MINIMIZED, SIZE_RESTORED};
 
-    if MAIN_WINDOW_REGION_MUTATING.load(Ordering::Acquire) || size_kind == SIZE_MINIMIZED {
+    if MAIN_WINDOW_REGION_MUTATING.load(Ordering::Acquire) {
+        return;
+    }
+    if !matches!(size_kind, SIZE_RESTORED | SIZE_MINIMIZED | SIZE_MAXIMIZED) {
+        // SIZE_MAXSHOW/SIZE_MAXHIDE are popup notifications. They must not
+        // open a main-window geometry revision that can never settle.
+        return;
+    }
+    if size_kind == SIZE_MINIMIZED {
+        // Invalidate queued Iced/native work and leave the current region state
+        // untouched while hidden (it may already be suspended by the preceding
+        // WINDOWPOSCHANGING). Restoration opens a fresh visible revision.
+        advance_main_window_appearance_revision();
+        cancel_appearance_settle(hwnd);
+        cancel_client_redraw(hwnd);
         return;
     }
 
@@ -668,43 +749,64 @@ fn observe_main_window_size(hwnd: windows::Win32::Foundation::HWND, size_kind: u
         suspend_main_window_region(hwnd);
     }
 
-    let refresh_backdrop = match size_kind {
+    match size_kind {
         SIZE_MAXIMIZED => {
             MAIN_WINDOW_NATIVE_MAXIMIZED.store(true, Ordering::Release);
-            // Reassert even if the cached state was already maximized. DWM can
-            // rebuild the visual during repeated top-edge Snap transactions.
-            true
         }
-        SIZE_RESTORED => MAIN_WINDOW_NATIVE_MAXIMIZED.swap(false, Ordering::AcqRel),
+        SIZE_RESTORED => {
+            MAIN_WINDOW_NATIVE_MAXIMIZED.store(false, Ordering::Release);
+        }
         _ => return,
-    };
+    }
 
-    defer_main_window_appearance_settle(hwnd, refresh_backdrop);
+    defer_main_window_appearance_settle(hwnd);
 }
 
 #[cfg(target_os = "windows")]
-fn defer_main_window_appearance_settle(
-    hwnd: windows::Win32::Foundation::HWND,
-    refresh_backdrop: bool,
-) {
+fn defer_main_window_appearance_settle(hwnd: windows::Win32::Foundation::HWND) {
     use std::sync::atomic::Ordering;
 
     use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SetTimer};
 
-    if refresh_backdrop {
-        DEFERRED_APPEARANCE_REFRESH_PENDING.store(true, Ordering::Release);
-    }
     if MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire) {
         return;
     }
 
-    let message = DEFERRED_APPEARANCE_SETTLE_MESSAGE.load(Ordering::Acquire);
-    if message == 0 || DEFERRED_APPEARANCE_SETTLE_PENDING.swap(true, Ordering::AcqRel) {
+    // Recreate the timer to reset the quiet-period deadline. A fresh identifier
+    // also makes a WM_TIMER already queued for the previous
+    // deadline distinguishable after KillTimer, which does not remove queued
+    // messages.
+    cancel_appearance_settle(hwnd);
+    let timer_id = next_window_timer_id(
+        &DEFERRED_APPEARANCE_SETTLE_TIMER_SEQUENCE,
+        APPEARANCE_SETTLE_TIMER_NAMESPACE,
+    );
+    let timer = unsafe { SetTimer(hwnd, timer_id, DEFERRED_APPEARANCE_SETTLE_DELAY_MS, None) };
+    if timer != 0 {
+        DEFERRED_APPEARANCE_SETTLE_TIMER.store(timer_id, Ordering::Release);
+        APPEARANCE_SETTLE_FALLBACK_TOKEN.store(0, Ordering::Release);
         return;
     }
-    if unsafe { PostMessageW(hwnd, message, WPARAM(0), LPARAM(0)) }.is_err() {
-        DEFERRED_APPEARANCE_SETTLE_PENDING.store(false, Ordering::Release);
+
+    // Timer allocation can fail under resource pressure. Post a registered
+    // window message as a last-resort queue barrier so a failed SetTimer cannot
+    // leave the HRGN suspended forever. The normal path always retains the
+    // 90 ms quiet-period debounce.
+    APPEARANCE_SETTLE_FALLBACK_TOKEN.store(timer_id, Ordering::Release);
+    let message = APPEARANCE_SETTLE_FALLBACK_MESSAGE.load(Ordering::Acquire);
+    if message == 0 || unsafe { PostMessageW(hwnd, message, WPARAM(timer_id), LPARAM(0)) }.is_err()
+    {
+        // Registration is required before the hook is installed, so reaching
+        // this branch means the queue itself is unavailable. Publish directly
+        // as the final liveness guarantee; subsequent geometry notifications
+        // will open a newer revision if the transaction is still progressing.
+        if APPEARANCE_SETTLE_FALLBACK_TOKEN
+            .compare_exchange(timer_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            publish_main_window_appearance_settle(hwnd);
+        }
     }
 }
 
@@ -714,24 +816,22 @@ fn publish_main_window_appearance_settle(hwnd: windows::Win32::Foundation::HWND)
 
     use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsZoomed};
 
-    DEFERRED_APPEARANCE_SETTLE_PENDING.store(false, Ordering::Release);
     if MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire) || unsafe { IsIconic(hwnd).as_bool() } {
         return;
     }
 
     let maximized = unsafe { IsZoomed(hwnd).as_bool() };
-    let refresh_backdrop = DEFERRED_APPEARANCE_REFRESH_PENDING.swap(false, Ordering::AcqRel);
     MAIN_WINDOW_NATIVE_MAXIMIZED.store(maximized, Ordering::Release);
     MAIN_WINDOW_APPEARANCE_SETTLED_MAXIMIZED.store(maximized, Ordering::Release);
-    if refresh_backdrop {
-        MAIN_WINDOW_APPEARANCE_REFRESH.store(true, Ordering::Release);
-    }
     MAIN_WINDOW_APPEARANCE_SETTLED_REVISION.store(
         MAIN_WINDOW_APPEARANCE_REVISION.load(Ordering::Acquire),
         Ordering::Release,
     );
     MAIN_WINDOW_APPEARANCE_GENERATION.fetch_add(1, Ordering::Release);
     notify_main_window_appearance();
+    if MAIN_WINDOW_CLIENT_REDRAW_PENDING.load(Ordering::Acquire) {
+        defer_client_redraw(hwnd);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -761,8 +861,8 @@ unsafe extern "system" fn main_window_wndproc(
         CallWindowProcW, DBT_DEVICEARRIVAL, DBT_DEVICEREMOVECOMPLETE, DBT_DEVNODES_CHANGED,
         DefWindowProcW, IsIconic, WM_ACTIVATE, WM_DEVICECHANGE, WM_DPICHANGED, WM_ENTERSIZEMOVE,
         WM_EXITSIZEMOVE, WM_GETMINMAXINFO, WM_NCACTIVATE, WM_NCDESTROY, WM_NCPAINT, WM_SIZE,
-        WM_SIZING, WM_STYLECHANGING, WM_SYNCPAINT, WM_TIMER, WM_WINDOWPOSCHANGED,
-        WM_WINDOWPOSCHANGING, WNDPROC,
+        WM_STYLECHANGING, WM_SYNCPAINT, WM_TIMER, WM_WINDOWPOSCHANGED, WM_WINDOWPOSCHANGING,
+        WNDPROC,
     };
 
     let is_minimized = if matches!(msg, WM_ACTIVATE | WM_NCACTIVATE | WM_NCPAINT | WM_SYNCPAINT) {
@@ -783,24 +883,42 @@ unsafe extern "system" fn main_window_wndproc(
     if autoplay_message != 0 && msg == autoplay_message {
         return LRESULT(1);
     }
-    let redraw_timer = DEFERRED_CLIENT_REDRAW_TIMER.load(Ordering::Acquire);
-    if redraw_timer != 0 && msg == WM_TIMER && wparam.0 == redraw_timer {
-        use windows::Win32::Graphics::Gdi::{HRGN, RDW_INTERNALPAINT, RedrawWindow};
-
-        cancel_client_redraw(hwnd);
-        if !MAIN_WINDOW_ACTIVE.load(Ordering::Acquire) || unsafe { IsIconic(hwnd).as_bool() } {
-            return LRESULT(0);
+    let settle_fallback_message = APPEARANCE_SETTLE_FALLBACK_MESSAGE.load(Ordering::Acquire);
+    if settle_fallback_message != 0 && msg == settle_fallback_message {
+        let token = wparam.0;
+        if token != 0
+            && APPEARANCE_SETTLE_FALLBACK_TOKEN
+                .compare_exchange(token, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            && DEFERRED_APPEARANCE_SETTLE_TIMER.load(Ordering::Acquire) == 0
+            && !MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire)
+            && !unsafe { IsIconic(hwnd).as_bool() }
+        {
+            publish_main_window_appearance_settle(hwnd);
         }
-        // Activation can emit both WM_ACTIVATE and WM_SYNCPAINT. The one-shot
-        // timer is rearmed by each signal, so Iced presents one frame only
-        // after DWM has had a compositor frame to leave Acrylic's inactive
-        // fallback. This preserves the stale-frame fix without amplifying the
-        // native material transition into two visible flashes.
-        let _ = unsafe { RedrawWindow(hwnd, None, HRGN::default(), RDW_INTERNALPAINT) };
         return LRESULT(0);
     }
-    let appearance_message = DEFERRED_APPEARANCE_SETTLE_MESSAGE.load(Ordering::Acquire);
-    if appearance_message != 0 && msg == appearance_message {
+    let redraw_fallback_message = CLIENT_REDRAW_FALLBACK_MESSAGE.load(Ordering::Acquire);
+    if redraw_fallback_message != 0 && msg == redraw_fallback_message {
+        let token = wparam.0;
+        if token != 0
+            && CLIENT_REDRAW_FALLBACK_TOKEN
+                .compare_exchange(token, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            flush_pending_client_redraw(hwnd);
+        }
+        return LRESULT(0);
+    }
+    let redraw_timer = DEFERRED_CLIENT_REDRAW_TIMER.load(Ordering::Acquire);
+    if redraw_timer != 0 && msg == WM_TIMER && wparam.0 == redraw_timer {
+        stop_client_redraw_timer(hwnd);
+        flush_pending_client_redraw(hwnd);
+        return LRESULT(0);
+    }
+    let appearance_timer = DEFERRED_APPEARANCE_SETTLE_TIMER.load(Ordering::Acquire);
+    if appearance_timer != 0 && msg == WM_TIMER && wparam.0 == appearance_timer {
+        cancel_appearance_settle(hwnd);
         publish_main_window_appearance_settle(hwnd);
         return LRESULT(0);
     }
@@ -829,8 +947,6 @@ unsafe extern "system" fn main_window_wndproc(
         let previous: WNDPROC = unsafe { std::mem::transmute(previous) };
         if msg == WM_ENTERSIZEMOVE {
             begin_main_window_size_move(hwnd);
-        } else if msg == WM_SIZING {
-            MAIN_WINDOW_SIZE_MOVE_SAW_SIZING.store(true, Ordering::Release);
         } else if msg == WM_WINDOWPOSCHANGING {
             prepare_main_window_position_change(hwnd, lparam);
         }
@@ -848,13 +964,11 @@ unsafe extern "system" fn main_window_wndproc(
         if msg == WM_SIZE {
             observe_main_window_size(hwnd, wparam.0 as u32);
         } else if msg == WM_DPICHANGED {
-            if MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire) {
-                MAIN_WINDOW_SIZE_MOVE_DPI_CHANGED.store(true, Ordering::Release);
-            } else {
+            if !MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire) {
                 advance_main_window_appearance_revision();
                 suspend_main_window_region(hwnd);
+                defer_main_window_appearance_settle(hwnd);
             }
-            defer_main_window_appearance_settle(hwnd, true);
         } else if msg == WM_EXITSIZEMOVE {
             finish_main_window_size_move(hwnd);
         } else if msg == WM_WINDOWPOSCHANGED
@@ -865,7 +979,7 @@ unsafe extern "system" fn main_window_wndproc(
             // WM_SIZE normally requested this already. Keep WINDOWPOSCHANGED
             // as the non-modal transaction boundary as well so a shell path
             // that omits WM_SIZE cannot leave the HRGN suspended.
-            defer_main_window_appearance_settle(hwnd, false);
+            defer_main_window_appearance_settle(hwnd);
         }
         if should_defer_client_redraw(
             msg,
@@ -886,12 +1000,8 @@ unsafe extern "system" fn main_window_wndproc(
             MAIN_WINDOW_PREV_WNDPROC.store(0, Ordering::Release);
             MAIN_WINDOW_ACTIVE.store(false, Ordering::Release);
             cancel_client_redraw(hwnd);
-            DEFERRED_APPEARANCE_SETTLE_PENDING.store(false, Ordering::Release);
-            DEFERRED_APPEARANCE_REFRESH_PENDING.store(false, Ordering::Release);
-            MAIN_WINDOW_APPEARANCE_REFRESH.store(false, Ordering::Release);
+            cancel_appearance_settle(hwnd);
             MAIN_WINDOW_IN_SIZE_MOVE.store(false, Ordering::Release);
-            MAIN_WINDOW_SIZE_MOVE_SAW_SIZING.store(false, Ordering::Release);
-            MAIN_WINDOW_SIZE_MOVE_DPI_CHANGED.store(false, Ordering::Release);
             MAIN_WINDOW_REGION_MUTATING.store(false, Ordering::Release);
             MAIN_WINDOW_REGION_SUSPENDED.store(false, Ordering::Release);
             advance_main_window_appearance_revision();
@@ -1002,17 +1112,81 @@ fn should_suppress_native_frame_paint(message: u32, is_minimized: bool) -> bool 
 fn defer_client_redraw(hwnd: windows::Win32::Foundation::HWND) {
     use std::sync::atomic::Ordering;
 
-    use windows::Win32::UI::WindowsAndMessaging::SetTimer;
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, SetTimer};
 
-    let current = DEFERRED_CLIENT_REDRAW_TIMER.load(Ordering::Acquire);
-    let timer = unsafe { SetTimer(hwnd, current, DEFERRED_CLIENT_REDRAW_DELAY_MS, None) };
+    MAIN_WINDOW_CLIENT_REDRAW_PENDING.store(true, Ordering::Release);
+    stop_client_redraw_timer(hwnd);
+    CLIENT_REDRAW_FALLBACK_TOKEN.store(0, Ordering::Release);
+    let timer_id = next_window_timer_id(
+        &DEFERRED_CLIENT_REDRAW_TIMER_SEQUENCE,
+        CLIENT_REDRAW_TIMER_NAMESPACE,
+    );
+    let timer = unsafe { SetTimer(hwnd, timer_id, DEFERRED_CLIENT_REDRAW_DELAY_MS, None) };
     if timer != 0 {
-        DEFERRED_CLIENT_REDRAW_TIMER.store(timer, Ordering::Release);
+        DEFERRED_CLIENT_REDRAW_TIMER.store(timer_id, Ordering::Release);
+        return;
+    }
+
+    CLIENT_REDRAW_FALLBACK_TOKEN.store(timer_id, Ordering::Release);
+    let message = CLIENT_REDRAW_FALLBACK_MESSAGE.load(Ordering::Acquire);
+    if (message == 0
+        || unsafe { PostMessageW(hwnd, message, WPARAM(timer_id), LPARAM(0)) }.is_err())
+        && CLIENT_REDRAW_FALLBACK_TOKEN
+            .compare_exchange(timer_id, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    {
+        flush_pending_client_redraw(hwnd);
     }
 }
 
 #[cfg(target_os = "windows")]
-fn cancel_client_redraw(hwnd: windows::Win32::Foundation::HWND) {
+fn rearm_pending_client_redraw() {
+    use std::sync::atomic::Ordering;
+
+    use windows::Win32::Foundation::HWND;
+
+    if !MAIN_WINDOW_CLIENT_REDRAW_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    let hwnd = HWND(MAIN_WINDOW_HWND.load(Ordering::Acquire) as *mut _);
+    if !hwnd.is_invalid() {
+        defer_client_redraw(hwnd);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn flush_pending_client_redraw(hwnd: windows::Win32::Foundation::HWND) {
+    use std::sync::atomic::Ordering;
+
+    use windows::Win32::Graphics::Gdi::{HRGN, RDW_INTERNALPAINT, RedrawWindow};
+    use windows::Win32::UI::WindowsAndMessaging::IsIconic;
+
+    if !MAIN_WINDOW_CLIENT_REDRAW_PENDING.load(Ordering::Acquire) {
+        return;
+    }
+    if !MAIN_WINDOW_ACTIVE.load(Ordering::Acquire) || unsafe { IsIconic(hwnd).as_bool() } {
+        MAIN_WINDOW_CLIENT_REDRAW_PENDING.store(false, Ordering::Release);
+        return;
+    }
+    if MAIN_WINDOW_IN_SIZE_MOVE.load(Ordering::Acquire)
+        || main_window_settle_pending()
+        || MAIN_WINDOW_REGION_SUSPENDED.load(Ordering::Acquire)
+    {
+        // The native settle and the final HRGN completion explicitly rearm the
+        // latched debt; do not poll the compositor while either is pending.
+        return;
+    }
+
+    MAIN_WINDOW_CLIENT_REDRAW_PENDING.store(false, Ordering::Release);
+    // Activation can emit both WM_ACTIVATE and WM_SYNCPAINT. Present one frame
+    // only after DWM has had a compositor frame to leave Acrylic's inactive
+    // fallback.
+    let _ = unsafe { RedrawWindow(hwnd, None, HRGN::default(), RDW_INTERNALPAINT) };
+}
+
+#[cfg(target_os = "windows")]
+fn stop_client_redraw_timer(hwnd: windows::Win32::Foundation::HWND) {
     use std::sync::atomic::Ordering;
 
     use windows::Win32::UI::WindowsAndMessaging::KillTimer;
@@ -1021,6 +1195,28 @@ fn cancel_client_redraw(hwnd: windows::Win32::Foundation::HWND) {
     if timer != 0 {
         let _ = unsafe { KillTimer(hwnd, timer) };
     }
+}
+
+#[cfg(target_os = "windows")]
+fn cancel_client_redraw(hwnd: windows::Win32::Foundation::HWND) {
+    use std::sync::atomic::Ordering;
+
+    stop_client_redraw_timer(hwnd);
+    CLIENT_REDRAW_FALLBACK_TOKEN.store(0, Ordering::Release);
+    MAIN_WINDOW_CLIENT_REDRAW_PENDING.store(false, Ordering::Release);
+}
+
+#[cfg(target_os = "windows")]
+fn cancel_appearance_settle(hwnd: windows::Win32::Foundation::HWND) {
+    use std::sync::atomic::Ordering;
+
+    use windows::Win32::UI::WindowsAndMessaging::KillTimer;
+
+    let timer = DEFERRED_APPEARANCE_SETTLE_TIMER.swap(0, Ordering::AcqRel);
+    if timer != 0 {
+        let _ = unsafe { KillTimer(hwnd, timer) };
+    }
+    APPEARANCE_SETTLE_FALLBACK_TOKEN.store(0, Ordering::Release);
 }
 
 #[cfg(target_os = "windows")]
@@ -1046,9 +1242,10 @@ mod tests {
     };
 
     use super::{
-        custom_frame_ex_style, custom_frame_style, non_client_activation_lparam,
-        should_defer_client_redraw, should_suppress_native_frame_paint,
-        size_move_needs_backdrop_refresh, work_area_maximize_metrics,
+        APPEARANCE_SETTLE_TIMER_NAMESPACE, CLIENT_REDRAW_TIMER_NAMESPACE, custom_frame_ex_style,
+        custom_frame_style, main_window_update_is_current, next_window_timer_id,
+        non_client_activation_lparam, should_defer_client_redraw,
+        should_suppress_native_frame_paint, work_area_maximize_metrics,
     };
 
     #[test]
@@ -1151,29 +1348,48 @@ mod tests {
     }
 
     #[test]
-    fn manual_border_resize_only_needs_the_final_region() {
-        assert!(!size_move_needs_backdrop_refresh(
-            false, false, true, true, false
-        ));
+    fn settled_work_requires_the_current_visible_revision() {
+        assert!(main_window_update_is_current(8, 8, 8, false, false, false));
+        assert!(!main_window_update_is_current(7, 8, 8, false, false, false));
+        assert!(!main_window_update_is_current(8, 8, 7, false, false, false));
+        assert!(!main_window_update_is_current(8, 8, 8, true, false, false));
+        assert!(!main_window_update_is_current(8, 8, 8, false, true, false));
+        assert!(!main_window_update_is_current(8, 8, 8, false, false, true));
+        assert!(!main_window_update_is_current(0, 0, 0, false, false, false));
     }
 
     #[test]
-    fn snap_maximize_and_restore_refresh_the_backdrop() {
-        assert!(size_move_needs_backdrop_refresh(
-            false, true, false, true, false
-        ));
-        assert!(size_move_needs_backdrop_refresh(
-            true, false, false, true, false
-        ));
+    fn rearmed_timers_reject_messages_from_old_deadlines() {
+        let sequence = std::sync::atomic::AtomicUsize::new(0);
+        let first = next_window_timer_id(&sequence, APPEARANCE_SETTLE_TIMER_NAMESPACE);
+        let second = next_window_timer_id(&sequence, APPEARANCE_SETTLE_TIMER_NAMESPACE);
+        let redraw = next_window_timer_id(&sequence, CLIENT_REDRAW_TIMER_NAMESPACE);
+
+        assert_ne!(first, second);
+        assert_ne!(second, redraw);
+        assert_eq!(first & 0xF000_0000, APPEARANCE_SETTLE_TIMER_NAMESPACE);
+        assert_eq!(redraw & 0xF000_0000, CLIENT_REDRAW_TIMER_NAMESPACE);
     }
 
     #[test]
-    fn title_bar_snap_and_dpi_changes_refresh_the_backdrop() {
-        assert!(size_move_needs_backdrop_refresh(
-            false, false, false, true, false
-        ));
-        assert!(size_move_needs_backdrop_refresh(
-            false, false, true, false, true
-        ));
+    fn queued_fallback_cannot_consume_a_newer_deadline() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let sequence = AtomicUsize::new(0);
+        let first = next_window_timer_id(&sequence, APPEARANCE_SETTLE_TIMER_NAMESPACE);
+        let second = next_window_timer_id(&sequence, APPEARANCE_SETTLE_TIMER_NAMESPACE);
+        let current = AtomicUsize::new(second);
+
+        assert!(
+            current
+                .compare_exchange(first, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        );
+        assert_eq!(current.load(Ordering::Acquire), second);
+        assert!(
+            current
+                .compare_exchange(second, 0, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        );
     }
 }

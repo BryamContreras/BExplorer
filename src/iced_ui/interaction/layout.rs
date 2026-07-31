@@ -48,7 +48,7 @@ impl BExplorerIced {
 
     pub(in crate::iced_ui) fn scrollbar_animation_active(&self) -> bool {
         let now = Instant::now();
-        [PaneId::Primary, PaneId::Secondary]
+        let pane_scrollbar_active = [PaneId::Primary, PaneId::Secondary]
             .into_iter()
             .any(|pane| {
                 let state = self.pane(pane);
@@ -61,7 +61,15 @@ impl BExplorerIced {
                         || wheel_reveal,
                 );
                 wheel_reveal || (state.scrollbar_reveal_progress - target).abs() > f32::EPSILON
-            })
+            });
+        let storage_scrollbar_active = self.storage_analysis.as_ref().is_some_and(|state| {
+            let wheel_reveal = state
+                .scrollbar_reveal_until
+                .is_some_and(|until| until > now);
+            let target = f32::from(state.scrollbar_vertical_hovered || wheel_reveal);
+            wheel_reveal || (state.scrollbar_reveal_progress - target).abs() > f32::EPSILON
+        });
+        pane_scrollbar_active || storage_scrollbar_active
     }
 
     pub(in crate::iced_ui) fn async_progress_animation_active(&self) -> bool {
@@ -105,11 +113,12 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn sidebar_section_visible(&self, section: SidebarSection) -> bool {
-        section != SidebarSection::Portable
-            || self
-                .sidebar_storage_entries
-                .iter()
-                .any(|entry| entry.drive_kind == Some(DriveKind::Portable))
+        sidebar_section_enabled(&self.config, section)
+            && (section != SidebarSection::Portable
+                || self
+                    .sidebar_storage_entries
+                    .iter()
+                    .any(|entry| entry.drive_kind == Some(DriveKind::Portable)))
     }
 
     pub(in crate::iced_ui) fn toggle_sidebar_section(&mut self, section: SidebarSection) {

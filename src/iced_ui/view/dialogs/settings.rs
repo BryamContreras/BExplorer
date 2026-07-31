@@ -13,8 +13,12 @@ impl BExplorerIced {
         let single_row_height = self.ui_metric(44.0);
         let single_row_padding =
             ((single_row_height - TITLE_BUTTON_HEIGHT) * 0.5).max(stacked_row_padding);
-        let panel_width = self.modal_text_surface_width(470.0);
-        let panel_height = settings_panel_height(self.font_size(), self.window_size.height);
+        let panel_width = self.modal_text_surface_width(SETTINGS_PANEL_WIDTH);
+        let panel_height = settings_panel_height(
+            self.font_size(),
+            self.window_size.height,
+            self.config.vibrancy != VibrancyMode::None,
+        );
         let dark = self.is_dark_theme();
         let spanish = self.is_spanish();
         let color_picker_open = self.color_picker_open;
@@ -64,7 +68,7 @@ impl BExplorerIced {
             ]
             .align_y(Alignment::Center),
         )
-        .padding([self.ui_vertical_padding(14.0), 16.0 + density])
+        .padding([self.ui_vertical_padding(10.0), 16.0 + density])
         .style(move |_| {
             container::Style::default()
                 .background(mix_color(palette.title_bg, palette.menu_bg, 0.34))
@@ -368,6 +372,7 @@ impl BExplorerIced {
                     slider(0..=100, intensity, Message::SetVibrancyIntensity)
                         .step(1)
                         .on_release(Message::VibrancyIntensityReleased)
+                        .style(move |_, status| settings_slider_style(palette, status))
                         .width(Length::Fill),
                     text(format!("{intensity}%"))
                         .size(self.font_size() - 1.0)
@@ -390,11 +395,32 @@ impl BExplorerIced {
             Space::new().height(0).into()
         };
 
-        let files_section = column![
+        let horizontal_padding = 16.0 + self.ui_density();
+        let column_spacing = self.ui_metric(12.0);
+        let flow_column_width =
+            ((panel_width - horizontal_padding * 2.0 - column_spacing) * 0.5).max(1.0);
+        // Fill the left column from top to bottom, then continue naturally on
+        // the right. Pair every section heading with its first control so a
+        // wrap can never leave an orphan heading at the bottom of a column.
+        let general_start = column![
+            text(self.localized("GENERAL", "GENERAL"))
+                .size(self.font_size() - 1.0)
+                .color(palette.muted_text),
+            language_row,
+        ]
+        .spacing(9);
+        let personalization_start = column![
+            text(self.localized("PERSONALIZACIÓN", "PERSONALIZATION"))
+                .size(self.font_size() - 1.0)
+                .color(palette.muted_text),
+            font_row,
+        ]
+        .spacing(9);
+        let files_start = column![
             text(self.localized("ARCHIVOS", "FILES"))
                 .size(self.font_size() - 1.0)
                 .color(palette.muted_text),
-            self.settings_file_option(
+            self.settings_check_option(
                 self.localized("Mostrar extensiones de archivos", "Show file extensions"),
                 self.localized(
                     "Muestra el sufijo, por ejemplo .pdf o .jpg",
@@ -404,55 +430,102 @@ impl BExplorerIced {
                 Message::ToggleShowExtensions,
                 palette,
             ),
-            self.settings_file_option(
-                self.localized("Mostrar archivos ocultos", "Show hidden files"),
+        ]
+        .spacing(6);
+        let sidebar_start = column![
+            text(self.localized("MENÚ LATERAL", "SIDE MENU"))
+                .size(self.font_size() - 1.0)
+                .color(palette.muted_text),
+            self.settings_check_option(
+                self.localized("Mostrar Marcadores", "Show Bookmarks"),
                 self.localized(
-                    "Los elementos ocultos se muestran con menor opacidad",
-                    "Hidden items are shown with lower opacity",
+                    "Muestra las ubicaciones guardadas en el menú lateral",
+                    "Shows saved locations in the side menu",
                 ),
-                self.config.show_hidden,
-                Message::ToggleShowHidden,
-                palette,
-            ),
-            self.settings_file_option(
-                self.localized(
-                    "Mostrar unidades del sistema ocultas",
-                    "Show hidden system drives",
-                ),
-                self.localized(
-                    "Incluye particiones y montajes reservados para el sistema",
-                    "Includes partitions and mounts reserved for the system",
-                ),
-                self.config.show_hidden_system_drives,
-                Message::ToggleShowHiddenSystemDrives,
+                self.config.show_sidebar_bookmarks,
+                Message::ToggleShowSidebarBookmarks,
                 palette,
             ),
         ]
         .spacing(6);
 
-        let settings_body = scrollable(
-            column![
-                text(self.localized("GENERAL", "GENERAL"))
-                    .size(self.font_size() - 1.0)
-                    .color(palette.muted_text),
-                language_row,
-                theme_row,
-                text(self.localized("PERSONALIZACIÓN", "PERSONALIZATION"))
-                    .size(self.font_size() - 1.0)
-                    .color(palette.muted_text),
-                font_row,
-                accent_row,
-                vibrancy_row,
-                vibrancy_intensity,
-                files_section,
-            ]
-            .spacing(9)
-            .padding([self.ui_vertical_padding(14.0), 16.0 + self.ui_density()]),
-        )
+        let settings_flow = column![
+            settings_flow_item(general_start, flow_column_width),
+            settings_flow_item(theme_row, flow_column_width),
+            settings_flow_item(personalization_start, flow_column_width),
+            settings_flow_item(accent_row, flow_column_width),
+            settings_flow_item(vibrancy_row, flow_column_width),
+            settings_flow_item(vibrancy_intensity, flow_column_width),
+            settings_flow_item(files_start, flow_column_width),
+            settings_flow_item(
+                self.settings_check_option(
+                    self.localized("Mostrar archivos ocultos", "Show hidden files"),
+                    self.localized(
+                        "Los elementos ocultos se muestran con menor opacidad",
+                        "Hidden items are shown with lower opacity",
+                    ),
+                    self.config.show_hidden,
+                    Message::ToggleShowHidden,
+                    palette,
+                ),
+                flow_column_width,
+            ),
+            settings_flow_item(
+                self.settings_check_option(
+                    self.localized(
+                        "Mostrar unidades del sistema ocultas",
+                        "Show hidden system drives",
+                    ),
+                    self.localized(
+                        "Incluye particiones y montajes reservados para el sistema",
+                        "Includes partitions and mounts reserved for the system",
+                    ),
+                    self.config.show_hidden_system_drives,
+                    Message::ToggleShowHiddenSystemDrives,
+                    palette,
+                ),
+                flow_column_width,
+            ),
+            settings_flow_item(sidebar_start, flow_column_width),
+            settings_flow_item(
+                self.settings_check_option(
+                    self.localized("Mostrar Red", "Show Network"),
+                    self.localized(
+                        "Muestra el acceso a equipos y dispositivos de red",
+                        "Shows access to network computers and devices",
+                    ),
+                    self.config.show_sidebar_network,
+                    Message::ToggleShowSidebarNetwork,
+                    palette,
+                ),
+                flow_column_width,
+            ),
+            settings_flow_item(
+                self.settings_check_option(
+                    self.localized("Mostrar Recientes", "Show Recent items"),
+                    self.localized(
+                        "Muestra las últimas ubicaciones visitadas",
+                        "Shows recently visited locations",
+                    ),
+                    self.config.show_sidebar_recents,
+                    Message::ToggleShowSidebarRecents,
+                    palette,
+                ),
+                flow_column_width,
+            ),
+        ]
+        .spacing(6)
+        .padding([self.ui_vertical_padding(10.0), horizontal_padding])
         .height(Length::Fill)
-        .style(move |theme, status| {
-            explorer_scrollable_style(palette, theme, status, self.ui_density())
-        });
+        .wrap()
+        .horizontal_spacing(column_spacing);
+
+        let settings_body = scrollable(settings_flow)
+            .horizontal()
+            .height(Length::Fill)
+            .style(move |theme, status| {
+                explorer_scrollable_style(palette, theme, status, self.ui_density())
+            });
         let panel = container(
             column![header, settings_body]
                 .spacing(0)
@@ -509,7 +582,7 @@ impl BExplorerIced {
             .into()
     }
 
-    pub(in crate::iced_ui) fn settings_file_option(
+    pub(in crate::iced_ui) fn settings_check_option(
         &self,
         label: &'static str,
         description: &'static str,
@@ -563,7 +636,7 @@ impl BExplorerIced {
         .align_y(Alignment::Center);
         container(
             Button::new(content)
-                .padding([self.ui_vertical_padding(7.0), 9.0 + self.ui_density()])
+                .padding([self.ui_vertical_padding(6.0), 9.0 + self.ui_density()])
                 .width(Length::Fill)
                 .on_press(message)
                 .style(move |_, status| button_style(palette, false, status)),
@@ -576,4 +649,11 @@ impl BExplorerIced {
         })
         .into()
     }
+}
+
+fn settings_flow_item<'a>(
+    content: impl Into<Element<'a, Message>>,
+    width: f32,
+) -> Element<'a, Message> {
+    container(content).width(Length::Fixed(width)).into()
 }

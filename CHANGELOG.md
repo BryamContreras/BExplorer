@@ -2,8 +2,22 @@
 
 All notable user-facing changes to BExplorer are documented here.
 
-## Unreleased
+## 1.0.5 - 2026-07-31
 
+- Added cross-platform storage analysis with category and extension breakdowns,
+  interactive charts, estimated duplicate usage, sortable details, filtering,
+  previews, and direct file-location actions.
+- Virtualized large detail, icon, search, duplicate-cleanup, and analysis views
+  so folders containing tens of thousands of entries remain responsive while
+  preserving fast scrolling, selection, and keyboard navigation.
+- Expanded keyboard navigation across every view, including range selection,
+  split-pane focus, and configurable search focus, while refining delayed
+  rename activation so it does not interfere with double-click opening.
+- Improved responsive tabs, title-bar controls and tooltips, configurable
+  sidebar sections, adaptive scrollbars, column sizing, search highlighting,
+  and accent-aware settings controls.
+- Refined Windows acrylic composition, resizing, maximization, focus changes,
+  context-menu transitions, and remembered restored-window geometry.
 - Visible local folders now refresh from native filesystem notifications
   instead of polling. BExplorer keeps one non-recursive watcher, observes at
   most the two visible panes, coalesces write bursts, and preserves selection

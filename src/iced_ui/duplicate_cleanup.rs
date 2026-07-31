@@ -13,8 +13,8 @@ impl BExplorerIced {
             return self.report_error(
                 pane,
                 self.localized(
-                    "La limpieza de duplicados solo está disponible para carpetas y unidades montadas.",
-                    "Duplicate cleanup is only available for folders and mounted drives.",
+                    "La limpieza de archivos duplicados solo está disponible para carpetas y unidades montadas.",
+                    "Duplicate file cleanup is only available for folders and mounted drives.",
                 ),
             );
         }
@@ -46,7 +46,11 @@ impl BExplorerIced {
             root,
             entries: Vec::new(),
             extension_counts: HashMap::new(),
-            render_limit: INITIAL_RENDER_LIMIT,
+            extension_group_starts: Vec::new(),
+            table_scroll_offset_y: 0.0,
+            table_viewport_height: 0.0,
+            table_scroll_velocity_y: 0.0,
+            table_scroll_sampled_at: None,
             selected: HashSet::new(),
             all_candidates_selected: false,
             highlighted: None,
@@ -169,7 +173,7 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn open_duplicate_file_location_task(&mut self) -> Task<Message> {
-        let Some((pane, path)) = self.duplicate_cleanup.as_mut().and_then(|state| {
+        let Some((stored_pane, path)) = self.duplicate_cleanup.as_mut().and_then(|state| {
             state
                 .context_path
                 .take()
@@ -177,6 +181,11 @@ impl BExplorerIced {
                 .map(|path| (state.pane, path))
         }) else {
             return Task::none();
+        };
+        let pane = if stored_pane == PaneId::Secondary && self.split.is_none() {
+            PaneId::Primary
+        } else {
+            stored_pane
         };
         let Some(location) = path.parent().map(Path::to_path_buf) else {
             let error = self
@@ -243,7 +252,11 @@ impl BExplorerIced {
         let (receiver, cancel) = duplicate_scan_worker(state.root.clone());
         state.entries.clear();
         state.extension_counts.clear();
-        state.render_limit = INITIAL_RENDER_LIMIT;
+        state.extension_group_starts.clear();
+        state.table_scroll_offset_y = 0.0;
+        state.table_viewport_height = 0.0;
+        state.table_scroll_velocity_y = 0.0;
+        state.table_scroll_sampled_at = None;
         state.selected.clear();
         state.all_candidates_selected = false;
         state.highlighted = None;
@@ -273,13 +286,36 @@ pub(in crate::iced_ui) fn duplicate_cleanup_available_for_entry(entry: &FileEntr
         && entry.path.is_dir()
 }
 
+pub(in crate::iced_ui) fn duplicate_file_entry(file: &DuplicateFile) -> FileEntry {
+    FileEntry {
+        name: file.name.clone(),
+        path: file.path.clone(),
+        kind: EntryKind::File,
+        category: explorer::classify_file_category(&file.path),
+        drive_kind: None,
+        file_system: String::new(),
+        free_space: None,
+        size: Some(file.size),
+        percent_full: None,
+        modified: None,
+        created: None,
+        is_hidden: file.name.starts_with('.'),
+    }
+}
+
 fn replace_duplicate_entries(state: &mut DuplicateCleanupState, entries: Vec<DuplicateFile>) {
     state.extension_counts.clear();
-    for entry in &entries {
+    state.extension_group_starts.clear();
+    let mut previous_extension: Option<&str> = None;
+    for (index, entry) in entries.iter().enumerate() {
         *state
             .extension_counts
             .entry(entry.extension.clone())
             .or_default() += 1;
+        if previous_extension != Some(entry.extension.as_str()) {
+            state.extension_group_starts.push(index);
+            previous_extension = Some(entry.extension.as_str());
+        }
     }
     let paths = entries
         .iter()

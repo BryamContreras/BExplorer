@@ -50,8 +50,8 @@ impl BExplorerIced {
         state.folder_entries = None;
         state.selected.clear();
         state.selection_anchor = None;
-        state.render_limit = INITIAL_RENDER_LIMIT;
-        state.scroll_offset_y = 0.0;
+        state.keyboard_selection_cursor = None;
+        state.reset_scroll_position();
         state.has_vertical_overflow = false;
         state.text_preview = None;
         state.mark_entries_changed();
@@ -97,6 +97,7 @@ impl BExplorerIced {
             state.folder_entries = None;
             state.selected.retain(|path| available_paths.contains(path));
             state.selection_anchor = None;
+            state.keyboard_selection_cursor = None;
             state.has_vertical_overflow = false;
 
             if cached_entries.is_empty() {
@@ -160,8 +161,8 @@ impl BExplorerIced {
             state.entries = cached_entries;
             state.selected.clear();
             state.selection_anchor = None;
-            state.render_limit = INITIAL_RENDER_LIMIT;
-            state.scroll_offset_y = 0.0;
+            state.keyboard_selection_cursor = None;
+            state.reset_scroll_position();
             state.has_vertical_overflow = false;
             state.mark_entries_changed();
             state.request_id
@@ -309,6 +310,7 @@ impl BExplorerIced {
             state.entries = entries.clone();
             state.selected.retain(|path| available_paths.contains(path));
             state.selection_anchor = None;
+            state.keyboard_selection_cursor = None;
             state.has_vertical_overflow = false;
             state.mark_entries_changed();
             tasks.push(self.queue_visible_images(pane));
@@ -375,17 +377,123 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn queue_visible_images(&mut self, pane: PaneId) -> Task<Message> {
-        let limit = self.pane(pane).render_limit;
-        let variant = if uses_small_entry_images(self.effective_view_mode(pane)) {
+        let view_mode = self.effective_view_mode(pane);
+        let variant = if uses_small_entry_images(view_mode) {
             IcedImageVariant::Small
         } else {
             IcedImageVariant::Standard
         };
-
-        let entries: Vec<_> = self
-            .filtered_entries(pane)
+        let group_mode = self.effective_group_mode(pane);
+        let group_starts = if group_mode == GroupMode::None {
+            Vec::new()
+        } else {
+            self.filtered_entry_group_starts(pane)
+        };
+        let filtered = self.filtered_entries_ref(pane);
+        let total = filtered.len();
+        let state = self.pane(pane);
+        let mut visible_positions = Vec::new();
+        if matches!(view_mode, ViewMode::Details | ViewMode::List) {
+            let row_height = self.detail_row_height();
+            let row_offset = (state.scroll_offset_y - self.detail_header_height()).max(0.0);
+            if group_mode == GroupMode::None {
+                let range = virtual_table_range(
+                    total,
+                    row_height,
+                    row_offset,
+                    state.scroll_viewport_height,
+                    state.scroll_velocity_y,
+                );
+                visible_positions.extend(range.start..range.end);
+            } else {
+                let group_height = self.detail_group_height();
+                let (window_start, window_end) = virtual_table_pixel_window(
+                    row_offset,
+                    state.scroll_viewport_height,
+                    state.scroll_velocity_y,
+                    row_height,
+                );
+                let mut low = 0_usize;
+                let mut high = total;
+                while low < high {
+                    let middle = low + (high - low) / 2;
+                    let groups = group_starts.partition_point(|start| *start <= middle);
+                    let bottom = (middle + 1) as f32 * row_height + groups as f32 * group_height;
+                    if bottom < window_start {
+                        low = middle + 1;
+                    } else {
+                        high = middle;
+                    }
+                }
+                for position in low..total {
+                    let groups = group_starts.partition_point(|start| *start <= position);
+                    let bottom = (position + 1) as f32 * row_height + groups as f32 * group_height;
+                    let top = bottom - row_height;
+                    if top > window_end {
+                        break;
+                    }
+                    visible_positions.push(position);
+                }
+            }
+        } else {
+            let layout = self.visual_layout_for_pane(pane, view_mode);
+            let metrics = layout.metrics;
+            let row_extent = metrics.cell_height + metrics.spacing;
+            if group_mode == GroupMode::None {
+                let row_count = total.div_ceil(layout.columns);
+                let range = virtual_table_range(
+                    row_count,
+                    row_extent,
+                    (state.scroll_offset_y - metrics.grid_padding).max(0.0),
+                    state.scroll_viewport_height,
+                    state.scroll_velocity_y,
+                );
+                let start = range.start * layout.columns;
+                let end = (range.end * layout.columns).min(total);
+                visible_positions.extend(start..end);
+            } else {
+                let group_extent = self.detail_group_height() + metrics.spacing;
+                let (window_start, window_end) = virtual_table_pixel_window(
+                    state.scroll_offset_y,
+                    state.scroll_viewport_height,
+                    state.scroll_velocity_y,
+                    row_extent,
+                );
+                let mut y = 0.0_f32;
+                for (group_index, &group_start) in group_starts.iter().enumerate() {
+                    let group_end = group_starts.get(group_index + 1).copied().unwrap_or(total);
+                    let group_rows = (group_end - group_start).div_ceil(layout.columns);
+                    let rows_start = y + group_extent;
+                    let block_height = group_extent + group_rows as f32 * row_extent;
+                    if y + block_height < window_start {
+                        y += block_height;
+                        continue;
+                    }
+                    if y > window_end {
+                        break;
+                    }
+                    let first_row = (((window_start - rows_start).max(0.0) / row_extent).floor()
+                        as usize)
+                        .min(group_rows);
+                    let last_row = (((window_end - rows_start).max(0.0) / row_extent).ceil()
+                        as usize)
+                        .saturating_add(1)
+                        .min(group_rows);
+                    let start = group_start + first_row * layout.columns;
+                    let end = (group_start + last_row * layout.columns).min(group_end);
+                    visible_positions.extend(start..end);
+                    y += block_height;
+                }
+            }
+        }
+        let visible_indices = visible_positions
             .into_iter()
-            .take(limit)
+            .filter_map(|position| filtered.get(position).copied())
+            .collect::<Vec<_>>();
+        drop(filtered);
+        let entries: Vec<_> = visible_indices
+            .iter()
+            .copied()
             .filter_map(|index| self.pane(pane).entries.get(index).cloned())
             .collect();
         let mut tasks = Vec::new();
@@ -485,7 +593,7 @@ impl BExplorerIced {
         self.queue_entry_images_for_variant(entry, IcedImageVariant::Standard)
     }
 
-    fn queue_entry_images_for_variant(
+    pub(in crate::iced_ui) fn queue_entry_images_for_variant(
         &mut self,
         entry: &FileEntry,
         variant: IcedImageVariant,
@@ -799,8 +907,7 @@ impl BExplorerIced {
         state.fixed_root_view_override = None;
         state.fixed_root_group_override = None;
         state.fixed_root_group_ascending_override = None;
-        state.render_limit = INITIAL_RENDER_LIMIT;
-        state.scroll_offset_y = 0.0;
+        state.reset_scroll_position();
     }
 
     pub(in crate::iced_ui) fn contextual_file_surface<'a>(

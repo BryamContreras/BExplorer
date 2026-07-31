@@ -1,5 +1,34 @@
 use super::*;
-use iced::widget::{column, row};
+use iced::widget::{column, row, tooltip};
+
+pub(in crate::iced_ui) fn delayed_title_tooltip<'a>(
+    content: impl Into<Element<'a, Message>>,
+    label: &'static str,
+    palette: Palette,
+    font_size: f32,
+) -> Element<'a, Message> {
+    tooltip(
+        content,
+        text(label)
+            .size((font_size - 1.0).max(10.0))
+            .color(palette.text),
+        tooltip::Position::Bottom,
+    )
+    .delay(Duration::from_secs(1))
+    .gap(4)
+    .padding(5)
+    .style(move |_| {
+        container::Style::default()
+            .background(mix_color(palette.menu_bg, Color::BLACK, 0.12))
+            .border(border::rounded(2).color(palette.strong_border).width(1))
+            .shadow(iced::Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.22),
+                offset: Vector::new(0.0, 3.0),
+                blur_radius: 8.0,
+            })
+    })
+    .into()
+}
 pub(in crate::iced_ui) fn icon_button<'a>(
     label: &'static str,
     message: Message,

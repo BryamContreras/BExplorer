@@ -2,7 +2,7 @@
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Version](https://img.shields.io/badge/version-1.0.4-brightgreen)
+![Version](https://img.shields.io/badge/version-1.0.5-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -20,7 +20,7 @@ platform modules.
 
 ## Status
 
-BExplorer 1.0.4 is the current stable Windows and Linux version. Its desktop
+BExplorer 1.0.5 is the current stable Windows and Linux version. Its desktop
 interface, file-operation engine, archive workflows, platform integrations,
 configuration format, and session format form the supported 1.x baseline.
 Development now prioritizes compatibility fixes, reliability, and focused
@@ -59,8 +59,11 @@ installed.
   empty-trash actions.
 - Recursive duplicate cleanup for folders and removable storage with grouped,
   selectable results and native-trash deletion.
+- Storage analysis for folders and mounted drives with live category totals
+  and a color-coded donut chart.
 - Long-running transfers, deletions, compression, extraction, duplicate scans,
-  and security scans continue in their own windows after the explorer closes.
+  storage analyses, and security scans continue in their own windows after the
+  explorer closes.
 - Background storage monitoring refreshes disks, USB media, optical drives, and
   mounted portable devices on Windows and Linux without blocking the UI.
 - Resizable and reorderable sidebar.

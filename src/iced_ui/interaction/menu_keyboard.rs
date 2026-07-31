@@ -15,6 +15,8 @@ impl BExplorerIced {
                 KeyboardMenu::ContextOpenWith
             } else if self.context_send_to_submenu {
                 KeyboardMenu::ContextSendTo
+            } else if self.context_tools_submenu {
+                KeyboardMenu::ContextTools
             } else if self.context_archive_submenu && self.context_extract_submenu {
                 KeyboardMenu::ContextExtract
             } else if self.context_archive_submenu {
@@ -168,6 +170,7 @@ impl BExplorerIced {
             KeyboardMenu::Context
             | KeyboardMenu::ContextOpenWith
             | KeyboardMenu::ContextSendTo
+            | KeyboardMenu::ContextTools
             | KeyboardMenu::ContextArchive
             | KeyboardMenu::ContextExtract
             | KeyboardMenu::ContextNew => {
@@ -230,6 +233,7 @@ impl BExplorerIced {
             KeyboardMenu::Context
             | KeyboardMenu::ContextOpenWith
             | KeyboardMenu::ContextSendTo
+            | KeyboardMenu::ContextTools
             | KeyboardMenu::ContextArchive
             | KeyboardMenu::ContextExtract
             | KeyboardMenu::ContextNew => self
@@ -319,6 +323,32 @@ impl BExplorerIced {
                     ),
                 ];
             }
+            KeyboardMenu::ContextTools => {
+                let context_entry = self.context_entry(menu_state.pane, menu_state.target);
+                let storage_analysis_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::storage_analysis::storage_analysis_available_for_entry,
+                );
+                let duplicate_cleanup_available = context_entry.as_ref().is_some_and(
+                    crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry,
+                );
+                return context_tools_commands(
+                    storage_analysis_available,
+                    duplicate_cleanup_available,
+                )
+                .into_iter()
+                .map(|command| {
+                    let label = match command {
+                        ContextCommand::StorageAnalysis => {
+                            self.localized("Análisis de almacenamiento", "Storage analysis")
+                        }
+                        ContextCommand::DuplicateCleanup => self
+                            .localized("Limpieza de archivos duplicados", "Duplicate file cleanup"),
+                        _ => unreachable!("tools submenu only contains tool commands"),
+                    };
+                    (label.into(), command)
+                })
+                .collect();
+            }
             KeyboardMenu::Context => {}
             _ => return Vec::new(),
         }
@@ -377,6 +407,10 @@ impl BExplorerIced {
         let duplicate_cleanup_available = context_entry
             .as_ref()
             .is_some_and(crate::iced_ui::duplicate_cleanup::duplicate_cleanup_available_for_entry);
+        let storage_analysis_available = context_entry
+            .as_ref()
+            .is_some_and(crate::iced_ui::storage_analysis::storage_analysis_available_for_entry);
+        let tools_available = duplicate_cleanup_available || storage_analysis_available;
         let defender_available = cfg!(target_os = "windows")
             && context_entry
                 .as_ref()
@@ -384,11 +418,10 @@ impl BExplorerIced {
 
         let mut items = Vec::new();
         if is_sidebar_drive {
-            if duplicate_cleanup_available {
+            if tools_available {
                 items.push((
-                    self.localized("Limpieza de duplicados", "Duplicate cleanup")
-                        .into(),
-                    ContextCommand::DuplicateCleanup,
+                    self.localized("Herramientas", "Tools").into(),
+                    ContextCommand::ToolsMenu,
                 ));
             }
             if formatable_drive {
@@ -422,11 +455,10 @@ impl BExplorerIced {
 
         if is_entry {
             items.push((self.localized("Abrir", "Open").into(), ContextCommand::Open));
-            if duplicate_cleanup_available {
+            if drive_entry && tools_available {
                 items.push((
-                    self.localized("Limpieza de duplicados", "Duplicate cleanup")
-                        .into(),
-                    ContextCommand::DuplicateCleanup,
+                    self.localized("Herramientas", "Tools").into(),
+                    ContextCommand::ToolsMenu,
                 ));
             }
             if !drive_entry {
@@ -451,6 +483,12 @@ impl BExplorerIced {
                     self.localized("Comprimir", "Compress").into(),
                     ContextCommand::CompressMenu,
                 ));
+                if tools_available {
+                    items.push((
+                        self.localized("Herramientas", "Tools").into(),
+                        ContextCommand::ToolsMenu,
+                    ));
+                }
                 if extractable_archive {
                     items.push((
                         self.localized("Extraer", "Extract").into(),

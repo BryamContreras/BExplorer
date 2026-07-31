@@ -11,4 +11,5 @@ mod format;
 #[cfg(target_os = "linux")]
 mod properties;
 mod settings;
+mod storage_analysis;
 mod transfer_progress;

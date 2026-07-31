@@ -8,8 +8,7 @@ impl BExplorerIced {
 
         let mut tasks = Vec::new();
         self.clear_recursive_search(pane);
-        self.pane_mut(pane).render_limit = INITIAL_RENDER_LIMIT;
-        self.pane_mut(pane).scroll_offset_y = 0.0;
+        self.pane_mut(pane).reset_scroll_position();
         tasks.push(self.queue_visible_images(pane));
         tasks.push(scroll_pane_to_top_task(pane));
         Task::batch(tasks)
@@ -41,12 +40,12 @@ impl BExplorerIced {
             state.mark_entries_changed();
             state.selected.clear();
             state.selection_anchor = None;
+            state.keyboard_selection_cursor = None;
             state.search_cancel = Some(cancelled.clone());
             state.search_receiver = Some(receiver);
             state.recursive_search_active = true;
             state.search_progress_phase = 0.0;
-            state.render_limit = INITIAL_RENDER_LIMIT;
-            state.scroll_offset_y = 0.0;
+            state.reset_scroll_position();
             state.status = if include_archives {
                 format!("Búsqueda completa de \"{query}\"…")
             } else {
@@ -195,6 +194,13 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn filtered_entries(&self, pane: PaneId) -> Vec<usize> {
+        self.filtered_entries_ref(pane).clone()
+    }
+
+    pub(in crate::iced_ui) fn filtered_entries_ref(
+        &self,
+        pane: PaneId,
+    ) -> std::cell::Ref<'_, Vec<usize>> {
         let state = self.pane(pane);
         let signature = DisplayOrderSignature {
             entries_epoch: state.entries_epoch,
@@ -207,7 +213,7 @@ impl BExplorerIced {
         {
             let cache = state.display_order.borrow();
             if cache.signature == Some(signature) {
-                return cache.indices.clone();
+                return std::cell::Ref::map(cache, |cache| &cache.indices);
             }
         }
 
@@ -225,10 +231,28 @@ impl BExplorerIced {
                 )
             });
         }
+        let mut group_starts = Vec::new();
+        if signature.group_mode != GroupMode::None {
+            let mut previous_group: Option<String> = None;
+            for (position, index) in indices.iter().copied().enumerate() {
+                let group = entry_group_label(&state.entries[index], signature.group_mode);
+                if previous_group.as_ref() != Some(&group) {
+                    previous_group = Some(group);
+                    group_starts.push(position);
+                }
+            }
+        }
         let mut cache = state.display_order.borrow_mut();
         cache.signature = Some(signature);
-        cache.indices = indices.clone();
-        indices
+        cache.indices = indices;
+        cache.group_starts = group_starts;
+        drop(cache);
+        std::cell::Ref::map(state.display_order.borrow(), |cache| &cache.indices)
+    }
+
+    pub(in crate::iced_ui) fn filtered_entry_group_starts(&self, pane: PaneId) -> Vec<usize> {
+        drop(self.filtered_entries_ref(pane));
+        self.pane(pane).display_order.borrow().group_starts.clone()
     }
 
     pub(in crate::iced_ui) fn selection_status_metrics(&self, pane: PaneId) -> (usize, u64) {
@@ -315,7 +339,9 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn title_controls_width(&self) -> f32 {
-        self.ui_metric(TITLE_BUTTON_WIDTH) * 4.0 + self.ui_metric(TITLE_BUTTON_GAP) * 3.0
+        self.ui_metric(TITLE_BUTTON_WIDTH)
+            + self.ui_metric(WINDOW_CAPTION_BUTTON_WIDTH) * 3.0
+            + self.ui_metric(TITLE_BUTTON_GAP) * 3.0
     }
 
     pub(in crate::iced_ui) fn sidebar_section_height(&self) -> f32 {
