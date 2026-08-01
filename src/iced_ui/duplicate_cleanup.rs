@@ -61,6 +61,12 @@ impl BExplorerIced {
             window_maximized,
             column_widths,
             column_resize: None,
+            sort_column: DuplicateSortColumn::Type,
+            sort_ascending: true,
+            scrollbar_horizontal_hovered: false,
+            scrollbar_vertical_hovered: false,
+            scrollbar_reveal_progress: 0.0,
+            scrollbar_reveal_until: None,
             scanned: 0,
             total: 0,
             files_found: 0,
@@ -151,6 +157,35 @@ impl BExplorerIced {
         self.duplicate_window_id
             .map(|id| sync_duplicate_cleanup_window_constraints_task(id, self.font_size()))
             .unwrap_or_else(Task::none)
+    }
+
+    pub(in crate::iced_ui) fn sort_duplicate_column(
+        &mut self,
+        column: DuplicateSortColumn,
+    ) -> Task<Message> {
+        let Some(state) = self.duplicate_cleanup.as_mut() else {
+            return Task::none();
+        };
+        let (sort_column, ascending) =
+            next_duplicate_sort(state.sort_column, state.sort_ascending, column);
+        state.sort_column = sort_column;
+        state.sort_ascending = ascending;
+        sort_duplicate_entries(&mut state.entries, sort_column, ascending);
+        refresh_duplicate_group_metadata(state);
+        state.context_path = None;
+        state.context_position = Point::ORIGIN;
+        state.column_resize = None;
+        state.table_scroll_offset_y = 0.0;
+        state.table_scroll_velocity_y = 0.0;
+        state.table_scroll_sampled_at = None;
+
+        iced::widget::operation::scroll_to(
+            duplicate_table_scroll_id(),
+            iced::widget::operation::AbsoluteOffset {
+                x: None,
+                y: Some(0.0),
+            },
+        )
     }
 
     pub(in crate::iced_ui) fn confirm_duplicate_delete_task(&mut self) -> Task<Message> {
@@ -303,28 +338,128 @@ pub(in crate::iced_ui) fn duplicate_file_entry(file: &DuplicateFile) -> FileEntr
     }
 }
 
-fn replace_duplicate_entries(state: &mut DuplicateCleanupState, entries: Vec<DuplicateFile>) {
-    state.extension_counts.clear();
-    state.extension_group_starts.clear();
-    let mut previous_extension: Option<&str> = None;
-    for (index, entry) in entries.iter().enumerate() {
-        *state
-            .extension_counts
-            .entry(entry.extension.clone())
-            .or_default() += 1;
-        if previous_extension != Some(entry.extension.as_str()) {
-            state.extension_group_starts.push(index);
-            previous_extension = Some(entry.extension.as_str());
-        }
-    }
+fn replace_duplicate_entries(state: &mut DuplicateCleanupState, mut entries: Vec<DuplicateFile>) {
+    sort_duplicate_entries(&mut entries, state.sort_column, state.sort_ascending);
     let paths = entries
         .iter()
         .map(|entry| &entry.path)
         .collect::<HashSet<_>>();
     state.selected.retain(|path| paths.contains(path));
     state.entries = entries;
+    refresh_duplicate_group_metadata(state);
     refresh_all_duplicate_candidates_selected(state);
     retain_duplicate_row_state(state);
+}
+
+fn refresh_duplicate_group_metadata(state: &mut DuplicateCleanupState) {
+    state.extension_counts.clear();
+    state.extension_group_starts.clear();
+    let mut previous_extension: Option<&str> = None;
+    for (index, entry) in state.entries.iter().enumerate() {
+        *state
+            .extension_counts
+            .entry(entry.extension.clone())
+            .or_default() += 1;
+        if state.sort_column == DuplicateSortColumn::Type
+            && previous_extension != Some(entry.extension.as_str())
+        {
+            state.extension_group_starts.push(index);
+            previous_extension = Some(entry.extension.as_str());
+        }
+    }
+}
+
+fn next_duplicate_sort(
+    current: DuplicateSortColumn,
+    ascending: bool,
+    requested: DuplicateSortColumn,
+) -> (DuplicateSortColumn, bool) {
+    if current == requested {
+        (current, !ascending)
+    } else {
+        (requested, true)
+    }
+}
+
+fn sort_duplicate_entries(
+    entries: &mut [DuplicateFile],
+    column: DuplicateSortColumn,
+    ascending: bool,
+) {
+    entries.sort_by(|left, right| {
+        let ordering = match column {
+            DuplicateSortColumn::Name => compare_duplicate_text(&left.name, &right.name, ascending),
+            DuplicateSortColumn::Type => {
+                compare_duplicate_text(&left.extension, &right.extension, ascending)
+            }
+            DuplicateSortColumn::Size => {
+                ordered_duplicate_comparison(left.size.cmp(&right.size), ascending)
+            }
+            DuplicateSortColumn::Created => {
+                compare_optional_duplicate_time(left.created, right.created, ascending)
+            }
+            DuplicateSortColumn::Modified => {
+                compare_optional_duplicate_time(left.modified, right.modified, ascending)
+            }
+            DuplicateSortColumn::Match => ordered_duplicate_comparison(
+                duplicate_kind_rank(left.kind).cmp(&duplicate_kind_rank(right.kind)),
+                ascending,
+            ),
+            DuplicateSortColumn::Location => compare_duplicate_text(
+                duplicate_location(left).as_ref(),
+                duplicate_location(right).as_ref(),
+                ascending,
+            ),
+        };
+        ordering
+            .then_with(|| explorer::compare_names_case_insensitive(&left.name, &right.name))
+            .then_with(|| left.path.cmp(&right.path))
+    });
+}
+
+fn compare_duplicate_text(left: &str, right: &str, ascending: bool) -> std::cmp::Ordering {
+    ordered_duplicate_comparison(
+        explorer::compare_names_case_insensitive(left, right),
+        ascending,
+    )
+}
+
+fn compare_optional_duplicate_time(
+    left: Option<std::time::SystemTime>,
+    right: Option<std::time::SystemTime>,
+    ascending: bool,
+) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => ordered_duplicate_comparison(left.cmp(&right), ascending),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
+fn ordered_duplicate_comparison(
+    ordering: std::cmp::Ordering,
+    ascending: bool,
+) -> std::cmp::Ordering {
+    if ascending {
+        ordering
+    } else {
+        ordering.reverse()
+    }
+}
+
+fn duplicate_kind_rank(kind: crate::fs::duplicates::DuplicateKind) -> u8 {
+    match kind {
+        crate::fs::duplicates::DuplicateKind::Original => 0,
+        crate::fs::duplicates::DuplicateKind::Exact => 1,
+        crate::fs::duplicates::DuplicateKind::Possible => 2,
+    }
+}
+
+fn duplicate_location(file: &DuplicateFile) -> std::borrow::Cow<'_, str> {
+    file.path
+        .parent()
+        .map_or_else(|| std::borrow::Cow::Borrowed(""), Path::to_string_lossy)
 }
 
 pub(in crate::iced_ui) fn refresh_all_duplicate_candidates_selected(
@@ -365,4 +500,144 @@ fn duplicate_scan_worker(root: PathBuf) -> (Receiver<DuplicateScanEvent>, Arc<At
         crate::fs::duplicates::scan_folder(root, sender, worker_cancel);
     });
     (receiver, cancel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn duplicate(
+        path: &str,
+        size: u64,
+        created: Option<std::time::SystemTime>,
+        kind: crate::fs::duplicates::DuplicateKind,
+    ) -> DuplicateFile {
+        let path = PathBuf::from(path);
+        DuplicateFile {
+            name: path
+                .file_name()
+                .expect("test file name")
+                .to_string_lossy()
+                .into_owned(),
+            extension: path
+                .extension()
+                .map(|extension| extension.to_string_lossy().to_lowercase())
+                .unwrap_or_default(),
+            path,
+            size,
+            created,
+            modified: created,
+            kind,
+        }
+    }
+
+    #[test]
+    fn duplicate_sort_toggles_or_starts_a_new_column_ascending() {
+        assert_eq!(
+            next_duplicate_sort(DuplicateSortColumn::Type, true, DuplicateSortColumn::Type,),
+            (DuplicateSortColumn::Type, false)
+        );
+        assert_eq!(
+            next_duplicate_sort(DuplicateSortColumn::Type, false, DuplicateSortColumn::Size,),
+            (DuplicateSortColumn::Size, true)
+        );
+    }
+
+    #[test]
+    fn duplicate_sort_uses_numeric_sizes_and_keeps_missing_dates_last() {
+        let early = UNIX_EPOCH + Duration::from_secs(10);
+        let late = UNIX_EPOCH + Duration::from_secs(20);
+        let mut entries = vec![
+            duplicate(
+                "/z/large.png",
+                100,
+                None,
+                crate::fs::duplicates::DuplicateKind::Possible,
+            ),
+            duplicate(
+                "/a/small.txt",
+                2,
+                Some(late),
+                crate::fs::duplicates::DuplicateKind::Exact,
+            ),
+            duplicate(
+                "/m/medium.jpg",
+                30,
+                Some(early),
+                crate::fs::duplicates::DuplicateKind::Original,
+            ),
+        ];
+
+        sort_duplicate_entries(&mut entries, DuplicateSortColumn::Size, true);
+        assert_eq!(
+            entries.iter().map(|entry| entry.size).collect::<Vec<_>>(),
+            [2, 30, 100]
+        );
+
+        sort_duplicate_entries(&mut entries, DuplicateSortColumn::Created, false);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["small.txt", "medium.jpg", "large.png"]
+        );
+    }
+
+    #[test]
+    fn duplicate_sort_supports_match_location_and_type_columns() {
+        let mut entries = vec![
+            duplicate(
+                "/zeta/report.png",
+                1,
+                None,
+                crate::fs::duplicates::DuplicateKind::Possible,
+            ),
+            duplicate(
+                "/alpha/report.txt",
+                1,
+                None,
+                crate::fs::duplicates::DuplicateKind::Original,
+            ),
+            duplicate(
+                "/middle/report.jpg",
+                1,
+                None,
+                crate::fs::duplicates::DuplicateKind::Exact,
+            ),
+        ];
+
+        sort_duplicate_entries(&mut entries, DuplicateSortColumn::Match, true);
+        assert_eq!(
+            entries.iter().map(|entry| entry.kind).collect::<Vec<_>>(),
+            [
+                crate::fs::duplicates::DuplicateKind::Original,
+                crate::fs::duplicates::DuplicateKind::Exact,
+                crate::fs::duplicates::DuplicateKind::Possible,
+            ]
+        );
+
+        sort_duplicate_entries(&mut entries, DuplicateSortColumn::Location, true);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.path.parent().expect("test parent"))
+                .collect::<Vec<_>>(),
+            [
+                Path::new("/alpha"),
+                Path::new("/middle"),
+                Path::new("/zeta")
+            ]
+        );
+
+        sort_duplicate_entries(&mut entries, DuplicateSortColumn::Type, false);
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.extension.as_str())
+                .collect::<Vec<_>>(),
+            ["txt", "png", "jpg"]
+        );
+    }
 }

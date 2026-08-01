@@ -9,7 +9,7 @@ use iced::alignment::Vertical;
 use iced::widget::{column, pin, row};
 
 const PROPERTIES_ICON_SIZE: f32 = 44.0;
-const PROPERTIES_TAB_HEIGHT: f32 = 42.0;
+const PROPERTIES_TAB_HEIGHT: f32 = 38.0;
 const PROPERTIES_TAB_TOP_MARGIN: f32 = 7.0;
 const PROPERTIES_FOOTER_HEIGHT: f32 = 58.0;
 const PROPERTIES_ACTION_BUTTON_HEIGHT: f32 = 38.0;

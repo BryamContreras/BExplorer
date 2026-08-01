@@ -4,6 +4,31 @@ use iced::widget::{column, row, tooltip};
 
 use crate::fs::storage_analysis::{StorageAnalysisSummary, StorageCategory, StorageFile};
 
+const STORAGE_OVERVIEW_BREAKDOWN_WIDTH_RATIO: f32 = 0.36;
+const STORAGE_OVERVIEW_BREAKDOWN_MIN_WIDTH: f32 = 440.0;
+const STORAGE_OVERVIEW_BREAKDOWN_MAX_WIDTH: f32 = 520.0;
+
+fn storage_overview_breakdown_width(window_width: f32, font_size: f32) -> f32 {
+    (window_width * STORAGE_OVERVIEW_BREAKDOWN_WIDTH_RATIO).clamp(
+        scaled_ui_metric(STORAGE_OVERVIEW_BREAKDOWN_MIN_WIDTH, font_size),
+        scaled_ui_metric(STORAGE_OVERVIEW_BREAKDOWN_MAX_WIDTH, font_size),
+    )
+}
+
+fn storage_overview_extension_column_width(card_width: f32, font_size: f32) -> f32 {
+    let metric = |base| scaled_ui_metric(base, font_size);
+    (card_width
+        - metric(12.0) * 2.0
+        - metric(8.0) * 2.0
+        - metric(88.0)
+        - metric(72.0)
+        - metric(82.0)
+        - metric(7.0) * 3.0
+        - EXPLORER_SCROLLBAR_RAIL_WIDTH
+        - 4.0)
+        .max(1.0)
+}
+
 impl BExplorerIced {
     pub(in crate::iced_ui) fn storage_analysis_window_view(
         &self,
@@ -263,23 +288,14 @@ impl BExplorerIced {
                 explorer_scrollable_style(palette, theme, status, state.scrollbar_reveal_progress)
             })
             .into();
-        let scrollbar_hover_zone = container(
-            mouse_area(
-                Space::new()
-                    .width(SCROLLBAR_REVEAL_ZONE)
-                    .height(Length::Fill),
-            )
-            .on_enter(Message::StorageAnalysisScrollbarHover(true))
-            .on_exit(Message::StorageAnalysisScrollbarHover(false)),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_right(Length::Fill);
-        let category_panel = container(
-            stack(vec![category_scroller, scrollbar_hover_zone.into()])
-                .width(Length::Fill)
-                .height(Length::Fill),
-        )
+        let category_panel = container(scrollbar_proximity_layer(
+            category_scroller,
+            Some((
+                Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Vertical, true),
+                Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Vertical, false),
+            )),
+            None,
+        ))
         .padding([0, 2])
         .width(Length::Fill)
         .height(Length::Fill);
@@ -573,11 +589,14 @@ impl BExplorerIced {
             .width(Length::Fixed(chart_card_width))
             .height(Length::Fill);
         let category_breakdown_width =
-            (window_size.width * 0.24).clamp(self.ui_metric(300.0), self.ui_metric(400.0));
-        let category_breakdown =
-            container(self.storage_overview_category_breakdown(state, palette))
-                .width(Length::Fixed(category_breakdown_width))
-                .height(Length::Fill);
+            storage_overview_breakdown_width(window_size.width, font_size);
+        let category_breakdown = container(self.storage_overview_category_breakdown(
+            state,
+            palette,
+            category_breakdown_width,
+        ))
+        .width(Length::Fixed(category_breakdown_width))
+        .height(Length::Fill);
         let overview = row![category_panel, category_breakdown, chart_panel]
             .spacing(12)
             .width(Length::Fill)
@@ -756,6 +775,7 @@ impl BExplorerIced {
         &'a self,
         state: &'a StorageAnalysisState,
         palette: Palette,
+        card_width: f32,
     ) -> Element<'a, Message> {
         let font_size = self.font_size();
         let selected_category = state.overview_selected_category;
@@ -790,6 +810,9 @@ impl BExplorerIced {
             let count_column_width = self.ui_metric(72.0);
             let size_column_width = self.ui_metric(82.0);
             let usage_bar_width = self.ui_metric(88.0);
+            let column_spacing = self.ui_metric(7.0);
+            let extension_column_width =
+                storage_overview_extension_column_width(card_width, font_size);
             let max_extension_bytes = state
                 .overview_extensions
                 .iter()
@@ -801,7 +824,7 @@ impl BExplorerIced {
                     text(self.localized("Extensión", "Extension"))
                         .size((font_size - 1.0).max(10.0))
                         .color(palette.muted_text)
-                        .width(Length::Fill),
+                        .width(Length::Fixed(extension_column_width)),
                     Space::new().width(Length::Fixed(usage_bar_width)),
                     text(self.localized("Archivos", "Files"))
                         .size((font_size - 1.0).max(10.0))
@@ -841,6 +864,7 @@ impl BExplorerIced {
                     || self.localized("Sin extensión", "No extension").to_owned(),
                     |extension| extension.to_uppercase(),
                 );
+                let label = ellipsize_to_glyph_width(&label, extension_column_width, font_size);
                 let selected = state.overview_selected_extension == Some(index);
                 let usage_ratio = if max_extension_bytes == 0 {
                     0.0
@@ -875,7 +899,7 @@ impl BExplorerIced {
                                 .size(font_size)
                                 .color(palette.text)
                                 .wrapping(iced::widget::text::Wrapping::None)
-                                .width(Length::Fill),
+                                .width(Length::Fixed(extension_column_width)),
                             container(stack(vec![usage_track.into(), usage_fill.into()]))
                                 .width(Length::Fixed(usage_bar_width))
                                 .height(Length::Fill)
@@ -891,7 +915,7 @@ impl BExplorerIced {
                                 .width(Length::Fixed(size_column_width))
                                 .align_x(Horizontal::Right),
                         ]
-                        .spacing(self.ui_metric(7.0))
+                        .spacing(column_spacing)
                         .align_y(Alignment::Center),
                     )
                     .padding([self.ui_metric(5.0), self.ui_metric(8.0)])
@@ -931,7 +955,7 @@ impl BExplorerIced {
                         .height(Length::Fixed(extension_range.after)),
                 );
             }
-            let extensions = scrollable(extension_rows)
+            let extensions: Element<'_, Message> = scrollable(extension_rows)
                 .id(storage_overview_extension_scroll_id())
                 .direction(scrollable::Direction::Vertical(
                     explorer_scrollbar(f32::from(state.scrollbar_vertical_hovered)).spacing(4.0),
@@ -949,7 +973,16 @@ impl BExplorerIced {
                         status,
                         state.scrollbar_reveal_progress,
                     )
-                });
+                })
+                .into();
+            let extensions = scrollbar_proximity_layer(
+                extensions,
+                Some((
+                    Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Vertical, true),
+                    Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Vertical, false),
+                )),
+                None,
+            );
             column![
                 text(summary)
                     .size((font_size - 1.0).max(10.0))
@@ -1323,20 +1356,40 @@ impl BExplorerIced {
         ))
         .width(Length::Fill)
         .height(Length::Fixed(self.ui_metric(DUPLICATE_TABLE_HEADER_HEIGHT)));
-        let table_rows = scrollable(rows.width(Length::Fixed(table_content_width)))
-            .id(storage_category_table_scroll_id())
-            .direction(scrollable::Direction::Both {
-                vertical: explorer_scrollbar(1.0),
-                horizontal: explorer_scrollbar(1.0),
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .on_scroll(|viewport| Message::StorageCategoryTableScrolled {
-                offset_x: viewport.absolute_offset().x,
-                offset_y: viewport.absolute_offset().y,
-                viewport_height: viewport.bounds().height,
-            })
-            .style(move |theme, status| explorer_scrollable_style(palette, theme, status, 1.0));
+        let table_rows: Element<'_, Message> =
+            scrollable(rows.width(Length::Fixed(table_content_width)))
+                .id(storage_category_table_scroll_id())
+                .direction(scrollable::Direction::Both {
+                    vertical: explorer_scrollbar(f32::from(state.scrollbar_vertical_hovered)),
+                    horizontal: explorer_scrollbar(f32::from(state.scrollbar_horizontal_hovered)),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_scroll(|viewport| Message::StorageCategoryTableScrolled {
+                    offset_x: viewport.absolute_offset().x,
+                    offset_y: viewport.absolute_offset().y,
+                    viewport_height: viewport.bounds().height,
+                })
+                .style(move |theme, status| {
+                    explorer_scrollable_style(
+                        palette,
+                        theme,
+                        status,
+                        state.scrollbar_reveal_progress,
+                    )
+                })
+                .into();
+        let table_rows = scrollbar_proximity_layer(
+            table_rows,
+            Some((
+                Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Vertical, true),
+                Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Vertical, false),
+            )),
+            Some((
+                Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Horizontal, true),
+                Message::StorageAnalysisScrollbarHover(ScrollbarAxis::Horizontal, false),
+            )),
+        );
         let table = container(column![header, table_rows].height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -1869,6 +1922,22 @@ mod tests {
             created: None,
             modified: None,
         }
+    }
+
+    #[test]
+    fn extension_card_minimum_preserves_useful_name_width() {
+        for font_size in [10.0, 13.0, 18.0] {
+            let card_width = scaled_ui_metric(STORAGE_OVERVIEW_BREAKDOWN_MIN_WIDTH, font_size);
+            assert!(
+                storage_overview_extension_column_width(card_width, font_size) >= 100.0,
+                "the extension label must remain readable at font size {font_size}"
+            );
+        }
+
+        assert!(
+            storage_overview_breakdown_width(STORAGE_ANALYSIS_WINDOW_WIDTH, 13.0)
+                >= scaled_ui_metric(STORAGE_OVERVIEW_BREAKDOWN_MIN_WIDTH, 13.0)
+        );
     }
 
     #[test]

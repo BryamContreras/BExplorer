@@ -73,6 +73,7 @@ impl BExplorerIced {
             category_scroll_sampled_at: None,
             window_size,
             window_maximized,
+            scrollbar_horizontal_hovered: false,
             scrollbar_vertical_hovered: false,
             scrollbar_reveal_progress: 0.0,
             scrollbar_reveal_until: None,

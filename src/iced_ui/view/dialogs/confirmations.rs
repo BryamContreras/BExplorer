@@ -263,6 +263,9 @@ impl BExplorerIced {
             PermanentDeleteTarget::EmptyTrash => {
                 self.localized("Vaciar papelera", "Empty Recycle Bin")
             }
+            PermanentDeleteTarget::Portable => {
+                self.localized("Eliminar del dispositivo", "Delete from device")
+            }
             PermanentDeleteTarget::Filesystem | PermanentDeleteTarget::TrashItems => {
                 self.localized("Eliminar permanentemente", "Delete permanently")
             }
@@ -274,6 +277,15 @@ impl BExplorerIced {
                     "Do you want to permanently delete every item in the Recycle Bin?",
                 )
                 .to_owned(),
+            PermanentDeleteTarget::Portable => {
+                if self.is_spanish() {
+                    format!(
+                        "¿Quieres eliminar permanentemente {count} elemento(s) del dispositivo?"
+                    )
+                } else {
+                    format!("Do you want to permanently delete {count} item(s) from the device?")
+                }
+            }
             PermanentDeleteTarget::Filesystem | PermanentDeleteTarget::TrashItems => {
                 if self.is_spanish() {
                     format!("¿Quieres eliminar permanentemente {count} elemento(s)?")
@@ -284,9 +296,9 @@ impl BExplorerIced {
         };
         let confirm_label = match target {
             PermanentDeleteTarget::EmptyTrash => self.localized("Vaciar", "Empty"),
-            PermanentDeleteTarget::Filesystem | PermanentDeleteTarget::TrashItems => {
-                self.localized("Eliminar", "Delete")
-            }
+            PermanentDeleteTarget::Filesystem
+            | PermanentDeleteTarget::Portable
+            | PermanentDeleteTarget::TrashItems => self.localized("Eliminar", "Delete"),
         };
 
         let panel = column![

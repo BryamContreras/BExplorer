@@ -214,57 +214,70 @@ impl BExplorerIced {
         let table_content_width = column_widths.iter().sum::<f32>();
         let name_header: Element<'_, Message> = row![
             header_checkbox,
-            text(self.localized("Nombre", "Name"))
-                .size(font_size)
-                .color(palette.text)
-                .width(Length::Fill)
-                .align_x(Horizontal::Left)
-                .wrapping(iced::widget::text::Wrapping::None),
+            duplicate_sort_header_label(
+                self.localized("Nombre", "Name"),
+                DuplicateSortColumn::Name,
+                (state.sort_column, state.sort_ascending),
+                palette,
+                font_size,
+            ),
         ]
         .spacing(self.ui_metric(8.0))
         .align_y(Alignment::Center)
         .into();
         let table_header = row![
             table_header_content_cell(name_header, name_column_width, 0, palette, font_size),
-            table_header_cell(
+            duplicate_table_header_cell(
                 self.localized("Tipo", "Type"),
                 type_column_width,
                 1,
+                DuplicateSortColumn::Type,
+                (state.sort_column, state.sort_ascending),
                 palette,
                 font_size
             ),
-            table_header_cell(
+            duplicate_table_header_cell(
                 self.localized("Tamaño", "Size"),
                 size_column_width,
                 2,
+                DuplicateSortColumn::Size,
+                (state.sort_column, state.sort_ascending),
                 palette,
                 font_size
             ),
-            table_header_cell(
+            duplicate_table_header_cell(
                 self.localized("Fecha de creación", "Creation date"),
                 created_column_width,
                 3,
+                DuplicateSortColumn::Created,
+                (state.sort_column, state.sort_ascending),
                 palette,
                 font_size,
             ),
-            table_header_cell(
+            duplicate_table_header_cell(
                 self.localized("Fecha de modificación", "Modification date"),
                 modified_column_width,
                 4,
+                DuplicateSortColumn::Modified,
+                (state.sort_column, state.sort_ascending),
                 palette,
                 font_size,
             ),
-            table_header_cell(
+            duplicate_table_header_cell(
                 self.localized("Coincidencia", "Match"),
                 match_column_width,
                 5,
+                DuplicateSortColumn::Match,
+                (state.sort_column, state.sort_ascending),
                 palette,
                 font_size
             ),
-            table_header_cell(
+            duplicate_table_header_cell(
                 self.localized("Ubicación", "Location"),
                 location_column_width,
                 6,
+                DuplicateSortColumn::Location,
+                (state.sort_column, state.sort_ascending),
                 palette,
                 font_size
             ),
@@ -517,19 +530,40 @@ impl BExplorerIced {
         ))
         .width(Length::Fill)
         .height(Length::Fixed(self.ui_metric(DUPLICATE_TABLE_HEADER_HEIGHT)));
-        let table_rows = scrollable(rows.width(Length::Fixed(table_content_width)))
-            .direction(scrollable::Direction::Both {
-                vertical: explorer_scrollbar(1.0),
-                horizontal: explorer_scrollbar(1.0),
-            })
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .on_scroll(|viewport| Message::DuplicateTableScrolled {
-                offset_x: viewport.absolute_offset().x,
-                offset_y: viewport.absolute_offset().y,
-                viewport_height: viewport.bounds().height,
-            })
-            .style(move |theme, status| explorer_scrollable_style(palette, theme, status, 1.0));
+        let table_rows: Element<'_, Message> =
+            scrollable(rows.width(Length::Fixed(table_content_width)))
+                .id(duplicate_table_scroll_id())
+                .direction(scrollable::Direction::Both {
+                    vertical: explorer_scrollbar(f32::from(state.scrollbar_vertical_hovered)),
+                    horizontal: explorer_scrollbar(f32::from(state.scrollbar_horizontal_hovered)),
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .on_scroll(|viewport| Message::DuplicateTableScrolled {
+                    offset_x: viewport.absolute_offset().x,
+                    offset_y: viewport.absolute_offset().y,
+                    viewport_height: viewport.bounds().height,
+                })
+                .style(move |theme, status| {
+                    explorer_scrollable_style(
+                        palette,
+                        theme,
+                        status,
+                        state.scrollbar_reveal_progress,
+                    )
+                })
+                .into();
+        let table_rows = scrollbar_proximity_layer(
+            table_rows,
+            Some((
+                Message::DuplicateScrollbarHover(ScrollbarAxis::Vertical, true),
+                Message::DuplicateScrollbarHover(ScrollbarAxis::Vertical, false),
+            )),
+            Some((
+                Message::DuplicateScrollbarHover(ScrollbarAxis::Horizontal, true),
+                Message::DuplicateScrollbarHover(ScrollbarAxis::Horizontal, false),
+            )),
+        );
         let table = container(column![header, table_rows].height(Length::Fill))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -727,26 +761,59 @@ impl BExplorerIced {
     }
 }
 
-fn table_header_cell<'a>(
+fn duplicate_table_header_cell<'a>(
     label: &'a str,
     width: f32,
     column: usize,
+    sort_column: DuplicateSortColumn,
+    sort_state: (DuplicateSortColumn, bool),
     palette: Palette,
     font_size: f32,
 ) -> Element<'a, Message> {
     table_header_content_cell(
-        text(label)
-            .size(font_size)
-            .color(palette.text)
-            .width(Length::Fill)
-            .align_x(Horizontal::Left)
-            .wrapping(iced::widget::text::Wrapping::None)
-            .into(),
+        duplicate_sort_header_label(label, sort_column, sort_state, palette, font_size),
         width,
         column,
         palette,
         font_size,
     )
+}
+
+fn duplicate_sort_header_label<'a>(
+    label: &'a str,
+    sort_column: DuplicateSortColumn,
+    sort_state: (DuplicateSortColumn, bool),
+    palette: Palette,
+    font_size: f32,
+) -> Element<'a, Message> {
+    let indicator = if sort_column == sort_state.0 {
+        if sort_state.1 { "▲" } else { "▼" }
+    } else {
+        ""
+    };
+    mouse_area(
+        container(
+            row![
+                text(label)
+                    .size(font_size)
+                    .color(palette.text)
+                    .width(Length::Fill)
+                    .align_x(Horizontal::Left)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                text(indicator)
+                    .size((font_size - 2.0).max(9.0))
+                    .color(palette.accent),
+            ]
+            .spacing(scaled_ui_metric(5.0, font_size))
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_y(Length::Fill),
+    )
+    .on_press(Message::SortDuplicateColumn(sort_column))
+    .interaction(mouse::Interaction::Pointer)
+    .into()
 }
 
 fn table_header_content_cell<'a>(

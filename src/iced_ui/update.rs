@@ -695,9 +695,14 @@ impl BExplorerIced {
                 }
                 Task::none()
             }
-            Message::StorageAnalysisScrollbarHover(hovered) => {
+            Message::StorageAnalysisScrollbarHover(axis, hovered) => {
                 if let Some(state) = self.storage_analysis.as_mut() {
-                    state.scrollbar_vertical_hovered = hovered;
+                    match axis {
+                        ScrollbarAxis::Horizontal => {
+                            state.scrollbar_horizontal_hovered = hovered;
+                        }
+                        ScrollbarAxis::Vertical => state.scrollbar_vertical_hovered = hovered,
+                    }
                 }
                 Task::none()
             }
@@ -753,13 +758,50 @@ impl BExplorerIced {
                     if !wheel_reveal {
                         state.scrollbar_reveal_until = None;
                     }
-                    let target = f32::from(state.scrollbar_vertical_hovered || wheel_reveal);
+                    let target = f32::from(
+                        state.scrollbar_horizontal_hovered
+                            || state.scrollbar_vertical_hovered
+                            || wheel_reveal,
+                    );
                     state.scrollbar_reveal_progress = if target > state.scrollbar_reveal_progress {
                         (state.scrollbar_reveal_progress + SCROLLBAR_FADE_STEP).min(target)
                     } else {
                         (state.scrollbar_reveal_progress - SCROLLBAR_FADE_STEP).max(target)
                     };
                 }
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    let wheel_reveal = state
+                        .scrollbar_reveal_until
+                        .is_some_and(|until| until > now);
+                    if !wheel_reveal {
+                        state.scrollbar_reveal_until = None;
+                    }
+                    let target = f32::from(
+                        state.scrollbar_horizontal_hovered
+                            || state.scrollbar_vertical_hovered
+                            || wheel_reveal,
+                    );
+                    state.scrollbar_reveal_progress = if target > state.scrollbar_reveal_progress {
+                        (state.scrollbar_reveal_progress + SCROLLBAR_FADE_STEP).min(target)
+                    } else {
+                        (state.scrollbar_reveal_progress - SCROLLBAR_FADE_STEP).max(target)
+                    };
+                }
+                let wheel_reveal = self
+                    .defender_threats_scrollbar_reveal_until
+                    .is_some_and(|until| until > now);
+                if !wheel_reveal {
+                    self.defender_threats_scrollbar_reveal_until = None;
+                }
+                let target = f32::from(self.defender_threats_scrollbar_hovered || wheel_reveal);
+                self.defender_threats_scrollbar_reveal_progress =
+                    if target > self.defender_threats_scrollbar_reveal_progress {
+                        (self.defender_threats_scrollbar_reveal_progress + SCROLLBAR_FADE_STEP)
+                            .min(target)
+                    } else {
+                        (self.defender_threats_scrollbar_reveal_progress - SCROLLBAR_FADE_STEP)
+                            .max(target)
+                    };
                 Task::none()
             }
             Message::AsyncProgressTick => {
@@ -1367,7 +1409,23 @@ impl BExplorerIced {
                                 records: outcome.undo_records,
                             });
                         }
-                        self.pane_mut(pane).status = format!("Deleted {} item(s)", outcome.count);
+                        self.pane_mut(pane).status = if outcome.cancelled {
+                            if self.is_spanish() {
+                                format!(
+                                    "Eliminación cancelada: {} elemento(s) enviados a la papelera",
+                                    outcome.count
+                                )
+                            } else {
+                                format!(
+                                    "Deletion cancelled: {} item(s) moved to the Recycle Bin",
+                                    outcome.count
+                                )
+                            }
+                        } else if self.is_spanish() {
+                            format!("Enviados a la papelera {} elemento(s)", outcome.count)
+                        } else {
+                            format!("Moved {} item(s) to the Recycle Bin", outcome.count)
+                        };
                         self.refresh_after_trash_change(pane, &[])
                     }
                     Err(error) => {
@@ -2781,8 +2839,24 @@ impl BExplorerIced {
                     .unwrap_or_default();
                 self.active_deletes.remove(&transfer_id);
                 let completion_task = match result {
-                    Ok(count) => {
-                        self.pane_mut(pane).status = format!("Deleted {count} item(s)");
+                    Ok(outcome) => {
+                        self.pane_mut(pane).status = if outcome.cancelled {
+                            if self.is_spanish() {
+                                format!(
+                                    "Eliminación cancelada: {} entrada(s) eliminada(s)",
+                                    outcome.completed_items
+                                )
+                            } else {
+                                format!(
+                                    "Deletion cancelled: {} entries deleted",
+                                    outcome.completed_items
+                                )
+                            }
+                        } else if self.is_spanish() {
+                            format!("Eliminados permanentemente {} elemento(s)", outcome.count)
+                        } else {
+                            format!("Permanently deleted {} item(s)", outcome.count)
+                        };
                         self.start_load(pane)
                     }
                     Err(error) => {
@@ -2972,16 +3046,27 @@ impl BExplorerIced {
                 let worker_job = job.clone();
                 let mut progress = TransferProgress::pending(&job);
                 progress.state = TransferState::Copying;
-                progress.current_name = if cfg!(target_os = "linux") {
-                    "Esperando permisos de root…".into()
-                } else {
-                    "Esperando permisos de administrador…".into()
+                progress.current_name = match job.kind {
+                    TransferKind::Copy => self
+                        .localized(
+                            "Copia con permisos elevados en curso…",
+                            "Elevated copy in progress…",
+                        )
+                        .into(),
+                    TransferKind::Move => self
+                        .localized(
+                            "Movimiento con permisos elevados en curso…",
+                            "Elevated move in progress…",
+                        )
+                        .into(),
                 };
+                self.active_elevated_transfers.insert(job.id, pane);
                 self.transfer_progress.insert(job.id, progress);
                 self.pane_mut(pane).status = "Esperando autorización del sistema…".into();
+                let progress_tx = self.transfer_tx.clone();
                 let elevated_task = Task::perform(
                     run_blocking_file_operation(move || {
-                        transfer_queue::run_elevated_transfer(&worker_job)
+                        transfer_queue::run_elevated_transfer(&worker_job, progress_tx)
                     }),
                     move |result| Message::ElevatedTransferFinished(pane, job, result),
                 );
@@ -2993,71 +3078,61 @@ impl BExplorerIced {
                 }
                 Task::none()
             }
-            Message::ElevatedTransferFinished(pane, job, result) => match result {
-                Ok(result) => {
-                    if let Some(mut progress) = self.transfer_progress.remove(&job.id) {
-                        progress.state = TransferState::Finished;
-                        progress.files_done = result.completed_files;
-                        self.transfer_history.push_back(TransferHistoryState {
-                            progress,
-                            finished_at: Instant::now(),
-                        });
-                    }
-                    if job.conflict_policy == ConflictPolicy::KeepBoth
-                        && !result.completed_roots.is_empty()
-                    {
-                        self.last_undo_action = Some(match job.kind {
-                            TransferKind::Copy => UndoAction::Copy {
-                                pane,
-                                targets: result
-                                    .completed_roots
-                                    .iter()
-                                    .map(|item| item.target.clone())
-                                    .collect(),
-                            },
-                            TransferKind::Move => UndoAction::Move {
-                                pane,
-                                items: result.completed_roots.clone(),
-                            },
-                        });
-                    }
-                    self.pane_mut(pane).status = match job.kind {
-                        TransferKind::Copy => {
-                            format!(
-                                "Copiados {} elemento(s) con permisos elevados",
-                                result.completed_files
-                            )
+            Message::ElevatedTransferFinished(pane, job, result) => {
+                self.active_elevated_transfers.remove(&job.id);
+                self.transfer_progress.remove(&job.id);
+                let completion_task = match result {
+                    Ok(result) => {
+                        if job.conflict_policy == ConflictPolicy::KeepBoth
+                            && !result.completed_roots.is_empty()
+                        {
+                            self.last_undo_action = Some(match job.kind {
+                                TransferKind::Copy => UndoAction::Copy {
+                                    pane,
+                                    targets: result
+                                        .completed_roots
+                                        .iter()
+                                        .map(|item| item.target.clone())
+                                        .collect(),
+                                },
+                                TransferKind::Move => UndoAction::Move {
+                                    pane,
+                                    items: result.completed_roots.clone(),
+                                },
+                            });
                         }
-                        TransferKind::Move => {
-                            format!(
-                                "Movidos {} elemento(s) con permisos elevados",
-                                result.completed_files
-                            )
-                        }
-                    };
-                    self.refresh_panes_for_directories(
-                        pane,
-                        &crate::iced_ui::file_actions::transfer_refresh_directories(&job),
-                    )
-                }
-                Err(error) => {
-                    if let Some(mut progress) = self.transfer_progress.remove(&job.id) {
-                        progress.state = TransferState::Failed;
-                        self.transfer_history.push_back(TransferHistoryState {
-                            progress,
-                            finished_at: Instant::now(),
-                        });
-                    }
-                    let error_task = self.report_error(pane, error);
-                    Task::batch([
-                        error_task,
+                        self.pane_mut(pane).status = match job.kind {
+                            TransferKind::Copy => {
+                                format!(
+                                    "Copiados {} elemento(s) con permisos elevados",
+                                    result.completed_files
+                                )
+                            }
+                            TransferKind::Move => {
+                                format!(
+                                    "Movidos {} elemento(s) con permisos elevados",
+                                    result.completed_files
+                                )
+                            }
+                        };
                         self.refresh_panes_for_directories(
                             pane,
                             &crate::iced_ui::file_actions::transfer_refresh_directories(&job),
-                        ),
-                    ])
-                }
-            },
+                        )
+                    }
+                    Err(error) => {
+                        let error_task = self.report_error(pane, error);
+                        Task::batch([
+                            error_task,
+                            self.refresh_panes_for_directories(
+                                pane,
+                                &crate::iced_ui::file_actions::transfer_refresh_directories(&job),
+                            ),
+                        ])
+                    }
+                };
+                Task::batch([completion_task, self.close_transfer_window_if_idle_task()])
+            }
             Message::ConfirmElevatedDelete => {
                 let Some(pending) = self.elevated_delete_dialog.take() else {
                     return Task::none();
@@ -3076,6 +3151,7 @@ impl BExplorerIced {
                         } else {
                             ActiveDeleteKind::MoveToTrash
                         },
+                        control: None,
                     },
                 );
                 let kind = if permanent {
@@ -3711,6 +3787,7 @@ impl BExplorerIced {
                     state.table_scroll_offset_y = offset_y.max(0.0);
                     state.table_viewport_height = viewport_height.max(0.0);
                     state.table_scroll_sampled_at = Some(now);
+                    state.scrollbar_reveal_until = Some(now + Duration::from_millis(850));
                 }
                 iced::widget::operation::scroll_to(
                     duplicate_table_header_scroll_id(),
@@ -3720,6 +3797,18 @@ impl BExplorerIced {
                     },
                 )
             }
+            Message::DuplicateScrollbarHover(axis, hovered) => {
+                if let Some(state) = self.duplicate_cleanup.as_mut() {
+                    match axis {
+                        ScrollbarAxis::Horizontal => {
+                            state.scrollbar_horizontal_hovered = hovered;
+                        }
+                        ScrollbarAxis::Vertical => state.scrollbar_vertical_hovered = hovered,
+                    }
+                }
+                Task::none()
+            }
+            Message::SortDuplicateColumn(column) => self.sort_duplicate_column(column),
             Message::StartDuplicateColumnResize(column) => {
                 if let Some(state) = self.duplicate_cleanup.as_mut()
                     && let Some(width) = state.column_widths.get(column).copied()
@@ -3862,6 +3951,7 @@ impl BExplorerIced {
                     state.category_scroll_offset_y = offset_y.max(0.0);
                     state.category_viewport_height = viewport_height.max(0.0);
                     state.category_scroll_sampled_at = Some(now);
+                    state.scrollbar_reveal_until = Some(now + Duration::from_millis(850));
                 }
                 let header_scroll = iced::widget::operation::scroll_to(
                     storage_category_table_header_scroll_id(),
@@ -3930,7 +4020,17 @@ impl BExplorerIced {
                 }
             }
             Message::TransferWindowOpened(id) => {
-                self.transfer_window_id = Some(id);
+                if !progress_window_open_should_activate(
+                    self.transfer_window_id == Some(id),
+                    self.closing_windows.contains(&id),
+                    self.transfer_active(),
+                ) {
+                    if self.transfer_window_id == Some(id) {
+                        self.transfer_window_id = None;
+                        self.transfer_window_item_count = 0;
+                    }
+                    return self.close_window_task(id);
+                }
                 self.transfer_window_item_count = self.transfer_items().len();
                 Task::batch([
                     self.apply_window_corners_task_for(id),
@@ -3940,7 +4040,17 @@ impl BExplorerIced {
                 ])
             }
             Message::ArchiveWindowOpened(id) => {
-                self.archive_window_id = Some(id);
+                if !progress_window_open_should_activate(
+                    self.archive_window_id == Some(id),
+                    self.closing_windows.contains(&id),
+                    self.archive_active(),
+                ) {
+                    if self.archive_window_id == Some(id) {
+                        self.archive_window_id = None;
+                        self.archive_window_item_count = 0;
+                    }
+                    return self.close_window_task(id);
+                }
                 self.archive_window_item_count = self.archive_items().len();
                 Task::batch([
                     self.apply_window_corners_task_for(id),
@@ -3961,6 +4071,9 @@ impl BExplorerIced {
             }
             Message::DefenderThreatsWindowOpened(id) => {
                 self.defender_threats_window_id = Some(id);
+                self.defender_threats_scrollbar_hovered = false;
+                self.defender_threats_scrollbar_reveal_progress = 0.0;
+                self.defender_threats_scrollbar_reveal_until = None;
                 let threat_count = self
                     .defender_summary
                     .as_ref()
@@ -3975,6 +4088,15 @@ impl BExplorerIced {
                     window::minimize(id, false),
                     window::gain_focus(id),
                 ])
+            }
+            Message::DefenderThreatsScrolled => {
+                self.defender_threats_scrollbar_reveal_until =
+                    Some(Instant::now() + Duration::from_millis(850));
+                Task::none()
+            }
+            Message::DefenderThreatsScrollbarHover(hovered) => {
+                self.defender_threats_scrollbar_hovered = hovered;
+                Task::none()
             }
             Message::DuplicateCleanupWindowOpened(id) => {
                 self.duplicate_window_id = Some(id);
@@ -4082,6 +4204,9 @@ impl BExplorerIced {
                     }
                     if self.defender_threats_window_id == Some(id) {
                         self.defender_threats_window_id = None;
+                        self.defender_threats_scrollbar_hovered = false;
+                        self.defender_threats_scrollbar_reveal_progress = 0.0;
+                        self.defender_threats_scrollbar_reveal_until = None;
                     }
                     if self.duplicate_window_id == Some(id) {
                         self.duplicate_window_id = None;
@@ -4331,6 +4456,10 @@ impl BExplorerIced {
                         .control
                         .cancel
                         .store(true, std::sync::atomic::Ordering::Relaxed);
+                } else if let Some(deletion) = self.active_deletes.get(&id)
+                    && let Some(control) = deletion.control.as_ref()
+                {
+                    control.cancel();
                 } else if let Some(index) = self
                     .transfer_queue
                     .iter()

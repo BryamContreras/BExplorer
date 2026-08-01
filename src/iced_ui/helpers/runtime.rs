@@ -231,7 +231,7 @@ pub(in crate::iced_ui) fn storage_analysis_window_settings(font_size: f32) -> wi
 
 pub(in crate::iced_ui) fn storage_analysis_window_min_size(font_size: f32) -> Size {
     Size::new(
-        adaptive_text_surface_width(760.0, font_size),
+        adaptive_text_surface_width(1_000.0, font_size),
         scaled_ui_metric(520.0, font_size),
     )
 }

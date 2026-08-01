@@ -19,6 +19,7 @@ crc32fast = "1.5"
 directories = "5"
 flate2 = "1.1"
 fs2 = "0.4"
+getrandom = "0.3"
 hayro = { version = "0.7", features = ["embed-fonts"] }
 iced = { version = "0.14.0", features = ["svg", "image-without-codecs"] }
 image = { version = "0.25", default-features = false, features = [

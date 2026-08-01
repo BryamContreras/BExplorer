@@ -437,46 +437,16 @@ impl BExplorerIced {
         pane: PaneId,
         base: Element<'a, Message>,
     ) -> Element<'a, Message> {
-        let vertical_zone = container(
-            mouse_area(
-                Space::new()
-                    .width(SCROLLBAR_REVEAL_ZONE)
-                    .height(Length::Fill),
-            )
-            .on_enter(Message::ScrollbarHover(pane, ScrollbarAxis::Vertical, true))
-            .on_exit(Message::ScrollbarHover(
-                pane,
-                ScrollbarAxis::Vertical,
-                false,
+        scrollbar_proximity_layer(
+            base,
+            Some((
+                Message::ScrollbarHover(pane, ScrollbarAxis::Vertical, true),
+                Message::ScrollbarHover(pane, ScrollbarAxis::Vertical, false),
+            )),
+            Some((
+                Message::ScrollbarHover(pane, ScrollbarAxis::Horizontal, true),
+                Message::ScrollbarHover(pane, ScrollbarAxis::Horizontal, false),
             )),
         )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_right(Length::Fill);
-        let horizontal_zone = container(
-            mouse_area(
-                Space::new()
-                    .width(Length::Fill)
-                    .height(SCROLLBAR_REVEAL_ZONE),
-            )
-            .on_enter(Message::ScrollbarHover(
-                pane,
-                ScrollbarAxis::Horizontal,
-                true,
-            ))
-            .on_exit(Message::ScrollbarHover(
-                pane,
-                ScrollbarAxis::Horizontal,
-                false,
-            )),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_bottom(Length::Fill);
-
-        stack(vec![base, vertical_zone.into(), horizontal_zone.into()])
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
     }
 }

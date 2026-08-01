@@ -7,7 +7,6 @@ mod menus;
 mod shortcuts;
 use iced::widget::{column, pick_list, row};
 
-const EXPLORER_SCROLLBAR_RAIL_WIDTH: f32 = 10.0;
 const EXPLORER_SCROLLBAR_THUMB_WIDTH: f32 = 6.0;
 const EXPLORER_SCROLLBAR_HOVER_THUMB_WIDTH: f32 = 8.0;
 const EXPLORER_SCROLLBAR_MIN_LENGTH: f32 = 9.0;
@@ -80,6 +79,64 @@ fn explorer_scrollable_style(
     });
     style.gap = Some(translucent_color(palette.table_bg, 0.9 * reveal_progress).into());
     style
+}
+
+fn scrollbar_proximity_layer<'a>(
+    base: Element<'a, Message>,
+    vertical_messages: Option<(Message, Message)>,
+    horizontal_messages: Option<(Message, Message)>,
+) -> Element<'a, Message> {
+    let mut layers = vec![base];
+    if let Some((on_enter, on_exit)) = vertical_messages {
+        layers.push(
+            container(
+                mouse_area(
+                    Space::new()
+                        .width(SCROLLBAR_REVEAL_ZONE)
+                        .height(Length::Fill),
+                )
+                .on_enter(on_enter)
+                .on_exit(on_exit),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_right(Length::Fill)
+            .into(),
+        );
+    }
+    if let Some((on_enter, on_exit)) = horizontal_messages {
+        layers.push(
+            container(
+                mouse_area(
+                    Space::new()
+                        .width(Length::Fill)
+                        .height(SCROLLBAR_REVEAL_ZONE),
+                )
+                .on_enter(on_enter)
+                .on_exit(on_exit),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_bottom(Length::Fill)
+            .into(),
+        );
+    }
+
+    stack(layers)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+}
+
+#[cfg(test)]
+mod scrollbar_proximity_tests {
+    use super::*;
+
+    #[test]
+    fn scrollbar_hover_zone_extends_three_pixels_beyond_the_rail() {
+        assert_eq!(SCROLLBAR_PROXIMITY_MARGIN, 3.0);
+        assert_eq!(SCROLLBAR_REVEAL_ZONE, EXPLORER_SCROLLBAR_RAIL_WIDTH + 3.0);
+    }
 }
 
 fn settings_pick_list_style(

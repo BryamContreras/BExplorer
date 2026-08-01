@@ -8,11 +8,6 @@ impl BExplorerIced {
         palette: Palette,
     ) -> Element<'_, Message> {
         let card_bg = palette.native_utility_card_background(self.config.vibrancy_active);
-        let progress = if item.total_bytes == 0 {
-            0.0
-        } else {
-            (item.copied_bytes as f32 / item.total_bytes as f32).clamp(0.0, 1.0)
-        };
         let is_delete = matches!(
             item.kind,
             TransferDisplayKind::Trash
@@ -20,6 +15,24 @@ impl BExplorerIced {
                 | TransferDisplayKind::RestoreTrash
                 | TransferDisplayKind::PurgeTrash
         );
+        let delete_progress_known = is_delete && item.cancellable && item.total_files > 0;
+        let indeterminate = matches!(item.state, TransferState::Pending | TransferState::Copying)
+            && if is_delete {
+                !delete_progress_known
+            } else {
+                item.total_bytes == 0
+            };
+        let progress = if is_delete {
+            if !delete_progress_known {
+                0.0
+            } else {
+                (item.files_done as f32 / item.total_files as f32).clamp(0.0, 1.0)
+            }
+        } else if item.total_bytes == 0 {
+            0.0
+        } else {
+            (item.copied_bytes as f32 / item.total_bytes as f32).clamp(0.0, 1.0)
+        };
         let files = if item.total_files == 0 {
             self.localized("Preparando archivos", "Preparing files")
                 .to_owned()
@@ -49,7 +62,14 @@ impl BExplorerIced {
             String::new()
         };
         let details = if is_delete {
-            if self.is_spanish() {
+            if item.cancellable && item.total_files == 0 {
+                self.localized("Preparando elementos", "Preparing items")
+                    .to_owned()
+            } else if item.cancellable && self.is_spanish() {
+                format!("{} de {} elementos", item.files_done, item.total_files)
+            } else if item.cancellable {
+                format!("{} of {} items", item.files_done, item.total_files)
+            } else if self.is_spanish() {
                 format!("{} elemento(s)", item.total_files)
             } else {
                 format!("{} item(s)", item.total_files)
@@ -62,46 +82,48 @@ impl BExplorerIced {
         let state = self.localized_transfer_state(&item);
         let title = self.localized_transfer_title(&item);
         let id = item.id;
-        let controls: Element<'_, Message> =
-            if matches!(item.state, TransferState::Copying | TransferState::Paused)
-                && matches!(
-                    item.kind,
-                    TransferDisplayKind::Copy | TransferDisplayKind::Move
-                )
-            {
-                let pause_label = if item.state == TransferState::Paused {
-                    self.localized("Reanudar", "Resume")
-                } else {
-                    self.localized("Pausar", "Pause")
-                };
-                row![
-                    transfer_control_button(
-                        pause_label,
-                        Message::ToggleTransferPause(id),
-                        palette,
-                        self.font_size(),
-                    ),
-                    transfer_control_button(
-                        self.localized("Cancelar", "Cancel"),
-                        Message::CancelTransfer(id),
-                        palette,
-                        self.font_size(),
-                    ),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center)
-                .into()
-            } else if item.state == TransferState::Pending {
+        let controls: Element<'_, Message> = if item.cancellable
+            && matches!(item.state, TransferState::Copying | TransferState::Paused)
+            && matches!(
+                item.kind,
+                TransferDisplayKind::Copy | TransferDisplayKind::Move
+            ) {
+            let pause_label = if item.state == TransferState::Paused {
+                self.localized("Reanudar", "Resume")
+            } else {
+                self.localized("Pausar", "Pause")
+            };
+            row![
+                transfer_control_button(
+                    pause_label,
+                    Message::ToggleTransferPause(id),
+                    palette,
+                    self.font_size(),
+                ),
                 transfer_control_button(
                     self.localized("Cancelar", "Cancel"),
                     Message::CancelTransfer(id),
                     palette,
                     self.font_size(),
-                )
-                .into()
-            } else {
-                Space::new().into()
-            };
+                ),
+            ]
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .into()
+        } else if item.cancellable
+            && ((is_delete && item.state == TransferState::Copying)
+                || item.state == TransferState::Pending)
+        {
+            transfer_control_button(
+                self.localized("Cancelar", "Cancel"),
+                Message::CancelTransfer(id),
+                palette,
+                self.font_size(),
+            )
+            .into()
+        } else {
+            Space::new().into()
+        };
         let card_height = progress_card_height(self.font_size());
         let card_width = transfer_window_width(self.font_size())
             - WINDOW_BORDER_WIDTH * 2.0
@@ -123,7 +145,7 @@ impl BExplorerIced {
                 ]
                 .spacing(3)
                 .width(Length::Fill),
-                text(if is_delete {
+                text(if indeterminate {
                     String::new()
                 } else {
                     format!("{:.0}%", progress * 100.0)
@@ -134,7 +156,7 @@ impl BExplorerIced {
             ]
             .spacing(9)
             .align_y(Alignment::Center),
-            if is_delete {
+            if indeterminate {
                 indeterminate_progress_bar(
                     self.transfer_progress_phase,
                     palette,

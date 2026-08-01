@@ -406,14 +406,34 @@ impl BExplorerIced {
         ]
         .width(Length::Fill)
         .height(Length::Fixed(cards_height.max(DEFENDER_THREAT_CARD_HEIGHT)));
-        let cards = scrollable(
+        let cards: Element<'_, Message> = scrollable(
             cards_content
                 .width(Length::Fill)
                 .height(Length::Fixed(cards_height.max(DEFENDER_THREAT_CARD_HEIGHT))),
         )
+        .direction(scrollable::Direction::Vertical(explorer_scrollbar(
+            f32::from(self.defender_threats_scrollbar_hovered),
+        )))
         .width(Length::Fill)
         .height(Length::Fixed(visible_cards_height))
-        .style(move |theme, status| explorer_scrollable_style(palette, theme, status, 1.0));
+        .on_scroll(|_| Message::DefenderThreatsScrolled)
+        .style(move |theme, status| {
+            explorer_scrollable_style(
+                palette,
+                theme,
+                status,
+                self.defender_threats_scrollbar_reveal_progress,
+            )
+        })
+        .into();
+        let cards = scrollbar_proximity_layer(
+            cards,
+            Some((
+                Message::DefenderThreatsScrollbarHover(true),
+                Message::DefenderThreatsScrollbarHover(false),
+            )),
+            None,
+        );
         let (summary_text, summary_color) = if self.defender_threat_remediation_pending {
             (
                 self.localized(
