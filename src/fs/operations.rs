@@ -4,6 +4,8 @@ use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::utils::errors::{BExplorerError, Result};
 
@@ -19,6 +21,65 @@ pub struct TrashUndoRecord {
 pub struct TrashDeleteOutcome {
     pub count: usize,
     pub undo_records: Vec<TrashUndoRecord>,
+    pub cancelled: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DeleteProgress {
+    pub current_name: String,
+    pub completed_items: usize,
+    pub total_items: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeleteControl {
+    cancel: Arc<AtomicBool>,
+    progress: Arc<Mutex<DeleteProgress>>,
+}
+
+impl DeleteControl {
+    pub fn new() -> Self {
+        Self {
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress: Arc::new(Mutex::new(DeleteProgress::default())),
+        }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Relaxed);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    pub fn progress(&self) -> DeleteProgress {
+        self.progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn update_progress(&self, update: impl FnOnce(&mut DeleteProgress)) {
+        let mut progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        update(&mut progress);
+    }
+}
+
+impl Default for DeleteControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PermanentDeleteOutcome {
+    pub count: usize,
+    pub completed_items: usize,
+    pub cancelled: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -376,6 +437,13 @@ pub fn delete_to_trash(paths: &[PathBuf]) -> Result<usize> {
 /// needed to restore exactly this deletion. The identity is obtained from the
 /// trash implementation rather than guessing the trash filename.
 pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome> {
+    delete_to_trash_with_undo_controlled(paths, &DeleteControl::new())
+}
+
+pub fn delete_to_trash_with_undo_controlled(
+    paths: &[PathBuf],
+    control: &DeleteControl,
+) -> Result<TrashDeleteOutcome> {
     #[cfg(any(
         target_os = "windows",
         all(
@@ -391,7 +459,35 @@ pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome
         .map(|item| item.id)
         .collect::<HashSet<_>>();
 
-    let count = delete_to_trash(paths)?;
+    let total_items = paths.iter().filter(|path| path.exists()).count();
+    control.update_progress(|progress| {
+        progress.completed_items = 0;
+        progress.total_items = total_items;
+    });
+    let mut count = 0;
+    for path in paths {
+        if control.is_cancelled() {
+            break;
+        }
+        if !path.exists() {
+            continue;
+        }
+        let current_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        control.update_progress(|progress| progress.current_name = current_name);
+        trash::delete(path).map_err(|error| {
+            BExplorerError::Operation(format!(
+                "Could not move {} to trash: {error}",
+                path.display()
+            ))
+        })?;
+        count += 1;
+        control.update_progress(|progress| progress.completed_items = count);
+    }
+    let cancelled = control.is_cancelled() && count < total_items;
 
     #[cfg(any(
         target_os = "windows",
@@ -421,6 +517,7 @@ pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome
         Ok(TrashDeleteOutcome {
             count,
             undo_records,
+            cancelled,
         })
     }
 
@@ -439,6 +536,7 @@ pub fn delete_to_trash_with_undo(paths: &[PathBuf]) -> Result<TrashDeleteOutcome
         Ok(TrashDeleteOutcome {
             count,
             undo_records: Vec::new(),
+            cancelled,
         })
     }
 }
@@ -526,16 +624,131 @@ pub fn move_paths_back(moves: &[(PathBuf, PathBuf)]) -> Result<usize> {
 }
 
 pub fn delete_permanently(paths: &[PathBuf]) -> Result<usize> {
-    let mut completed = 0;
+    Ok(delete_permanently_with_control(paths, &DeleteControl::new())?.count)
+}
+
+pub fn delete_permanently_with_control(
+    paths: &[PathBuf],
+    control: &DeleteControl,
+) -> Result<PermanentDeleteOutcome> {
+    control.update_progress(|progress| *progress = DeleteProgress::default());
+    let Some(total_items) = count_delete_entries(paths, control)? else {
+        return Ok(PermanentDeleteOutcome {
+            count: 0,
+            completed_items: 0,
+            cancelled: true,
+        });
+    };
+    control.update_progress(|progress| progress.total_items = total_items);
+
+    let mut completed_roots = 0;
     for path in paths {
-        if path.is_dir() {
-            fs::remove_dir_all(path)?;
-        } else if path.exists() {
-            fs::remove_file(path)?;
+        if control.is_cancelled() {
+            return Ok(PermanentDeleteOutcome {
+                count: completed_roots,
+                completed_items: control.progress().completed_items,
+                cancelled: true,
+            });
         }
-        completed += 1;
+        if delete_path_with_progress(path, control)? {
+            completed_roots += 1;
+        } else {
+            return Ok(PermanentDeleteOutcome {
+                count: completed_roots,
+                completed_items: control.progress().completed_items,
+                cancelled: true,
+            });
+        }
     }
-    Ok(completed)
+
+    Ok(PermanentDeleteOutcome {
+        count: completed_roots,
+        completed_items: control.progress().completed_items,
+        cancelled: false,
+    })
+}
+
+fn count_delete_entries(paths: &[PathBuf], control: &DeleteControl) -> Result<Option<usize>> {
+    let mut pending = paths.to_vec();
+    let mut total = 0_usize;
+    while let Some(path) = pending.pop() {
+        if control.is_cancelled() {
+            return Ok(None);
+        }
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        total = total.saturating_add(1);
+        control.update_progress(|progress| {
+            progress.current_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+        });
+        if metadata.file_type().is_dir() {
+            for entry in fs::read_dir(path)? {
+                pending.push(entry?.path());
+            }
+        }
+    }
+    Ok(Some(total))
+}
+
+fn delete_path_with_progress(path: &Path, control: &DeleteControl) -> Result<bool> {
+    enum PendingDelete {
+        Visit(PathBuf),
+        RemoveDirectory(PathBuf),
+    }
+
+    let mut pending = vec![PendingDelete::Visit(path.to_path_buf())];
+    while let Some(item) = pending.pop() {
+        if control.is_cancelled() {
+            return Ok(false);
+        }
+        let (path, directory) = match item {
+            PendingDelete::Visit(path) => {
+                let metadata = match fs::symlink_metadata(&path) {
+                    Ok(metadata) => metadata,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                if metadata.file_type().is_dir() {
+                    let children = fs::read_dir(&path)?
+                        .map(|entry| entry.map(|entry| entry.path()))
+                        .collect::<std::io::Result<Vec<_>>>()?;
+                    pending.push(PendingDelete::RemoveDirectory(path));
+                    pending.extend(children.into_iter().map(PendingDelete::Visit));
+                    continue;
+                }
+                (path, false)
+            }
+            PendingDelete::RemoveDirectory(path) => (path, true),
+        };
+
+        control.update_progress(|progress| {
+            progress.current_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_default()
+                .to_owned();
+        });
+        if directory {
+            fs::remove_dir(&path)?;
+        } else if let Err(file_error) = fs::remove_file(&path) {
+            if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+                fs::remove_dir(&path).map_err(|_| file_error)?;
+            } else {
+                return Err(file_error.into());
+            }
+        }
+        control.update_progress(|progress| {
+            progress.completed_items = progress.completed_items.saturating_add(1);
+        });
+    }
+    Ok(true)
 }
 
 pub fn rename_path(path: &Path, new_name: &str) -> Result<PathBuf> {
@@ -769,6 +982,76 @@ mod tests {
         assert_eq!(fs::read(&original).expect("read restored"), b"undo me");
         assert!(!moved.exists());
         fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn permanent_directory_delete_reports_each_nested_entry() {
+        let root = temp_test_dir("delete-progress");
+        let target = root.join("large-folder");
+        let nested = target.join("nested");
+        fs::create_dir_all(&nested).expect("create nested folder");
+        fs::write(target.join("first.txt"), b"first").expect("write first file");
+        fs::write(nested.join("second.txt"), b"second").expect("write second file");
+        let control = DeleteControl::new();
+
+        let outcome = delete_permanently_with_control(std::slice::from_ref(&target), &control)
+            .expect("delete folder with progress");
+
+        assert_eq!(outcome.count, 1);
+        assert_eq!(outcome.completed_items, 4);
+        assert!(!outcome.cancelled);
+        assert!(!target.exists());
+        let progress = control.progress();
+        assert_eq!(progress.total_items, 4);
+        assert_eq!(progress.completed_items, 4);
+        fs::remove_dir_all(root).expect("cleanup delete progress directory");
+    }
+
+    #[test]
+    fn pre_cancelled_permanent_delete_preserves_the_folder() {
+        let root = temp_test_dir("delete-cancel");
+        let target = root.join("keep-folder");
+        fs::create_dir_all(&target).expect("create folder to preserve");
+        fs::write(target.join("important.txt"), b"keep").expect("write preserved file");
+        let control = DeleteControl::new();
+        control.cancel();
+
+        let outcome = delete_permanently_with_control(std::slice::from_ref(&target), &control)
+            .expect("cancel folder deletion");
+
+        assert_eq!(outcome.count, 0);
+        assert_eq!(outcome.completed_items, 0);
+        assert!(outcome.cancelled);
+        assert_eq!(
+            fs::read(target.join("important.txt")).expect("read preserved file"),
+            b"keep"
+        );
+        fs::remove_dir_all(root).expect("cleanup cancelled delete directory");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn permanent_delete_does_not_follow_directory_symlinks() {
+        let root = temp_test_dir("delete-symlink");
+        let target = root.join("delete-me");
+        let external = root.join("keep-me");
+        fs::create_dir_all(&target).expect("create target folder");
+        fs::create_dir_all(&external).expect("create external folder");
+        fs::write(external.join("important.txt"), b"keep").expect("write external file");
+        std::os::unix::fs::symlink(&external, target.join("external-link"))
+            .expect("create directory symlink");
+
+        let outcome =
+            delete_permanently_with_control(std::slice::from_ref(&target), &DeleteControl::new())
+                .expect("delete folder containing symlink");
+
+        assert_eq!(outcome.count, 1);
+        assert!(!target.exists());
+        assert_eq!(
+            fs::read(external.join("important.txt")).expect("read external file"),
+            b"keep"
+        );
+        fs::remove_dir_all(root).expect("cleanup symlink delete directory");
     }
 
     #[test]

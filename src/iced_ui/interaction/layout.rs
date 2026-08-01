@@ -66,10 +66,36 @@ impl BExplorerIced {
             let wheel_reveal = state
                 .scrollbar_reveal_until
                 .is_some_and(|until| until > now);
-            let target = f32::from(state.scrollbar_vertical_hovered || wheel_reveal);
+            let target = f32::from(
+                state.scrollbar_horizontal_hovered
+                    || state.scrollbar_vertical_hovered
+                    || wheel_reveal,
+            );
             wheel_reveal || (state.scrollbar_reveal_progress - target).abs() > f32::EPSILON
         });
-        pane_scrollbar_active || storage_scrollbar_active
+        let duplicate_scrollbar_active = self.duplicate_cleanup.as_ref().is_some_and(|state| {
+            let wheel_reveal = state
+                .scrollbar_reveal_until
+                .is_some_and(|until| until > now);
+            let target = f32::from(
+                state.scrollbar_horizontal_hovered
+                    || state.scrollbar_vertical_hovered
+                    || wheel_reveal,
+            );
+            wheel_reveal || (state.scrollbar_reveal_progress - target).abs() > f32::EPSILON
+        });
+        let defender_threats_scrollbar_active = self.defender_threats_window_id.is_some() && {
+            let wheel_reveal = self
+                .defender_threats_scrollbar_reveal_until
+                .is_some_and(|until| until > now);
+            let target = f32::from(self.defender_threats_scrollbar_hovered || wheel_reveal);
+            wheel_reveal
+                || (self.defender_threats_scrollbar_reveal_progress - target).abs() > f32::EPSILON
+        };
+        pane_scrollbar_active
+            || storage_scrollbar_active
+            || duplicate_scrollbar_active
+            || defender_threats_scrollbar_active
     }
 
     pub(in crate::iced_ui) fn async_progress_animation_active(&self) -> bool {

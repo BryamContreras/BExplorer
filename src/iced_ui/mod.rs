@@ -86,7 +86,9 @@ const TAB_SPLIT_DROP_TRIGGER_Y: f32 = TITLE_HEIGHT + 30.0;
 // wider zone makes it comfortable to reach another application without
 // having to aim for the last pixel.
 const EXTERNAL_DRAG_EDGE_TRIGGER: f32 = 32.0;
-const SCROLLBAR_REVEAL_ZONE: f32 = 14.0;
+const EXPLORER_SCROLLBAR_RAIL_WIDTH: f32 = 10.0;
+const SCROLLBAR_PROXIMITY_MARGIN: f32 = 3.0;
+const SCROLLBAR_REVEAL_ZONE: f32 = EXPLORER_SCROLLBAR_RAIL_WIDTH + SCROLLBAR_PROXIMITY_MARGIN;
 const SCROLLBAR_FADE_STEP: f32 = 0.12;
 // Action icons use a full 20 px raster footprint. The previous 18 px size
 // made thin vector strokes look soft, especially on light themes.
@@ -226,8 +228,8 @@ const STORAGE_CATEGORY_TABLE_COLUMN_MIN_WIDTHS: [f32; 6] =
     [190.0, 110.0, 70.0, 125.0, 125.0, 150.0];
 const STORAGE_CATEGORY_COLOR_COUNT: usize = StorageCategory::ALL.len();
 type StorageCategoryColors = [Color; STORAGE_CATEGORY_COLOR_COUNT];
-const STORAGE_ANALYSIS_WINDOW_WIDTH: f32 = 900.0;
-const STORAGE_ANALYSIS_WINDOW_HEIGHT: f32 = 640.0;
+const STORAGE_ANALYSIS_WINDOW_WIDTH: f32 = 1_240.0;
+const STORAGE_ANALYSIS_WINDOW_HEIGHT: f32 = 720.0;
 const SETTINGS_PANEL_WIDTH: f32 = 900.0;
 const COLOR_PICKER_WIDTH: f32 = 290.0;
 const COLOR_PICKER_PLANE_WIDTH: f32 = 260.0;
@@ -259,6 +261,10 @@ fn scaled_ui_metric(base: f32, font_size: f32) -> f32 {
 
 fn duplicate_table_header_scroll_id() -> Id {
     Id::new("duplicate-table-header-scroll")
+}
+
+fn duplicate_table_scroll_id() -> Id {
+    Id::new("duplicate-table-scroll")
 }
 
 fn storage_category_table_header_scroll_id() -> Id {
@@ -669,6 +675,28 @@ fn keep_process_after_main_window_closes(
     detach_requested || operations_in_progress
 }
 
+fn progress_window_open_should_activate(
+    is_expected_window: bool,
+    is_closing: bool,
+    has_visible_operations: bool,
+) -> bool {
+    is_expected_window && !is_closing && has_visible_operations
+}
+
+fn transfer_window_activity_present(
+    has_active_transfers: bool,
+    has_queued_transfers: bool,
+    has_elevated_transfers: bool,
+    has_history: bool,
+    has_active_deletes: bool,
+) -> bool {
+    has_active_transfers
+        || has_queued_transfers
+        || has_elevated_transfers
+        || has_history
+        || has_active_deletes
+}
+
 fn storage_analysis_polling_required(
     phase: StorageAnalysisPhase,
     duplicate_phase: StorageDuplicateEstimatePhase,
@@ -785,6 +813,7 @@ struct BExplorerIced {
     next_archive_id: u64,
     transfer_queue: VecDeque<QueuedTransferState>,
     active_transfers: HashMap<u64, ActiveTransferState>,
+    active_elevated_transfers: HashMap<u64, PaneId>,
     transfer_progress: HashMap<u64, TransferProgress>,
     transfer_batch_totals: HashMap<PaneId, (u64, u64)>,
     transfer_history: VecDeque<TransferHistoryState>,
@@ -798,6 +827,9 @@ struct BExplorerIced {
     defender_summary: Option<DefenderSummary>,
     defender_window_id: Option<window::Id>,
     defender_threats_window_id: Option<window::Id>,
+    defender_threats_scrollbar_hovered: bool,
+    defender_threats_scrollbar_reveal_progress: f32,
+    defender_threats_scrollbar_reveal_until: Option<Instant>,
     defender_threat_remediation_pending: bool,
     defender_threat_remediation_message: Option<(String, bool)>,
     duplicate_cleanup: Option<DuplicateCleanupState>,
@@ -1404,6 +1436,7 @@ impl BExplorerIced {
             next_archive_id: 0,
             transfer_queue: VecDeque::new(),
             active_transfers: HashMap::new(),
+            active_elevated_transfers: HashMap::new(),
             transfer_progress: HashMap::new(),
             transfer_batch_totals: HashMap::new(),
             transfer_history: VecDeque::new(),
@@ -1417,6 +1450,9 @@ impl BExplorerIced {
             defender_summary: None,
             defender_window_id: None,
             defender_threats_window_id: None,
+            defender_threats_scrollbar_hovered: false,
+            defender_threats_scrollbar_reveal_progress: 0.0,
+            defender_threats_scrollbar_reveal_until: None,
             defender_threat_remediation_pending: false,
             defender_threat_remediation_message: None,
             duplicate_cleanup: None,
@@ -1727,6 +1763,7 @@ impl BExplorerIced {
     fn transfer_jobs_in_progress(&self) -> bool {
         !self.active_transfers.is_empty()
             || !self.transfer_queue.is_empty()
+            || !self.active_elevated_transfers.is_empty()
             || !self.active_deletes.is_empty()
     }
 
@@ -2631,6 +2668,29 @@ mod main_window_size_tests {
             None,
             "an older asynchronous size observation must not overwrite the live geometry"
         );
+    }
+}
+
+#[cfg(test)]
+mod progress_window_lifecycle_tests {
+    use super::{progress_window_open_should_activate, transfer_window_activity_present};
+
+    #[test]
+    fn a_late_open_event_cannot_restore_an_idle_progress_window() {
+        assert!(!progress_window_open_should_activate(true, false, false));
+        assert!(!progress_window_open_should_activate(true, true, true));
+        assert!(!progress_window_open_should_activate(false, false, true));
+        assert!(progress_window_open_should_activate(true, false, true));
+    }
+
+    #[test]
+    fn an_elevated_transfer_keeps_the_progress_window_active() {
+        assert!(transfer_window_activity_present(
+            false, false, true, false, false
+        ));
+        assert!(!transfer_window_activity_present(
+            false, false, false, false, false
+        ));
     }
 }
 

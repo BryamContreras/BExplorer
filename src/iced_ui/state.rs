@@ -322,7 +322,11 @@ enum Message {
     RenameFinished(RenameState, Result<PathBuf, String>),
     CancelRename,
     ConfirmPermanentDelete,
-    PermanentDeleteFinished(PaneId, Vec<PathBuf>, Result<usize, String>),
+    PermanentDeleteFinished(
+        PaneId,
+        Vec<PathBuf>,
+        Result<operations::PermanentDeleteOutcome, String>,
+    ),
     CancelPermanentDelete,
     DiskImageMounted(PaneId, PathBuf, Result<PathBuf, String>),
     DriveEjected(PaneId, PathBuf, Result<(), String>),
@@ -343,6 +347,8 @@ enum Message {
         offset_y: f32,
         viewport_height: f32,
     },
+    DuplicateScrollbarHover(ScrollbarAxis, bool),
+    SortDuplicateColumn(DuplicateSortColumn),
     StartDuplicateColumnResize(usize),
     StopDuplicateColumnResize,
     RequestDuplicateDelete,
@@ -364,7 +370,7 @@ enum Message {
         offset_y: f32,
         viewport_height: f32,
     },
-    StorageAnalysisScrollbarHover(bool),
+    StorageAnalysisScrollbarHover(ScrollbarAxis, bool),
     StorageAnalysisWindowDrag,
     StorageAnalysisWindowMinimize,
     StorageAnalysisWindowMaximize,
@@ -426,6 +432,8 @@ enum Message {
     #[cfg(target_os = "windows")]
     DefenderWindowOpened(window::Id),
     DefenderThreatsWindowOpened(window::Id),
+    DefenderThreatsScrolled,
+    DefenderThreatsScrollbarHover(bool),
     #[cfg(target_os = "linux")]
     Properties(properties::PropertiesMessage),
     ReopenTransferWindow(window::Id, Option<Point>),
@@ -685,6 +693,17 @@ enum DuplicateCleanupPhase {
     Failed,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DuplicateSortColumn {
+    Name,
+    Type,
+    Size,
+    Created,
+    Modified,
+    Match,
+    Location,
+}
+
 struct DuplicateCleanupState {
     pane: PaneId,
     root: PathBuf,
@@ -705,6 +724,12 @@ struct DuplicateCleanupState {
     window_maximized: bool,
     column_widths: [f32; 7],
     column_resize: Option<DuplicateColumnResize>,
+    sort_column: DuplicateSortColumn,
+    sort_ascending: bool,
+    scrollbar_horizontal_hovered: bool,
+    scrollbar_vertical_hovered: bool,
+    scrollbar_reveal_progress: f32,
+    scrollbar_reveal_until: Option<Instant>,
     scanned: usize,
     total: usize,
     files_found: usize,
@@ -814,6 +839,7 @@ struct StorageAnalysisState {
     category_scroll_sampled_at: Option<Instant>,
     window_size: Size,
     window_maximized: bool,
+    scrollbar_horizontal_hovered: bool,
     scrollbar_vertical_hovered: bool,
     scrollbar_reveal_progress: f32,
     scrollbar_reveal_until: Option<Instant>,
@@ -1047,6 +1073,7 @@ struct PendingPermanentDelete {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PermanentDeleteTarget {
     Filesystem,
+    Portable,
     TrashItems,
     EmptyTrash,
 }
@@ -1093,6 +1120,7 @@ struct ActiveDeleteState {
     pane: PaneId,
     paths: Vec<PathBuf>,
     kind: ActiveDeleteKind,
+    control: Option<operations::DeleteControl>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1398,6 +1426,7 @@ struct TransferDisplayState {
     files_done: usize,
     total_files: usize,
     bytes_per_second: f64,
+    cancellable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1436,7 +1465,14 @@ impl TransferDisplayState {
             files_done: progress.files_done,
             total_files: progress.total_files,
             bytes_per_second: progress.bytes_per_second,
+            cancellable: true,
         }
+    }
+
+    fn from_elevated_progress(progress: TransferProgress) -> Self {
+        let mut display = Self::from_progress(progress);
+        display.cancellable = false;
+        display
     }
 }
 

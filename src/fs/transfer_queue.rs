@@ -7,7 +7,14 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-use std::{ffi::OsStr, ffi::OsString};
+use std::{
+    ffi::OsStr,
+    ffi::OsString,
+    io::{BufRead, BufReader},
+    net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
+    sync::mpsc::Receiver,
+    thread,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +33,7 @@ pub enum TransferKind {
     Move,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum TransferState {
     Pending,
     Copying,
@@ -67,7 +74,7 @@ impl TransferControl {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct TransferProgress {
     pub job_id: u64,
     pub kind: TransferKind,
@@ -235,18 +242,70 @@ fn transfer_error_is_permission_denied(error: &BExplorerError) -> bool {
 const ELEVATED_TRANSFER_HELPER_ARG: &str = "--bexplorer-elevated-transfer-helper";
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-pub fn run_elevated_transfer(job: &TransferJob) -> Result<ElevatedTransferResult> {
+const ELEVATED_PROGRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(Debug, Deserialize, Serialize)]
+struct ElevatedTransferRequest {
+    job: TransferJob,
+    progress_endpoint: SocketAddr,
+    progress_token: String,
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[derive(Debug, Deserialize, Serialize)]
+struct ElevatedProgressHandshake {
+    job_id: u64,
+    token: String,
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+pub fn run_elevated_transfer(
+    job: &TransferJob,
+    progress_tx: Sender<TransferMessage>,
+) -> Result<ElevatedTransferResult> {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+    listener.set_nonblocking(true)?;
+    let progress_endpoint = listener.local_addr()?;
+    let progress_token = elevated_progress_token()?;
     let (request_path, result_path) = elevated_transfer_paths();
-    crate::utils::atomic_file::write(&request_path, &serde_json::to_vec(job)?)?;
-    fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&result_path)?;
+    let request = ElevatedTransferRequest {
+        job: job.clone(),
+        progress_endpoint,
+        progress_token: progress_token.clone(),
+    };
+    if let Err(error) = precreate_elevated_transfer_files(
+        &request_path,
+        &result_path,
+        &serde_json::to_vec(&request)?,
+    ) {
+        cleanup_elevated_transfer_files(&request_path, &result_path);
+        return Err(error);
+    }
+
+    let stop_relay = Arc::new(AtomicBool::new(false));
+    let relay_stop = Arc::clone(&stop_relay);
+    let job_id = job.id;
+    let relay = match thread::Builder::new()
+        .name("elevated-transfer-progress".into())
+        .spawn(move || {
+            relay_elevated_progress(listener, job_id, &progress_token, progress_tx, &relay_stop);
+        }) {
+        Ok(relay) => relay,
+        Err(error) => {
+            cleanup_elevated_transfer_files(&request_path, &result_path);
+            return Err(error.into());
+        }
+    };
+
     let exit_code = crate::platform::shell::run_elevated_current_exe(&[
         OsString::from(ELEVATED_TRANSFER_HELPER_ARG),
         request_path.clone().into_os_string(),
         result_path.clone().into_os_string(),
     ]);
+
+    stop_relay.store(true, Ordering::Release);
+    let _ = relay.join();
     let _ = fs::remove_file(&request_path);
     let decoded = fs::read(&result_path).ok().and_then(|bytes| {
         serde_json::from_slice::<std::result::Result<ElevatedTransferResult, String>>(&bytes).ok()
@@ -264,7 +323,10 @@ pub fn run_elevated_transfer(job: &TransferJob) -> Result<ElevatedTransferResult
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-pub fn run_elevated_transfer(_job: &TransferJob) -> Result<ElevatedTransferResult> {
+pub fn run_elevated_transfer(
+    _job: &TransferJob,
+    _progress_tx: Sender<TransferMessage>,
+) -> Result<ElevatedTransferResult> {
     Err(BExplorerError::Operation(
         "Elevated transfers are currently available on Windows only".into(),
     ))
@@ -285,9 +347,23 @@ pub fn try_run_elevated_transfer_helper_from_args() -> Option<i32> {
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn run_elevated_transfer_helper(request_path: &Path, result_path: &Path) -> i32 {
     let result = (|| -> Result<ElevatedTransferResult> {
-        let job: TransferJob = serde_json::from_slice(&fs::read(request_path)?)?;
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let outcome = run_transfer_inner(&job, &tx, &TransferControl::new())?;
+        let request: ElevatedTransferRequest = serde_json::from_slice(&fs::read(request_path)?)?;
+        let ElevatedTransferRequest {
+            job,
+            progress_endpoint,
+            progress_token,
+        } = request;
+        let job_id = job.id;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = thread::Builder::new()
+            .name("elevated-transfer-progress-writer".into())
+            .spawn(move || {
+                send_elevated_progress(progress_endpoint, progress_token, job_id, rx);
+            })?;
+        let outcome = run_transfer_inner(&job, &tx, &TransferControl::new());
+        drop(tx);
+        let _ = writer.join();
+        let outcome = outcome?;
         Ok(ElevatedTransferResult {
             completed_files: outcome.completed_files,
             completed_roots: outcome.completed_roots,
@@ -321,6 +397,157 @@ fn elevated_transfer_paths() -> (PathBuf, PathBuf) {
         temp.join(format!("{base}.request.json")),
         temp.join(format!("{base}.result.json")),
     )
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn elevated_progress_token() -> Result<String> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|error| {
+        BExplorerError::Operation(format!("Could not secure progress IPC: {error}"))
+    })?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn precreate_elevated_transfer_files(
+    request_path: &Path,
+    result_path: &Path,
+    request_bytes: &[u8],
+) -> Result<()> {
+    let mut request_options = fs::OpenOptions::new();
+    request_options.create_new(true).write(true);
+    let mut result_options = fs::OpenOptions::new();
+    result_options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        request_options.mode(0o600);
+        result_options.mode(0o600);
+    }
+
+    let mut request = request_options.open(request_path)?;
+    request.write_all(request_bytes)?;
+    request.sync_all()?;
+    result_options.open(result_path)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn cleanup_elevated_transfer_files(request_path: &Path, result_path: &Path) {
+    let _ = fs::remove_file(request_path);
+    let _ = fs::remove_file(result_path);
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn relay_elevated_progress(
+    listener: TcpListener,
+    expected_job_id: u64,
+    expected_token: &str,
+    progress_tx: Sender<TransferMessage>,
+    stop: &AtomicBool,
+) {
+    loop {
+        match listener.accept() {
+            Ok((stream, address)) if address.ip().is_loopback() => {
+                if relay_elevated_progress_stream(
+                    stream,
+                    expected_job_id,
+                    expected_token,
+                    &progress_tx,
+                ) {
+                    return;
+                }
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if stop.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return,
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn relay_elevated_progress_stream(
+    stream: TcpStream,
+    expected_job_id: u64,
+    expected_token: &str,
+    progress_tx: &Sender<TransferMessage>,
+) -> bool {
+    let _ = stream.set_read_timeout(Some(ELEVATED_PROGRESS_CONNECT_TIMEOUT));
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let Ok(bytes_read) = reader.read_line(&mut line) else {
+        return false;
+    };
+    if bytes_read == 0 {
+        return false;
+    }
+    let Ok(handshake) = serde_json::from_str::<ElevatedProgressHandshake>(line.trim_end()) else {
+        return false;
+    };
+    if handshake.job_id != expected_job_id || handshake.token != expected_token {
+        return false;
+    }
+    // Once authenticated, the helper owns the connection until it exits. A
+    // blocking read preserves partial JSON frames; process termination closes
+    // the socket and releases this relay before the elevated launcher returns.
+    let _ = reader.get_ref().set_read_timeout(None);
+
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => return true,
+            Ok(_) => {
+                if let Ok(progress) = serde_json::from_str::<TransferProgress>(line.trim_end())
+                    && progress.job_id == expected_job_id
+                    && progress_tx
+                        .send(TransferMessage::Progress(progress))
+                        .is_err()
+                {
+                    return true;
+                }
+            }
+            Err(_) => return true,
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn send_elevated_progress(
+    endpoint: SocketAddr,
+    token: String,
+    job_id: u64,
+    progress_rx: Receiver<TransferMessage>,
+) {
+    let Ok(mut stream) = TcpStream::connect_timeout(&endpoint, ELEVATED_PROGRESS_CONNECT_TIMEOUT)
+    else {
+        return;
+    };
+    let _ = stream.set_nodelay(true);
+    let handshake = ElevatedProgressHandshake { job_id, token };
+    if serde_json::to_writer(&mut stream, &handshake).is_err()
+        || stream.write_all(b"\n").is_err()
+        || stream.flush().is_err()
+    {
+        return;
+    }
+
+    for message in progress_rx {
+        let TransferMessage::Progress(progress) = message else {
+            continue;
+        };
+        if serde_json::to_writer(&mut stream, &progress).is_err()
+            || stream.write_all(b"\n").is_err()
+            || stream.flush().is_err()
+        {
+            return;
+        }
+    }
 }
 
 fn run_transfer_inner(
@@ -1278,6 +1505,83 @@ mod tests {
             restored.completed_roots[0].target,
             Path::new("destination.txt")
         );
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn elevated_progress_relay_forwards_only_authenticated_job_updates() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind progress relay");
+        listener
+            .set_nonblocking(true)
+            .expect("make progress relay nonblocking");
+        let endpoint = listener.local_addr().expect("progress relay address");
+        let token = "authenticated-progress-session".to_string();
+        let expected_job_id = 47;
+        let stop = Arc::new(AtomicBool::new(false));
+        let relay_stop = Arc::clone(&stop);
+        let relay_token = token.clone();
+        let (progress_tx, progress_rx) = mpsc::channel();
+        let relay = thread::spawn(move || {
+            relay_elevated_progress(
+                listener,
+                expected_job_id,
+                &relay_token,
+                progress_tx,
+                &relay_stop,
+            );
+        });
+
+        let invalid_progress = TransferProgress {
+            job_id: expected_job_id,
+            kind: TransferKind::Copy,
+            state: TransferState::Copying,
+            current_name: "untrusted.bin".into(),
+            destination: PathBuf::from("destination"),
+            copied_bytes: 13,
+            total_bytes: 100,
+            files_done: 0,
+            total_files: 1,
+            bytes_per_second: 13.0,
+        };
+        let mut invalid_stream = TcpStream::connect(endpoint).expect("connect invalid client");
+        serde_json::to_writer(
+            &mut invalid_stream,
+            &ElevatedProgressHandshake {
+                job_id: expected_job_id,
+                token: "wrong-token".into(),
+            },
+        )
+        .expect("write invalid handshake");
+        invalid_stream.write_all(b"\n").expect("end handshake");
+        serde_json::to_writer(&mut invalid_stream, &invalid_progress)
+            .expect("write invalid progress");
+        invalid_stream.write_all(b"\n").expect("end progress");
+        drop(invalid_stream);
+
+        let valid_progress = TransferProgress {
+            current_name: "trusted.bin".into(),
+            copied_bytes: 42,
+            bytes_per_second: 42.0,
+            ..invalid_progress
+        };
+        let (wire_tx, wire_rx) = mpsc::channel();
+        let writer = thread::spawn(move || {
+            send_elevated_progress(endpoint, token, expected_job_id, wire_rx);
+        });
+        wire_tx
+            .send(TransferMessage::Progress(valid_progress))
+            .expect("queue valid progress");
+        drop(wire_tx);
+
+        writer.join().expect("progress writer finished");
+        relay.join().expect("progress relay finished");
+        let messages = progress_rx.try_iter().collect::<Vec<_>>();
+        assert_eq!(messages.len(), 1);
+        let TransferMessage::Progress(progress) = &messages[0] else {
+            panic!("unexpected relayed message");
+        };
+        assert_eq!(progress.current_name, "trusted.bin");
+        assert_eq!(progress.copied_bytes, 42);
     }
 
     #[test]

@@ -597,14 +597,32 @@ impl BExplorerIced {
                 TransferProgress::pending(&queued.job),
             ));
         }
+        for job_id in self.active_elevated_transfers.keys() {
+            if let Some(progress) = self.transfer_progress.get(job_id) {
+                items.push(TransferDisplayState::from_elevated_progress(
+                    progress.clone(),
+                ));
+            }
+        }
         for history in self.transfer_history.iter().rev().take(3) {
             items.push(TransferDisplayState::from_progress(
                 history.progress.clone(),
             ));
         }
         for deletion in self.active_deletes.values() {
-            let total_files = deletion.paths.len();
-            let current_name = if total_files == 1 {
+            let delete_progress = deletion
+                .control
+                .as_ref()
+                .map(operations::DeleteControl::progress)
+                .unwrap_or_default();
+            let total_files = if deletion.control.is_some() {
+                delete_progress.total_items
+            } else {
+                deletion.paths.len()
+            };
+            let current_name = if !delete_progress.current_name.is_empty() {
+                delete_progress.current_name
+            } else if deletion.paths.len() == 1 {
                 self.pane(deletion.pane)
                     .entries
                     .iter()
@@ -632,9 +650,10 @@ impl BExplorerIced {
                 current_name,
                 copied_bytes: 0,
                 total_bytes: 0,
-                files_done: 0,
+                files_done: delete_progress.completed_items,
                 total_files,
                 bytes_per_second: 0.0,
+                cancellable: deletion.control.is_some(),
             });
         }
         items.sort_by_key(|item| match item.state {
@@ -648,10 +667,13 @@ impl BExplorerIced {
     }
 
     pub(super) fn transfer_active(&self) -> bool {
-        !self.active_transfers.is_empty()
-            || !self.transfer_queue.is_empty()
-            || !self.transfer_history.is_empty()
-            || !self.active_deletes.is_empty()
+        transfer_window_activity_present(
+            !self.active_transfers.is_empty(),
+            !self.transfer_queue.is_empty(),
+            !self.active_elevated_transfers.is_empty(),
+            !self.transfer_history.is_empty(),
+            !self.active_deletes.is_empty(),
+        )
     }
 
     pub(super) fn transfer_window_size(&self) -> Size {
@@ -663,6 +685,10 @@ impl BExplorerIced {
             .values()
             .any(|active| active.pane == pane)
             || self.transfer_queue.iter().any(|queued| queued.pane == pane)
+            || self
+                .active_elevated_transfers
+                .values()
+                .any(|owner| *owner == pane)
     }
 
     pub(super) fn transfer_progress_fraction_for(&self, pane: PaneId) -> Option<f32> {
@@ -681,7 +707,8 @@ impl BExplorerIced {
                         .iter()
                         .find(|queued| queued.job.id == *job_id)
                         .map(|queued| queued.pane)
-                });
+                })
+                .or_else(|| self.active_elevated_transfers.get(job_id).copied());
             if owner == Some(pane) {
                 copied = copied.saturating_add(progress.copied_bytes);
                 total = total.saturating_add(progress.total_bytes);
@@ -700,6 +727,9 @@ impl BExplorerIced {
         }
         for queued in &mut self.transfer_queue {
             queued.pane = PaneId::Primary;
+        }
+        for pane in self.active_elevated_transfers.values_mut() {
+            *pane = PaneId::Primary;
         }
         if let Some((secondary_copied, secondary_total)) =
             self.transfer_batch_totals.remove(&PaneId::Secondary)
@@ -1096,8 +1126,14 @@ impl BExplorerIced {
             return Task::none();
         };
 
+        if pending.target == PermanentDeleteTarget::Portable {
+            self.last_undo_action = None;
+            return self.delete_portable_paths(pending.pane, pending.paths);
+        }
+
         let operation_status = match pending.target {
             PermanentDeleteTarget::Filesystem => "Deleting permanently...",
+            PermanentDeleteTarget::Portable => unreachable!(),
             PermanentDeleteTarget::TrashItems => "Deleting from Recycle Bin...",
             PermanentDeleteTarget::EmptyTrash => "Emptying Recycle Bin...",
         };
@@ -1110,6 +1146,8 @@ impl BExplorerIced {
         let target = pending.target;
         self.next_transfer_id = self.next_transfer_id.saturating_add(1);
         let transfer_id = self.next_transfer_id;
+        let delete_control =
+            (target == PermanentDeleteTarget::Filesystem).then(operations::DeleteControl::new);
         self.active_deletes.insert(
             transfer_id,
             ActiveDeleteState {
@@ -1118,18 +1156,28 @@ impl BExplorerIced {
                 paths: paths.clone(),
                 kind: match target {
                     PermanentDeleteTarget::Filesystem => ActiveDeleteKind::PermanentDelete,
+                    PermanentDeleteTarget::Portable => unreachable!(),
                     PermanentDeleteTarget::TrashItems | PermanentDeleteTarget::EmptyTrash => {
                         ActiveDeleteKind::PurgeTrash
                     }
                 },
+                control: delete_control.clone(),
             },
         );
         let worker_paths = paths.clone();
         let delete_task = match target {
             PermanentDeleteTarget::Filesystem => Task::perform(
-                run_blocking_file_operation(move || operations::delete_permanently(&worker_paths)),
+                run_blocking_file_operation(move || {
+                    operations::delete_permanently_with_control(
+                        &worker_paths,
+                        delete_control
+                            .as_ref()
+                            .expect("filesystem deletion has a control"),
+                    )
+                }),
                 move |result| Message::PermanentDeleteFinished(pane, paths, result),
             ),
+            PermanentDeleteTarget::Portable => unreachable!(),
             PermanentDeleteTarget::TrashItems => Task::perform(
                 run_blocking_file_operation(move || trash_fs::purge_items(&worker_paths)),
                 move |result| Message::TrashPurgeFinished(pane, paths, result),
@@ -1179,6 +1227,7 @@ impl BExplorerIced {
                 pane,
                 paths: paths.clone(),
                 kind: ActiveDeleteKind::RestoreTrash,
+                control: None,
             },
         );
         let worker_paths = paths.clone();
@@ -1208,8 +1257,13 @@ impl BExplorerIced {
                         "Select one or more items to delete.",
                     )
                     .into(),
-                PermanentDeleteTarget::EmptyTrash | PermanentDeleteTarget::Filesystem => self
-                    .localized("La papelera está vacía.", "The Recycle Bin is empty.")
+                PermanentDeleteTarget::EmptyTrash
+                | PermanentDeleteTarget::Filesystem
+                | PermanentDeleteTarget::Portable => self
+                    .localized(
+                        "No hay elementos para eliminar.",
+                        "There are no items to delete.",
+                    )
                     .into(),
             };
             return Task::none();
@@ -1295,7 +1349,14 @@ impl BExplorerIced {
             return Task::none();
         }
         if paths.iter().all(|path| explorer::is_portable_path(path)) {
-            return self.delete_portable_paths(pane, paths);
+            self.last_undo_action = None;
+            return self.request_popup_backdrop(PopupBackdropTarget::PermanentDelete(
+                PendingPermanentDelete {
+                    pane,
+                    paths,
+                    target: PermanentDeleteTarget::Portable,
+                },
+            ));
         }
         if paths.iter().any(|path| explorer::is_portable_path(path)) {
             self.pane_mut(pane).status =
@@ -1318,6 +1379,7 @@ impl BExplorerIced {
         self.last_undo_action = None;
         self.next_transfer_id = self.next_transfer_id.saturating_add(1);
         let transfer_id = self.next_transfer_id;
+        let delete_control = operations::DeleteControl::new();
         self.active_deletes.insert(
             transfer_id,
             ActiveDeleteState {
@@ -1325,12 +1387,13 @@ impl BExplorerIced {
                 pane,
                 paths: paths.clone(),
                 kind: ActiveDeleteKind::MoveToTrash,
+                control: Some(delete_control.clone()),
             },
         );
         let worker_paths = paths.clone();
         let delete_task = Task::perform(
             run_blocking_file_operation(move || {
-                operations::delete_to_trash_with_undo(&worker_paths)
+                operations::delete_to_trash_with_undo_controlled(&worker_paths, &delete_control)
             }),
             move |result| Message::TrashFinished(pane, paths, result),
         );
