@@ -83,7 +83,10 @@ jobs:
             $actual = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             $expected = (Get-Content -LiteralPath "$($file.FullName).sha256.txt").Split(' ')[0]
             if ($actual -ne $expected) { throw "Checksum mismatch: $($file.Name)" }
-            if ($file.VersionInfo.ProductVersion -ne $version) { throw "Version mismatch: $($file.Name)" }
+            $productVersion = $file.VersionInfo.ProductVersion
+            if ($productVersion -ne $version) {
+              throw "Version mismatch: $($file.Name); expected '$version', found '$productVersion'"
+            }
           }
           function Invoke-Checked([string]$File, [string[]]$Arguments) {
             $info = [System.Diagnostics.ProcessStartInfo]::new($File)

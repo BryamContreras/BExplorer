@@ -1,6 +1,9 @@
 #ifndef MyAppVersion
   #define MyAppVersion "1.0.6"
 #endif
+#ifndef MyAppFileVersion
+  #define MyAppFileVersion "1.0.6"
+#endif
 
 #define MyAppName "BExplorer"
 #define MyAppPublisher "BExplorer"
@@ -13,6 +16,10 @@ AppId={{8E567F0D-BC79-4AB8-956A-20ED0FAEAD95}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName}
+VersionInfoVersion={#MyAppFileVersion}
+VersionInfoProductVersion={#MyAppFileVersion}
+VersionInfoTextVersion={#MyAppVersion}
+VersionInfoProductTextVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\BExplorer
 DefaultGroupName=BExplorer

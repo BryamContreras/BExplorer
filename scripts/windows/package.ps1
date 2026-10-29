@@ -16,6 +16,10 @@ $Version = $VersionLine.Matches[0].Groups[1].Value
 if ($Version -notmatch "^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$") {
     throw "The package version is not a safe SemVer filename component"
 }
+$NumericVersion = [regex]::Match($Version, '^\d+\.\d+\.\d+').Value
+if (-not $NumericVersion) {
+    throw "Could not derive a numeric Windows file version from $Version"
+}
 $DistDir = Join-Path $RootDir "dist"
 $StageDir = Join-Path $DistDir "bexplorer-windows-$Target"
 $Portable = Join-Path $DistDir "BExplorer-$Version-windows-$Target.exe"
@@ -189,7 +193,7 @@ if (-not $Iscc) {
 }
 
 $IssPath = Join-Path $PSScriptRoot "BExplorer.iss"
-& $Iscc "/DMyAppVersion=$Version" $IssPath
+& $Iscc "/DMyAppVersion=$Version" "/DMyAppFileVersion=$NumericVersion" $IssPath
 if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup failed with exit code $LASTEXITCODE"
 }
