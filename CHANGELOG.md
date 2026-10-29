@@ -2,6 +2,45 @@
 
 All notable user-facing changes to BExplorer are documented here.
 
+## 1.0.6 - Unreleased
+
+- Increased the maximum name-column width in Details and made the rename
+  editor follow the caret through long filenames with arrows, Shift+arrows,
+  Home, and End.
+- Hardened copy and move preparation, destination reservations, staged
+  replacements, source-identity checks, and cancellation cleanup. Completed
+  copies are preserved when a changed source cannot safely be removed.
+- Improved Windows MTP sessions, per-object deletion, exclusive download
+  creation, and safe destination names. Moving from a device removes only
+  exported objects, preserving files added while the transfer was running.
+- Kept uncertain KDE KIO transfers and their files isolated until the provider
+  finishes or reconnects. KIO exports retain their originals after Move when
+  the provider cannot safely enforce deletion of only the exported objects.
+- Exact duplicate matches now require a full-content, byte-for-byte comparison.
+  Automatic selection excludes possible matches, and deletion revalidates the
+  selected files before sending them to the native trash.
+- Added native ZIP64 sizes, offsets, and entry counts for ZIP Store/Deflate.
+  ZIP compression computes CRC and sizes from the same source read without
+  source-side Deflate temporaries; failed or cancelled archive updates preserve
+  the previous destination.
+- Blocked archive extraction through symlinks and junctions inside the chosen
+  destination while supporting explicitly selected destination aliases.
+  Archive helpers receive password-bearing requests through stdin instead of
+  temporary JSON files, and archive listing can be cancelled.
+- Bounded image caches, preview queues, and SVG/PDF raster dimensions. PDF
+  previews reuse the parsed document and retain nearby pages; text previews
+  run outside the UI thread, and obsolete preview requests are cancelled.
+- Fixed complete-search truncation and queue backpressure, final directory
+  refreshes after write bursts, and duplicated storage/network work. Worker
+  failures now produce operation results instead of leaving progress active.
+- Improved Linux storage-monitor shutdown, helper-process cleanup, Wayland
+  clipboard reads, and reversible GNOME blur settings.
+- Added a headless `--version` command and expanded Windows/Linux regression
+  checks. Windows EXE/Setup, Ubuntu 24.04 DEB/Linux binary, and native Fedora 44
+  RPM builds are distributed as individual Actions artifact files with
+  checksums and license notices; the workflow does not create a tag or GitHub
+  Release.
+
 ## 1.0.5 - 2026-07-31
 
 - Added cross-platform storage analysis with category and extension breakdowns,

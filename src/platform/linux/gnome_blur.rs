@@ -9,9 +9,11 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use crate::platform::LINUX_APPLICATION_ID;
 use crate::utils::errors::{BExplorerError, Result};
+use crate::utils::process::command_output_with_timeout;
 
 const EXTENSION_UUID: &str = "blur-my-shell@aunetx";
 const APPLICATION_SCHEMA: &str = "org.gnome.shell.extensions.blur-my-shell.applications";
@@ -137,10 +139,10 @@ fn update_application_lists(schema_dir: &Path, enabled: bool) -> Result<()> {
 }
 
 fn extension_is_active() -> bool {
-    let output = Command::new("gnome-extensions")
-        .args(["info", EXTENSION_UUID])
-        .output();
-    if let Ok(output) = output
+    let mut command = Command::new("gnome-extensions");
+    command.args(["info", EXTENSION_UUID]);
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(2));
+    if let Some(output) = output
         && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
@@ -149,10 +151,9 @@ fn extension_is_active() -> bool {
         }
     }
 
-    Command::new("gsettings")
-        .args(["get", "org.gnome.shell", "enabled-extensions"])
-        .output()
-        .ok()
+    let mut command = Command::new("gsettings");
+    command.args(["get", "org.gnome.shell", "enabled-extensions"]);
+    command_output_with_timeout(&mut command, Duration::from_secs(2))
         .filter(|output| output.status.success())
         .is_some_and(|output| String::from_utf8_lossy(&output.stdout).contains(EXTENSION_UUID))
 }
@@ -217,10 +218,9 @@ fn gsettings_output(schema_dir: &Path, arguments: &[&str]) -> Result<Output> {
     if !schema_dir.as_os_str().is_empty() {
         command.arg("--schemadir").arg(schema_dir);
     }
-    let output = command
-        .args(arguments)
-        .output()
-        .map_err(|error| BExplorerError::Operation(format!("Could not run gsettings: {error}")))?;
+    command.args(arguments);
+    let output = command_output_with_timeout(&mut command, Duration::from_secs(2))
+        .ok_or_else(|| BExplorerError::Operation("gsettings did not respond in time".into()))?;
     if output.status.success() {
         Ok(output)
     } else {

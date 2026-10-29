@@ -910,28 +910,50 @@ impl BExplorerIced {
         let page_count = state.and_then(|state| state.page_count);
         let current_page = state.map(|state| state.current_page).unwrap_or(0);
         let loading = state.is_none_or(|state| state.loading);
-        let mut pages = column![].spacing(self.ui_metric(14.0));
+        let mut pages = column![];
 
         if let Some(state) = state {
-            for page in &state.pages {
-                let page_height = pdf_preview_page_height(panel_width, page.aspect_ratio);
-                pages = pages.push(
-                    container(
+            let window = state.page_window();
+            let page_height = pdf_preview_page_height(panel_width, state.aspect_ratio);
+            let stride = page_height + self.ui_metric(30.0);
+            pages = pages.push(Space::new().height(Length::Fixed(window.start as f32 * stride)));
+            for index in window.clone() {
+                let body: Element<'_, Message> =
+                    if let Some(page) = state.pages.iter().find(|page| page.index == index) {
                         iced_image::Image::new(page.handle.clone())
                             .width(Length::Fill)
                             .height(Length::Fixed(page_height))
-                            .content_fit(ContentFit::Contain),
+                            .content_fit(ContentFit::Contain)
+                            .into()
+                    } else {
+                        container(
+                            text(if state.failed_pages.contains(&index) {
+                                "—"
+                            } else {
+                                "…"
+                            })
+                            .color(palette.muted_text),
+                        )
+                        .center_x(Length::Fill)
+                        .center_y(Length::Fixed(page_height))
+                        .into()
+                    };
+                pages = pages
+                    .push(
+                        container(body)
+                            .width(Length::Fill)
+                            .height(Length::Fixed(page_height + self.ui_metric(16.0)))
+                            .padding(self.ui_vertical_padding(8.0))
+                            .style(move |_| {
+                                container::Style::default()
+                                    .background(palette.input_bg)
+                                    .border(border::rounded(7).color(palette.border).width(1))
+                            }),
                     )
-                    .width(Length::Fill)
-                    .height(Length::Fixed(page_height + self.ui_metric(16.0)))
-                    .padding(self.ui_vertical_padding(8.0))
-                    .style(move |_| {
-                        container::Style::default()
-                            .background(palette.input_bg)
-                            .border(border::rounded(7).color(palette.border).width(1))
-                    }),
-                );
+                    .push(Space::new().height(self.ui_metric(14.0)));
             }
+            let remaining = state.page_count.unwrap_or(1).saturating_sub(window.end);
+            pages = pages.push(Space::new().height(remaining as f32 * stride));
         }
 
         if loading {
@@ -940,7 +962,7 @@ impl BExplorerIced {
                     format!(
                         "{} {} {} {total}…",
                         self.localized("Cargando página", "Loading page"),
-                        current_page + 2,
+                        current_page + 1,
                         self.localized("de", "of"),
                     )
                 })
@@ -977,7 +999,12 @@ impl BExplorerIced {
             .width(Length::Fill)
             .height(Length::Fill)
             .on_scroll(move |viewport| {
-                Message::PdfPreviewScrolled(pane, path.clone(), viewport.absolute_offset().y)
+                Message::PdfPreviewScrolled(
+                    pane,
+                    path.clone(),
+                    viewport.absolute_offset().y,
+                    viewport.bounds().height,
+                )
             });
         let page_label = page_count
             .map(|total| format!("{} - {total}", current_page.saturating_add(1).min(total)))

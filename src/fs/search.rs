@@ -1,10 +1,10 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::fs::archive::{ArchiveListEntry, list_7z_entries, list_zip_entries};
+use crate::fs::archive::list_archive_entries_cancellable;
 use crate::fs::explorer::{self, EntryKind, FileEntry};
 
 const MAX_SEARCH_RESULTS: usize = 20_000;
@@ -55,10 +55,19 @@ where
     let mut truncated = false;
     let mut last_batch = Instant::now();
     let mut scanned_items = 0usize;
+    let mut visited = HashSet::new();
 
     while let Some(folder) = pending.pop_front() {
         if cancelled.load(Ordering::Relaxed) {
             break;
+        }
+        // Junctions can appear as directories on Windows. Track physical
+        // directory identity so they cannot create a recursive search cycle.
+        let Ok(identity) = crate::fs::transfer_queue::path_identity(&folder) else {
+            continue;
+        };
+        if !visited.insert(identity) {
+            continue;
         }
 
         let Ok(read_dir) = fs::read_dir(&folder) else {
@@ -188,9 +197,15 @@ fn search_archive_entries<F>(archive_path: &Path, context: &mut ArchiveSearchCon
 where
     F: FnMut(Vec<FileEntry>) -> bool,
 {
-    let entries = match list_archive_entries(archive_path) {
+    if context.cancelled.load(Ordering::Relaxed) {
+        return false;
+    }
+    let entries = match list_archive_entries_cancellable(archive_path, context.cancelled) {
         Ok(entries) => entries,
         Err(error) => {
+            if context.cancelled.load(Ordering::Relaxed) {
+                return false;
+            }
             crate::utils::log::error(format!(
                 "Archive search listing failed for {}: {error}",
                 archive_path.display()
@@ -264,18 +279,6 @@ where
     true
 }
 
-fn list_archive_entries(path: &Path) -> crate::utils::errors::Result<Vec<ArchiveListEntry>> {
-    if path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
-    {
-        list_zip_entries(path)
-    } else {
-        list_7z_entries(path)
-    }
-}
-
 fn archive_entry_display_name(name: &str) -> Option<String> {
     name.trim_matches('/')
         .rsplit('/')
@@ -310,7 +313,8 @@ where
 
     if *matched_count >= MAX_SEARCH_RESULTS {
         *truncated = true;
-        return flush_search_batch(batch, last_batch, on_batch);
+        flush_search_batch(batch, last_batch, on_batch);
+        return false;
     }
     if batch.len() >= SEARCH_BATCH_SIZE || last_batch.elapsed() >= SEARCH_BATCH_INTERVAL {
         return flush_search_batch(batch, last_batch, on_batch);
@@ -515,6 +519,51 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{NameMatcher, SearchOptions, search_files_streaming};
+
+    #[test]
+    fn local_result_limit_stops_production_at_the_last_batch() {
+        use crate::fs::explorer::{EntryKind, FileCategory, FileEntry};
+        let mut batch = Vec::new();
+        let mut matched = 0;
+        let mut truncated = false;
+        let mut last_batch = std::time::Instant::now();
+        let mut received = 0;
+        let mut accept = |entries: Vec<FileEntry>| {
+            assert!(entries.len() <= super::SEARCH_BATCH_SIZE);
+            received += entries.len();
+            true
+        };
+        for index in 0..super::MAX_SEARCH_RESULTS + 10 {
+            let entry = FileEntry {
+                name: format!("match-{index}"),
+                path: std::path::PathBuf::from(format!("match-{index}")),
+                kind: EntryKind::File,
+                category: FileCategory::Other,
+                drive_kind: None,
+                file_system: String::new(),
+                free_space: None,
+                size: Some(1),
+                percent_full: None,
+                modified: None,
+                created: None,
+                is_hidden: false,
+            };
+            if !super::push_search_entry(
+                entry,
+                &mut batch,
+                &mut matched,
+                &mut truncated,
+                &mut last_batch,
+                &mut accept,
+            ) {
+                break;
+            }
+        }
+        assert!(truncated);
+        assert_eq!(matched, super::MAX_SEARCH_RESULTS);
+        assert_eq!(received, super::MAX_SEARCH_RESULTS);
+        assert!(batch.is_empty());
+    }
 
     fn name_matches_query(name: &str, query: &str) -> bool {
         NameMatcher::new(query).matches(name)

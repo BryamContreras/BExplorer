@@ -24,6 +24,7 @@ PACKAGE=$(rpm -qp --queryformat '%{NAME}' "$RPM")
 VERSION=$(rpm -qp --queryformat '%{VERSION}' "$RPM")
 ARCH=$(rpm -qp --queryformat '%{ARCH}' "$RPM")
 VENDOR=$(rpm -qp --queryformat '%{VENDOR}' "$RPM")
+REQUIRES=$(rpm -qp --requires "$RPM")
 
 [ "$PACKAGE" = bexplorer ] || {
   printf 'Unexpected package name: %s\n' "$PACKAGE" >&2
@@ -48,6 +49,21 @@ rpm -qpl "$RPM" | grep -Fqx '/usr/bin/bexplorer' || {
   printf 'Package does not contain executable /usr/bin/bexplorer\n' >&2
   exit 1
 }
+
+# Fail if the host's RPM dependency generator was missing or bypassed. The
+# embedded C++ engine and the Rust binary both carry versioned ABI requirements.
+for ABI_PATTERN in '^libc\.so\.6\(GLIBC_' '^libstdc\+\+\.so\.6\((GLIBCXX|CXXABI)_'; do
+  printf '%s\n' "$REQUIRES" | grep -Eq "$ABI_PATTERN" || {
+    printf 'Missing generated ELF ABI requirement: %s\n' "$ABI_PATTERN" >&2
+    exit 1
+  }
+done
+for CORE_PACKAGE in glib2 libwayland-client libxkbcommon xdg-desktop-portal udisks2 polkit; do
+  printf '%s\n' "$REQUIRES" | grep -Eq "^$CORE_PACKAGE([[:space:](]|$)" || {
+    printf 'Missing core Fedora runtime dependency: %s\n' "$CORE_PACKAGE" >&2
+    exit 1
+  }
+done
 
 if rpm -qip "$RPM" | grep -Fqi 'Bryam Contreras'; then
   printf 'Package metadata exposes a personal maintainer name\n' >&2

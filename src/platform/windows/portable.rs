@@ -1,5 +1,16 @@
 use super::util::{pwstr_to_string, wide_null, wide_to_string};
 
+mod connection;
+#[cfg(test)]
+mod tests;
+
+fn create_download_target(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
 #[cfg(target_os = "windows")]
 static PORTABLE_DEVICE_ACCESS: std::sync::OnceLock<std::sync::Mutex<()>> =
     std::sync::OnceLock::new();
@@ -25,18 +36,21 @@ pub struct PortableObjectInfo {
 #[cfg(target_os = "windows")]
 pub fn portable_devices() -> Vec<PortableDeviceInfo> {
     use windows::Win32::Devices::PortableDevices::{IPortableDeviceManager, PortableDeviceManager};
-    use windows::Win32::Foundation::S_OK;
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-        CoInitializeEx, CoTaskMemFree, CoUninitialize,
-    };
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
     use windows::core::{PCWSTR, PWSTR};
 
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        let should_uninitialize = hr == S_OK || hr.0 == 1;
+    let _apartment = match PortableComApartment::initialize() {
+        Ok(apartment) => apartment,
+        Err(error) => {
+            crate::utils::log::error(format!(
+                "Portable device COM initialization failed: {error}"
+            ));
+            return Vec::new();
+        }
+    };
 
-        let result = (|| -> windows::core::Result<Vec<PortableDeviceInfo>> {
+    unsafe {
+        (|| -> windows::core::Result<Vec<PortableDeviceInfo>> {
             let manager: IPortableDeviceManager =
                 CoCreateInstance(&PortableDeviceManager, None, CLSCTX_INPROC_SERVER)?;
             manager.RefreshDeviceList()?;
@@ -86,135 +100,17 @@ pub fn portable_devices() -> Vec<PortableDeviceInfo> {
         .unwrap_or_else(|error| {
             crate::utils::log::error(format!("Portable device scan failed: {error}"));
             Vec::new()
-        });
-
-        if should_uninitialize {
-            CoUninitialize();
-        }
-        result
+        })
     }
 }
 
 #[cfg(target_os = "windows")]
 #[allow(dead_code)]
 pub fn portable_device_objects(device_id: &str, parent_object_id: &str) -> Vec<PortableObjectInfo> {
-    use windows::Win32::Devices::PortableDevices::{
-        IPortableDevice, IPortableDeviceKeyCollection, IPortableDeviceValues, PortableDevice,
-        PortableDeviceKeyCollection, PortableDeviceValues, WPD_CLIENT_MAJOR_VERSION,
-        WPD_CLIENT_MINOR_VERSION, WPD_CLIENT_NAME, WPD_CLIENT_REVISION,
-        WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE, WPD_CONTENT_TYPE_FOLDER,
-        WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT, WPD_OBJECT_CONTENT_TYPE, WPD_OBJECT_NAME,
-        WPD_OBJECT_ORIGINAL_FILE_NAME, WPD_OBJECT_SIZE,
-    };
-    use windows::Win32::Foundation::S_OK;
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-        CoInitializeEx, CoTaskMemFree, CoUninitialize,
-    };
-    use windows::core::{PCWSTR, PWSTR};
-
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        let should_uninitialize = hr == S_OK || hr.0 == 1;
-
-        let result = (|| -> windows::core::Result<Vec<PortableObjectInfo>> {
-            let device: IPortableDevice =
-                CoCreateInstance(&PortableDevice, None, CLSCTX_INPROC_SERVER)?;
-            let client_info: IPortableDeviceValues =
-                CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
-
-            let client_name = wide_null("BExplorer");
-            client_info.SetStringValue(&WPD_CLIENT_NAME, PCWSTR(client_name.as_ptr()))?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MAJOR_VERSION, 1)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MINOR_VERSION, 0)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_REVISION, 0)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE, 2)?;
-
-            let device_wide = wide_null(device_id);
-            device.Open(PCWSTR(device_wide.as_ptr()), &client_info)?;
-
-            let content = device.Content()?;
-            let filter: IPortableDeviceValues =
-                CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
-            let parent_id = if parent_object_id.trim().is_empty() {
-                "DEVICE"
-            } else {
-                parent_object_id
-            };
-            let parent_wide = wide_null(parent_id);
-            let enumerator = content.EnumObjects(0, PCWSTR(parent_wide.as_ptr()), &filter)?;
-
-            let properties = content.Properties()?;
-            let keys: IPortableDeviceKeyCollection =
-                CoCreateInstance(&PortableDeviceKeyCollection, None, CLSCTX_INPROC_SERVER)?;
-            keys.Add(&WPD_OBJECT_NAME)?;
-            keys.Add(&WPD_OBJECT_ORIGINAL_FILE_NAME)?;
-            keys.Add(&WPD_OBJECT_CONTENT_TYPE)?;
-            keys.Add(&WPD_OBJECT_SIZE)?;
-
-            let mut objects = Vec::new();
-            loop {
-                let mut ids = [PWSTR::null(); 16];
-                let mut fetched = 0_u32;
-                enumerator.Next(&mut ids, &mut fetched).ok()?;
-                if fetched == 0 {
-                    break;
-                }
-
-                for id in ids.into_iter().take(fetched as usize) {
-                    if id.is_null() {
-                        continue;
-                    }
-
-                    let id_string = pwstr_to_string(id);
-                    let object_wide = wide_null(&id_string);
-                    let values = match properties.GetValues(PCWSTR(object_wide.as_ptr()), &keys) {
-                        Ok(values) => values,
-                        Err(error) => {
-                            crate::utils::log::error(format!(
-                                "Portable object properties failed: {error}"
-                            ));
-                            CoTaskMemFree(Some(id.0 as *const _));
-                            continue;
-                        }
-                    };
-
-                    let name = portable_value_string(&values, &WPD_OBJECT_NAME)
-                        .or_else(|| portable_value_string(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME))
-                        .filter(|value| !value.trim().is_empty())
-                        .unwrap_or_else(|| id_string.clone());
-                    let content_type = values.GetGuidValue(&WPD_OBJECT_CONTENT_TYPE).ok();
-                    let is_folder = content_type.is_some_and(|content_type| {
-                        content_type == WPD_CONTENT_TYPE_FOLDER
-                            || content_type == WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT
-                    });
-                    let size = values.GetUnsignedLargeIntegerValue(&WPD_OBJECT_SIZE).ok();
-
-                    objects.push(PortableObjectInfo {
-                        id: id_string,
-                        name,
-                        is_folder,
-                        size,
-                    });
-
-                    CoTaskMemFree(Some(id.0 as *const _));
-                }
-            }
-
-            let _ = device.Close();
-            objects.sort_by_key(|object| object.name.to_lowercase());
-            Ok(objects)
-        })()
-        .unwrap_or_else(|error| {
-            crate::utils::log::error(format!("Portable object scan failed: {error}"));
-            Vec::new()
-        });
-
-        if should_uninitialize {
-            CoUninitialize();
-        }
-        result
-    }
+    portable_device_objects_result(device_id, parent_object_id).unwrap_or_else(|error| {
+        crate::utils::log::error(format!("Portable object scan failed: {error}"));
+        Vec::new()
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -224,152 +120,90 @@ pub fn portable_device_thumbnail(
     max_bytes: usize,
     allow_default_resource: bool,
 ) -> Option<Vec<u8>> {
-    use windows::Win32::Devices::PortableDevices::{
-        IPortableDevice, IPortableDeviceValues, PortableDevice, PortableDeviceValues,
-        WPD_CLIENT_MAJOR_VERSION, WPD_CLIENT_MINOR_VERSION, WPD_CLIENT_NAME, WPD_CLIENT_REVISION,
-        WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE, WPD_RESOURCE_DEFAULT, WPD_RESOURCE_THUMBNAIL,
-    };
-    use windows::Win32::Foundation::S_OK;
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-        CoInitializeEx, CoUninitialize,
-    };
+    use windows::Win32::Devices::PortableDevices::{WPD_RESOURCE_DEFAULT, WPD_RESOURCE_THUMBNAIL};
     use windows::core::PCWSTR;
 
-    let _access_guard = portable_access_lock();
+    // Thumbnails are optional. Never queue them behind a transfer or deletion.
+    let access = match portable_access_mutex().try_lock() {
+        Ok(access) => access,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return None,
+    };
+    let session = PortableDeviceSession::open_with_access(device_id, access).ok()?;
+    let resources = unsafe { session.content.Transfer().ok()? };
+    let object_wide = wide_null(object_id);
+    let object = PCWSTR(object_wide.as_ptr());
+    read_portable_resource(&resources, object, &WPD_RESOURCE_THUMBNAIL, max_bytes).or_else(|| {
+        allow_default_resource
+            .then(|| read_portable_resource(&resources, object, &WPD_RESOURCE_DEFAULT, max_bytes))?
+    })
+}
 
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        let should_uninitialize = hr == S_OK || hr.0 == 1;
+#[cfg(target_os = "windows")]
+struct PortableComApartment {
+    should_uninitialize: bool,
+    _thread: std::marker::PhantomData<std::rc::Rc<()>>,
+}
 
-        let result = (|| -> windows::core::Result<Option<Vec<u8>>> {
-            let device: IPortableDevice =
-                CoCreateInstance(&PortableDevice, None, CLSCTX_INPROC_SERVER)?;
-            let client_info: IPortableDeviceValues =
-                CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
+#[cfg(target_os = "windows")]
+impl PortableComApartment {
+    fn initialize() -> windows::core::Result<Self> {
+        use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
+        use windows::Win32::System::Com::{
+            COINIT_DISABLE_OLE1DDE, COINIT_MULTITHREADED, CoInitializeEx,
+        };
 
-            let client_name = wide_null("BExplorer");
-            client_info.SetStringValue(&WPD_CLIENT_NAME, PCWSTR(client_name.as_ptr()))?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MAJOR_VERSION, 1)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MINOR_VERSION, 0)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_REVISION, 0)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE, 2)?;
-
-            let device_wide = wide_null(device_id);
-            device.Open(PCWSTR(device_wide.as_ptr()), &client_info)?;
-
-            let content = device.Content()?;
-            let resources = content.Transfer()?;
-            let object_wide = wide_null(object_id);
-            let object_pcwstr = PCWSTR(object_wide.as_ptr());
-
-            let bytes = read_portable_resource(
-                &resources,
-                object_pcwstr,
-                &WPD_RESOURCE_THUMBNAIL,
-                max_bytes,
-            )
-            .or_else(|| {
-                allow_default_resource.then(|| {
-                    read_portable_resource(
-                        &resources,
-                        object_pcwstr,
-                        &WPD_RESOURCE_DEFAULT,
-                        max_bytes,
-                    )
-                })?
-            });
-
-            let _ = device.Close();
-            Ok(bytes)
-        })()
-        .unwrap_or_else(|error| {
-            crate::utils::log::error(format!("Portable thumbnail load failed: {error}"));
-            None
-        });
-
-        if should_uninitialize {
-            CoUninitialize();
+        // File-operation workers do not have an STA message loop. FTM devices
+        // also work when a caller already initialized its thread as an STA.
+        let result = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED | COINIT_DISABLE_OLE1DDE) };
+        if result != RPC_E_CHANGED_MODE {
+            result.ok()?;
         }
-        result
+        Ok(Self {
+            should_uninitialize: result.is_ok(),
+            _thread: std::marker::PhantomData,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for PortableComApartment {
+    fn drop(&mut self) {
+        if self.should_uninitialize {
+            unsafe { windows::Win32::System::Com::CoUninitialize() };
+        }
     }
 }
 
 #[cfg(target_os = "windows")]
 pub struct PortableDeviceSession {
-    device: windows::Win32::Devices::PortableDevices::IPortableDevice,
+    // Rust drops fields in declaration order, after the Drop implementation.
+    // Release every WPD interface before uninitializing COM and unlocking.
     content: windows::Win32::Devices::PortableDevices::IPortableDeviceContent,
-    should_uninitialize: bool,
+    _device: windows::Win32::Devices::PortableDevices::IPortableDevice,
+    _apartment: PortableComApartment,
     _access_guard: std::sync::MutexGuard<'static, ()>,
 }
 
 #[cfg(target_os = "windows")]
 impl PortableDeviceSession {
     pub fn open(device_id: &str) -> crate::utils::errors::Result<Self> {
-        use windows::Win32::Devices::PortableDevices::{
-            IPortableDevice, IPortableDeviceValues, PortableDevice, PortableDeviceValues,
-            WPD_CLIENT_MAJOR_VERSION, WPD_CLIENT_MINOR_VERSION, WPD_CLIENT_NAME,
-            WPD_CLIENT_REVISION, WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE,
-        };
-        use windows::Win32::Foundation::S_OK;
-        use windows::Win32::System::Com::{
-            CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE,
-            CoCreateInstance, CoInitializeEx, CoUninitialize,
-        };
-        use windows::core::PCWSTR;
+        Self::open_with_access(device_id, portable_access_lock()?)
+    }
 
-        let mut access_guard = Some(portable_access_lock());
-        let mut last_error = None;
-        for attempt in 0..4 {
-            unsafe {
-                let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-                let should_uninitialize = hr == S_OK || hr.0 == 1;
-
-                let result = (|| -> crate::utils::errors::Result<Self> {
-                    let device: IPortableDevice =
-                        CoCreateInstance(&PortableDevice, None, CLSCTX_INPROC_SERVER)?;
-                    let client_info: IPortableDeviceValues =
-                        CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
-
-                    let client_name = wide_null("BExplorer");
-                    client_info.SetStringValue(&WPD_CLIENT_NAME, PCWSTR(client_name.as_ptr()))?;
-                    client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MAJOR_VERSION, 1)?;
-                    client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MINOR_VERSION, 0)?;
-                    client_info.SetUnsignedIntegerValue(&WPD_CLIENT_REVISION, 0)?;
-                    client_info
-                        .SetUnsignedIntegerValue(&WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE, 2)?;
-
-                    let device_wide = wide_null(device_id);
-                    device.Open(PCWSTR(device_wide.as_ptr()), &client_info)?;
-                    let content = device.Content()?;
-                    Ok(Self {
-                        device,
-                        content,
-                        should_uninitialize,
-                        _access_guard: access_guard.take().expect("portable device lock"),
-                    })
-                })();
-
-                if result.is_err() && should_uninitialize {
-                    CoUninitialize();
-                }
-
-                match result {
-                    Ok(session) => return Ok(session),
-                    Err(error) if portable_error_is_resource_busy(&error) && attempt < 3 => {
-                        last_error = Some(error);
-                        std::thread::sleep(portable_retry_delay(attempt));
-                    }
-                    Err(error) => return Err(error),
-                }
-            }
-        }
-
-        Err(last_error.unwrap_or_else(|| {
-            crate::utils::errors::BExplorerError::Operation(
-                "Portable device resource is busy".into(),
-            )
-        }))
+    fn open_with_access(
+        device_id: &str,
+        access_guard: std::sync::MutexGuard<'static, ()>,
+    ) -> crate::utils::errors::Result<Self> {
+        let apartment = PortableComApartment::initialize()?;
+        let device = connection::open_device(device_id)?;
+        let content = unsafe { device.Content()? };
+        Ok(Self {
+            content,
+            _device: device,
+            _apartment: apartment,
+            _access_guard: access_guard,
+        })
     }
 
     pub fn object_info(&self, object_id: &str) -> crate::utils::errors::Result<PortableObjectInfo> {
@@ -381,7 +215,9 @@ impl PortableDeviceSession {
                     last_error = Some(error);
                     std::thread::sleep(portable_retry_delay(attempt));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(error);
+                }
             }
         }
         Err(last_error.unwrap_or_else(|| {
@@ -403,7 +239,9 @@ impl PortableDeviceSession {
                     last_error = Some(error);
                     std::thread::sleep(portable_retry_delay(attempt));
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(error);
+                }
             }
         }
         Err(last_error.unwrap_or_else(|| {
@@ -454,7 +292,8 @@ impl PortableDeviceSession {
 
         let chunk_size = portable_chunk_size(optimal_buffer_size);
         let mut buffer = vec![0_u8; chunk_size];
-        let mut output = std::fs::File::create(target)?;
+        let mut output = create_download_target(target)?;
+        on_bytes(0)?;
         let mut total = 0_u64;
 
         loop {
@@ -654,12 +493,56 @@ impl PortableDeviceSession {
     }
 
     pub fn delete_objects(&self, object_ids: &[String]) -> crate::utils::errors::Result<usize> {
+        let requested = object_ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        if requested
+            .iter()
+            .any(|id| id.trim().is_empty() || id == "DEVICE")
+        {
+            return Err(crate::utils::errors::BExplorerError::Operation(
+                "Cannot delete the portable device root".into(),
+            ));
+        }
+        let mut pending = object_ids
+            .iter()
+            .rev()
+            .cloned()
+            .map(|id| (id, false))
+            .collect::<Vec<_>>();
+        let mut deleted = std::collections::HashSet::new();
+        let mut expanded = std::collections::HashSet::new();
+        while let Some((id, children_deleted)) = pending.pop() {
+            if deleted.contains(&id) {
+                continue;
+            }
+            if !children_deleted && self.object_info(&id)?.is_folder {
+                if !expanded.insert(id.clone()) {
+                    return Err(crate::utils::errors::BExplorerError::Operation(
+                        "El dispositivo devolvió una jerarquía de carpetas circular".into(),
+                    ));
+                }
+                let children = self.list_objects(&id)?;
+                pending.push((id, true));
+                pending.extend(children.into_iter().rev().map(|child| (child.id, false)));
+                continue;
+            }
+            self.delete_objects_without_recursion(std::slice::from_ref(&id))?;
+            deleted.insert(id);
+        }
+        Ok(requested.len())
+    }
+
+    pub(crate) fn delete_objects_without_recursion(
+        &self,
+        object_ids: &[String],
+    ) -> crate::utils::errors::Result<usize> {
         use windows::Win32::Devices::PortableDevices::{
-            IPortableDevicePropVariantCollection, PORTABLE_DEVICE_DELETE_WITH_RECURSION,
+            IPortableDevicePropVariantCollection, PORTABLE_DEVICE_DELETE_NO_RECURSION,
             PortableDevicePropVariantCollection,
         };
         use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
-        use windows::core::PROPVARIANT;
 
         if object_ids.is_empty() {
             return Ok(0);
@@ -673,7 +556,7 @@ impl PortableDeviceSession {
             )?
         };
         for object_id in object_ids {
-            let value = PROPVARIANT::from(object_id.as_str());
+            let value = portable_object_id_variant(object_id)?;
             unsafe {
                 collection.Add(&value)?;
             }
@@ -682,25 +565,12 @@ impl PortableDeviceSession {
         let mut results = None;
         unsafe {
             self.content.Delete(
-                PORTABLE_DEVICE_DELETE_WITH_RECURSION.0 as u32,
+                PORTABLE_DEVICE_DELETE_NO_RECURSION.0 as u32,
                 &collection,
                 &mut results,
             )?;
         }
-        std::thread::sleep(std::time::Duration::from_millis(180));
-        Ok(object_ids.len())
-    }
-}
-
-#[cfg(target_os = "windows")]
-impl Drop for PortableDeviceSession {
-    fn drop(&mut self) {
-        unsafe {
-            let _ = self.device.Close();
-            if self.should_uninitialize {
-                windows::Win32::System::Com::CoUninitialize();
-            }
-        }
+        portable_delete_result_count(results.as_ref(), object_ids.len())
     }
 }
 
@@ -767,7 +637,8 @@ where
 
         let chunk_size = portable_chunk_size(optimal_buffer_size);
         let mut buffer = vec![0_u8; chunk_size];
-        let mut output = std::fs::File::create(&target)?;
+        let mut output = create_download_target(&target)?;
+        on_bytes(0)?;
         let mut total = 0_u64;
 
         loop {
@@ -1049,51 +920,8 @@ where
         &windows::Win32::Devices::PortableDevices::IPortableDeviceContent,
     ) -> crate::utils::errors::Result<T>,
 {
-    use windows::Win32::Devices::PortableDevices::{
-        IPortableDevice, IPortableDeviceValues, PortableDevice, PortableDeviceValues,
-        WPD_CLIENT_MAJOR_VERSION, WPD_CLIENT_MINOR_VERSION, WPD_CLIENT_NAME, WPD_CLIENT_REVISION,
-        WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE,
-    };
-    use windows::Win32::Foundation::S_OK;
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-        CoInitializeEx, CoUninitialize,
-    };
-    use windows::core::PCWSTR;
-
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        let should_uninitialize = hr == S_OK || hr.0 == 1;
-
-        let result = (|| -> crate::utils::errors::Result<T> {
-            let device: IPortableDevice =
-                CoCreateInstance(&PortableDevice, None, CLSCTX_INPROC_SERVER)?;
-            let client_info: IPortableDeviceValues =
-                CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
-
-            let client_name = wide_null("BExplorer");
-            client_info.SetStringValue(&WPD_CLIENT_NAME, PCWSTR(client_name.as_ptr()))?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MAJOR_VERSION, 1)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_MINOR_VERSION, 0)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_REVISION, 0)?;
-            client_info.SetUnsignedIntegerValue(&WPD_CLIENT_SECURITY_QUALITY_OF_SERVICE, 2)?;
-
-            let device_wide = wide_null(device_id);
-            device.Open(PCWSTR(device_wide.as_ptr()), &client_info)?;
-            let content = device.Content()?;
-            let operation_result = operation(&content);
-            let close_result = device.Close();
-            if operation_result.is_ok() {
-                close_result?;
-            }
-            operation_result
-        })();
-
-        if should_uninitialize {
-            CoUninitialize();
-        }
-        result
-    }
+    let session = PortableDeviceSession::open(device_id)?;
+    operation(&session.content)
 }
 
 #[cfg(target_os = "windows")]
@@ -1146,23 +974,21 @@ fn portable_objects_from_content(
     parent_object_id: &str,
 ) -> crate::utils::errors::Result<Vec<PortableObjectInfo>> {
     use windows::Win32::Devices::PortableDevices::{
-        IPortableDeviceKeyCollection, IPortableDeviceValues, PortableDeviceKeyCollection,
-        PortableDeviceValues, WPD_CONTENT_TYPE_FOLDER, WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT,
-        WPD_OBJECT_CONTENT_TYPE, WPD_OBJECT_NAME, WPD_OBJECT_ORIGINAL_FILE_NAME, WPD_OBJECT_SIZE,
+        IPortableDeviceKeyCollection, PortableDeviceKeyCollection, WPD_CONTENT_TYPE_FOLDER,
+        WPD_CONTENT_TYPE_FUNCTIONAL_OBJECT, WPD_OBJECT_CONTENT_TYPE, WPD_OBJECT_NAME,
+        WPD_OBJECT_ORIGINAL_FILE_NAME, WPD_OBJECT_SIZE,
     };
-    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
     use windows::core::{PCWSTR, PWSTR};
 
     unsafe {
-        let filter: IPortableDeviceValues =
-            CoCreateInstance(&PortableDeviceValues, None, CLSCTX_INPROC_SERVER)?;
         let parent_id = if parent_object_id.trim().is_empty() {
             "DEVICE"
         } else {
             parent_object_id
         };
         let parent_wide = wide_null(parent_id);
-        let enumerator = content.EnumObjects(0, PCWSTR(parent_wide.as_ptr()), &filter)?;
+        let enumerator = content.EnumObjects(0, PCWSTR(parent_wide.as_ptr()), None)?;
 
         let properties = content.Properties()?;
         let keys: IPortableDeviceKeyCollection =
@@ -1174,21 +1000,28 @@ fn portable_objects_from_content(
 
         let mut objects = Vec::new();
         loop {
-            let mut ids = [PWSTR::null(); 16];
+            let mut ids = PortableObjectIdBatch([PWSTR::null(); 16]);
             let mut fetched = 0_u32;
-            enumerator.Next(&mut ids, &mut fetched).ok()?;
+            let status = enumerator.Next(&mut ids.0, &mut fetched);
+            status.ok()?;
             if fetched == 0 {
                 break;
             }
 
-            for id in ids.into_iter().take(fetched as usize) {
+            for id in ids.0.iter().copied().take(fetched as usize) {
                 if id.is_null() {
                     continue;
                 }
 
                 let id_string = pwstr_to_string(id);
                 let object_wide = wide_null(&id_string);
-                let values = properties.GetValues(PCWSTR(object_wide.as_ptr()), &keys)?;
+                let values = match properties.GetValues(PCWSTR(object_wide.as_ptr()), &keys) {
+                    Ok(values) => values,
+                    // A deletion or another client can remove an object after
+                    // EnumObjects returned its ID. Keep listing the survivors.
+                    Err(error) if windows_error_is_object_missing(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
 
                 let name = portable_value_string(&values, &WPD_OBJECT_NAME)
                     .or_else(|| portable_value_string(&values, &WPD_OBJECT_ORIGINAL_FILE_NAME))
@@ -1207,14 +1040,37 @@ fn portable_objects_from_content(
                     is_folder,
                     size,
                 });
-
-                CoTaskMemFree(Some(id.0 as *const _));
+            }
+            if status == windows::Win32::Foundation::S_FALSE {
+                break;
             }
         }
 
         objects.sort_by_key(|object| object.name.to_lowercase());
         Ok(objects)
     }
+}
+
+#[cfg(target_os = "windows")]
+struct PortableObjectIdBatch([windows::core::PWSTR; 16]);
+
+#[cfg(target_os = "windows")]
+impl Drop for PortableObjectIdBatch {
+    fn drop(&mut self) {
+        for id in self.0 {
+            if !id.is_null() {
+                unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(id.0.cast())) };
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_error_is_object_missing(error: &windows::core::Error) -> bool {
+    matches!(
+        error.code().0 as u32,
+        0x80070002 | 0x80070003 | 0x80070490 | 0x80042009
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -1232,11 +1088,35 @@ fn portable_retry_delay(attempt: usize) -> std::time::Duration {
 }
 
 #[cfg(target_os = "windows")]
-fn portable_access_lock() -> std::sync::MutexGuard<'static, ()> {
-    PORTABLE_DEVICE_ACCESS
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+fn portable_access_mutex() -> &'static std::sync::Mutex<()> {
+    PORTABLE_DEVICE_ACCESS.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(target_os = "windows")]
+fn portable_access_lock() -> crate::utils::errors::Result<std::sync::MutexGuard<'static, ()>> {
+    portable_access_lock_with_timeout(portable_access_mutex(), std::time::Duration::from_secs(10))
+}
+
+#[cfg(target_os = "windows")]
+fn portable_access_lock_with_timeout(
+    access: &std::sync::Mutex<()>,
+    timeout: std::time::Duration,
+) -> crate::utils::errors::Result<std::sync::MutexGuard<'_, ()>> {
+    let started = std::time::Instant::now();
+    loop {
+        match access.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) if started.elapsed() < timeout => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(crate::utils::errors::BExplorerError::Operation(
+                    "El dispositivo está ocupado con otra operación MTP. Espera a que termine y vuelve a intentarlo.".into(),
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1247,6 +1127,69 @@ fn windows_error_is_resource_busy(error: &windows::core::Error) -> bool {
 #[cfg(target_os = "windows")]
 fn portable_error_is_resource_busy(error: &crate::utils::errors::BExplorerError) -> bool {
     error.to_string().contains("0x800700AA")
+}
+
+#[cfg(target_os = "windows")]
+fn portable_object_id_variant(
+    object_id: &str,
+) -> windows::core::Result<windows::core::PROPVARIANT> {
+    use windows::Win32::System::Com::StructuredStorage::{PVCHF_DEFAULT, PropVariantChangeType};
+    use windows::Win32::System::Variant::VT_LPWSTR;
+    use windows::core::PROPVARIANT;
+
+    // PROPVARIANT::from(&str) creates VT_BSTR, but WPD object IDs must be
+    // VT_LPWSTR. Let Windows allocate and convert the owned string correctly.
+    let source = PROPVARIANT::from(object_id);
+    let mut value = PROPVARIANT::new();
+    unsafe { PropVariantChangeType(&mut value, &source, PVCHF_DEFAULT, VT_LPWSTR)? };
+    Ok(value)
+}
+
+#[cfg(target_os = "windows")]
+fn portable_delete_result_count(
+    results: Option<
+        &windows::Win32::Devices::PortableDevices::IPortableDevicePropVariantCollection,
+    >,
+    expected: usize,
+) -> crate::utils::errors::Result<usize> {
+    use windows::Win32::System::Variant::VT_ERROR;
+    use windows::core::{HRESULT, PROPVARIANT};
+
+    let invalid_result = || {
+        crate::utils::errors::BExplorerError::Operation(
+        "El dispositivo no confirmó el resultado de la eliminación. Actualiza la carpeta para comprobar su contenido.".into(),
+    )
+    };
+    let results = results.ok_or_else(invalid_result)?;
+    let mut count = 0_u32;
+    // WPD declares these as [out]; windows-rs 0.58 exposes const pointers.
+    unsafe { results.GetCount(std::ptr::addr_of_mut!(count))? };
+    if count as usize != expected {
+        return Err(invalid_result());
+    }
+    let mut completed = 0;
+    let mut first_error = None;
+    for index in 0..count {
+        let mut value = PROPVARIANT::new();
+        unsafe { results.GetAt(index, std::ptr::addr_of_mut!(value))? };
+        let raw = unsafe { &value.as_raw().Anonymous.Anonymous };
+        if raw.vt != VT_ERROR.0 {
+            return Err(invalid_result());
+        }
+        let status = HRESULT(unsafe { raw.Anonymous.scode });
+        if status.is_ok() {
+            completed += 1;
+        } else {
+            first_error.get_or_insert(status);
+        }
+    }
+    if let Some(error) = first_error {
+        return Err(crate::utils::errors::BExplorerError::Operation(format!(
+            "El dispositivo eliminó {completed} de {expected} elemento(s): {}. Actualiza la carpeta para comprobar su contenido.",
+            windows::core::Error::from_hresult(error),
+        )));
+    }
+    Ok(completed)
 }
 
 #[cfg(target_os = "windows")]

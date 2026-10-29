@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+mod content;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
@@ -10,8 +11,6 @@ use walkdir::WalkDir;
 
 const SNAPSHOT_FILE_INTERVAL: usize = 512;
 const SNAPSHOT_TIME_INTERVAL: Duration = Duration::from_millis(250);
-const CANDIDATE_SNAPSHOT_FILE_INTERVAL: usize = 4_096;
-const CANDIDATE_SNAPSHOT_TIME_INTERVAL: Duration = Duration::from_secs(2);
 const MINIMUM_PREFIX_LENGTH: usize = 3;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,7 +85,7 @@ fn scan_folder_impl(
     root: PathBuf,
     sender: Sender<DuplicateScanEvent>,
     cancel: Arc<AtomicBool>,
-    publish_candidate_snapshots: bool,
+    _publish_candidate_snapshots: bool,
     known_total: Option<usize>,
 ) {
     if !root.is_dir() {
@@ -97,36 +96,18 @@ fn scan_folder_impl(
         return;
     }
 
-    let total = if let Some(total) = known_total {
-        let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
-        total
-    } else {
-        let mut total = 0_usize;
-        for entry in WalkDir::new(&root)
-            .follow_links(false)
-            .follow_root_links(true)
-            .same_file_system(true)
-        {
-            if cancel.load(AtomicOrdering::Relaxed) {
-                let _ = sender.send(DuplicateScanEvent::Cancelled);
-                return;
-            }
-            if entry.is_ok_and(|entry| entry.file_type().is_file()) {
-                total += 1;
-                if total.is_multiple_of(SNAPSHOT_FILE_INTERVAL) {
-                    let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
-                }
-            }
-        }
-        let _ = sender.send(DuplicateScanEvent::Counting { files_found: total });
-        total
-    };
-
-    let mut files = Vec::with_capacity(total);
-    let mut scanned = 0_usize;
+    if cancel.load(AtomicOrdering::Relaxed) {
+        let _ = sender.send(DuplicateScanEvent::Cancelled);
+        return;
+    }
+    let _ = sender.send(DuplicateScanEvent::Counting {
+        files_found: known_total.unwrap_or(0),
+    });
+    let mut files = Vec::new();
     let mut skipped = 0_usize;
     let mut last_snapshot = Instant::now();
-    let mut last_candidate_snapshot = Instant::now();
+    // Gather names and metadata in one traversal. Content is verified once,
+    // after collection, instead of rehashing every growing preview snapshot.
     for entry in WalkDir::new(&root)
         .follow_links(false)
         .follow_root_links(true)
@@ -139,62 +120,63 @@ fn scan_folder_impl(
         let entry = match entry {
             Ok(entry) if entry.file_type().is_file() => entry,
             Ok(_) => continue,
+            Err(error) if error.depth() == 0 => {
+                let _ = sender.send(DuplicateScanEvent::Failed(error.to_string()));
+                return;
+            }
             Err(_) => {
                 skipped += 1;
                 continue;
             }
         };
-        scanned += 1;
-        let path = entry.into_path();
-        match scanned_file(&path) {
+        match scanned_file(entry.path()) {
             Ok(file) => files.push(file),
             Err(_) => skipped += 1,
         }
-
-        let should_publish = scanned.is_multiple_of(SNAPSHOT_FILE_INTERVAL)
-            || last_snapshot.elapsed() >= SNAPSHOT_TIME_INTERVAL;
-        if should_publish {
-            let should_refresh_candidates = publish_candidate_snapshots
-                && should_refresh_candidate_snapshot(scanned, last_candidate_snapshot.elapsed());
-            let duplicates = if should_refresh_candidates {
-                let Some(duplicates) = classify_duplicates_cancellable(&files, Some(&cancel))
-                else {
-                    let _ = sender.send(DuplicateScanEvent::Cancelled);
-                    return;
-                };
-                Some(duplicates)
-            } else {
-                None
-            };
-            let _ = sender.send(DuplicateScanEvent::Progress {
-                scanned,
-                total,
-                current_path: Some(path),
-                duplicates,
-                skipped,
-            });
-            last_snapshot = Instant::now();
-            if should_refresh_candidates {
-                last_candidate_snapshot = Instant::now();
+        if files.len().is_multiple_of(SNAPSHOT_FILE_INTERVAL)
+            || last_snapshot.elapsed() >= SNAPSHOT_TIME_INTERVAL
+        {
+            if sender
+                .send(DuplicateScanEvent::Counting {
+                    files_found: files.len(),
+                })
+                .is_err()
+            {
+                return;
             }
+            last_snapshot = Instant::now();
         }
     }
-
-    let Some(duplicates) = classify_duplicates_cancellable(&files, Some(&cancel)) else {
+    let total = files.len();
+    let mut last_progress = Instant::now() - SNAPSHOT_TIME_INTERVAL;
+    let result = classify_verified_duplicates(&files, &cancel, |processed, path| {
+        if processed.is_multiple_of(SNAPSHOT_FILE_INTERVAL)
+            || last_progress.elapsed() >= SNAPSHOT_TIME_INTERVAL
+        {
+            last_progress = Instant::now();
+            sender
+                .send(DuplicateScanEvent::Progress {
+                    scanned: processed,
+                    total,
+                    current_path: Some(path.to_path_buf()),
+                    duplicates: None,
+                    skipped,
+                })
+                .is_ok()
+        } else {
+            true
+        }
+    });
+    let Some(duplicates) = result else {
         let _ = sender.send(DuplicateScanEvent::Cancelled);
         return;
     };
     let _ = sender.send(DuplicateScanEvent::Finished {
-        scanned,
+        scanned: total,
         total,
         duplicates,
         skipped,
     });
-}
-
-fn should_refresh_candidate_snapshot(scanned: usize, elapsed: Duration) -> bool {
-    scanned.is_multiple_of(CANDIDATE_SNAPSHOT_FILE_INTERVAL)
-        || elapsed >= CANDIDATE_SNAPSHOT_TIME_INTERVAL
 }
 
 fn scanned_file(path: &Path) -> std::io::Result<ScannedFile> {
@@ -228,7 +210,161 @@ fn classify_duplicates(files: &[ScannedFile]) -> Vec<DuplicateFile> {
     classify_duplicates_cancellable(files, None).expect("uncancelled duplicate classification")
 }
 
+#[cfg(test)]
 fn classify_duplicates_cancellable(
+    files: &[ScannedFile],
+    cancel: Option<&AtomicBool>,
+) -> Option<Vec<DuplicateFile>> {
+    let never_cancel = AtomicBool::new(false);
+    classify_verified_duplicates(files, cancel.unwrap_or(&never_cancel), |_, _| true)
+}
+
+fn classify_verified_duplicates(
+    files: &[ScannedFile],
+    cancel: &AtomicBool,
+    mut progress: impl FnMut(usize, &Path) -> bool,
+) -> Option<Vec<DuplicateFile>> {
+    let mut result = classify_name_candidates_cancellable(files, Some(cancel))?;
+    let mut by_size = HashMap::<u64, usize>::new();
+    for file in files {
+        *by_size.entry(file.size).or_default() += 1;
+    }
+    let mut by_content = HashMap::<(u64, [u8; 16]), Vec<(usize, content::ContentStamp)>>::new();
+    for (index, file) in files.iter().enumerate() {
+        if cancel.load(AtomicOrdering::Relaxed) || !progress(index, &file.path) {
+            return None;
+        }
+        if by_size[&file.size] < 2 {
+            continue;
+        }
+        if let Ok(stamp) = content::fingerprint(&file.path, cancel)
+            && stamp.size == file.size
+            && stamp.modified == file.modified
+        {
+            by_content
+                .entry((stamp.size, stamp.digest))
+                .or_default()
+                .push((index, stamp));
+        }
+    }
+    let mut positions = result
+        .iter()
+        .enumerate()
+        .map(|(index, file)| (file.path.clone(), index))
+        .collect::<HashMap<_, _>>();
+    for mut candidates in by_content.into_values() {
+        candidates.sort_by(|(left, _), (right, _)| compare_file_age(&files[*left], &files[*right]));
+        // Multiple names for the same inode/file ID do not occupy duplicate
+        // storage and must not be offered as verified removable copies.
+        let mut seen_identities = HashSet::new();
+        candidates.retain(|(_, stamp)| seen_identities.insert(stamp.identity));
+        let mut classes = Vec::<Vec<(usize, content::ContentStamp)>>::new();
+        for candidate in candidates {
+            if cancel.load(AtomicOrdering::Relaxed) {
+                return None;
+            }
+            let matching = classes.iter().position(|class| {
+                let representative = &class[0];
+                candidate.1.identity != representative.1.identity
+                    && content::equal(
+                        &files[candidate.0].path,
+                        &files[representative.0].path,
+                        cancel,
+                    )
+                    .unwrap_or(false)
+            });
+            if let Some(class) = matching {
+                classes[class].push(candidate);
+            } else {
+                classes.push(vec![candidate]);
+            }
+        }
+        for class in classes.into_iter().filter(|class| class.len() > 1) {
+            for (position, (index, _)) in class.into_iter().enumerate() {
+                let file = &files[index];
+                let kind = if position == 0 {
+                    DuplicateKind::Original
+                } else {
+                    DuplicateKind::Exact
+                };
+                if let Some(&position) = positions.get(&file.path) {
+                    result[position].kind = kind;
+                } else {
+                    positions.insert(file.path.clone(), result.len());
+                    result.push(DuplicateFile {
+                        path: file.path.clone(),
+                        name: file.name.clone(),
+                        extension: file.extension.clone(),
+                        size: file.size,
+                        created: file.created,
+                        modified: file.modified,
+                        kind,
+                    });
+                }
+            }
+        }
+    }
+    if cancel.load(AtomicOrdering::Relaxed) {
+        return None;
+    }
+    result.sort_by(|left, right| {
+        left.extension
+            .cmp(&right.extension)
+            .then_with(|| compare_duplicate_age(left, right))
+    });
+    Some(result)
+}
+
+/// Validate the complete selection before any trash mutation. Exact matches
+/// must still have an equal, stable copy outside the selection.
+pub fn verify_delete_selection(
+    entries: &[DuplicateFile],
+    selected: &[PathBuf],
+) -> crate::utils::errors::Result<()> {
+    use crate::utils::errors::BExplorerError;
+    let selected_set = selected.iter().collect::<HashSet<_>>();
+    let cancel = AtomicBool::new(false);
+    let mut stamps = HashMap::new();
+    for path in selected {
+        let entry = entries
+            .iter()
+            .find(|entry| &entry.path == path)
+            .ok_or_else(|| {
+                BExplorerError::Operation(
+                    "The duplicate selection is no longer available; scan again".into(),
+                )
+            })?;
+        if entry.kind != DuplicateKind::Exact {
+            continue;
+        }
+        let stamp = content::fingerprint(path, &cancel)?;
+        let mut retained = false;
+        for keeper in entries
+            .iter()
+            .filter(|entry| !selected_set.contains(&entry.path) && entry.size == stamp.size)
+        {
+            let keeper_stamp = stamps
+                .entry(keeper.path.clone())
+                .or_insert_with(|| content::fingerprint(&keeper.path, &cancel).ok());
+            if keeper_stamp.as_ref().is_some_and(|keeper| {
+                keeper.digest == stamp.digest && keeper.identity != stamp.identity
+            }) && content::equal(path, &keeper.path, &cancel).unwrap_or(false)
+            {
+                retained = true;
+                break;
+            }
+        }
+        if !retained {
+            return Err(BExplorerError::Operation(format!(
+                "{} no longer has a verified copy outside the selection; scan again before deleting",
+                path.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn classify_name_candidates_cancellable(
     files: &[ScannedFile],
     cancel: Option<&AtomicBool>,
 ) -> Option<Vec<DuplicateFile>> {
@@ -324,11 +460,6 @@ fn classify_duplicates_cancellable(
             let file = &files[index];
             let kind = if index == original {
                 DuplicateKind::Original
-            } else if exact
-                .get(&(&*file.name, &*file.extension, file.size))
-                .is_some_and(|(_, count)| *count > 1)
-            {
-                DuplicateKind::Exact
             } else {
                 DuplicateKind::Possible
             };
@@ -497,12 +628,84 @@ mod tests {
 
     #[test]
     fn exact_duplicates_keep_the_oldest_as_original() {
-        let entries =
-            classify_duplicates(&[file("photo.jpg", 120, 20), file("photo.jpg", 120, 10)]);
+        let root = temporary_folder();
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("photo.jpg");
+        let second = root.join("renamed.jpg");
+        fs::write(&first, b"same content").unwrap();
+        fs::write(&second, b"same content").unwrap();
+        let mut first = scanned_file(&first).unwrap();
+        first.created = Some(UNIX_EPOCH + Duration::from_secs(20));
+        let mut second = scanned_file(&second).unwrap();
+        second.created = Some(UNIX_EPOCH + Duration::from_secs(10));
+        let entries = classify_duplicates(&[first, second]);
 
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].kind, DuplicateKind::Original);
         assert_eq!(entries[1].kind, DuplicateKind::Exact);
+        verify_delete_selection(&entries, &[entries[1].path.clone()]).unwrap();
+        assert!(
+            verify_delete_selection(
+                &entries,
+                &entries
+                    .iter()
+                    .map(|entry| entry.path.clone())
+                    .collect::<Vec<_>>()
+            )
+            .is_err()
+        );
+        fs::write(&entries[1].path, b"new contents").unwrap();
+        assert!(verify_delete_selection(&entries, &[entries[1].path.clone()]).is_err());
+        assert_eq!(fs::read(&entries[0].path).unwrap(), b"same content");
+        assert_eq!(fs::read(&entries[1].path).unwrap(), b"new contents");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn equal_name_and_size_with_different_bytes_are_only_possible() {
+        let root = temporary_folder();
+        fs::create_dir_all(root.join("one")).unwrap();
+        fs::create_dir_all(root.join("two")).unwrap();
+        let first = root.join("one/photo.jpg");
+        let second = root.join("two/photo.jpg");
+        fs::write(&first, b"first").unwrap();
+        fs::write(&second, b"other").unwrap();
+        let entries = classify_duplicates(&[
+            scanned_file(&first).unwrap(),
+            scanned_file(&second).unwrap(),
+        ]);
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.kind != DuplicateKind::Exact)
+        );
+        let possible = entries
+            .iter()
+            .find(|entry| entry.kind == DuplicateKind::Possible)
+            .unwrap();
+        verify_delete_selection(&entries, std::slice::from_ref(&possible.path)).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hardlinked_names_are_not_verified_duplicate_storage() {
+        let root = temporary_folder();
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("photo.jpg");
+        let second = root.join("photo copy.jpg");
+        fs::write(&first, b"same").unwrap();
+        fs::hard_link(&first, &second).unwrap();
+        let entries = classify_duplicates(&[
+            scanned_file(&first).unwrap(),
+            scanned_file(&second).unwrap(),
+        ]);
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.kind != DuplicateKind::Exact)
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -570,19 +773,14 @@ mod tests {
     }
 
     #[test]
-    fn candidate_snapshots_are_throttled_during_large_scans() {
-        assert!(!should_refresh_candidate_snapshot(
-            SNAPSHOT_FILE_INTERVAL,
-            SNAPSHOT_TIME_INTERVAL,
-        ));
-        assert!(should_refresh_candidate_snapshot(
-            CANDIDATE_SNAPSHOT_FILE_INTERVAL,
-            Duration::ZERO,
-        ));
-        assert!(should_refresh_candidate_snapshot(
-            1,
-            CANDIDATE_SNAPSHOT_TIME_INTERVAL,
-        ));
+    fn name_candidates_never_claim_verified_content() {
+        let files = [file("photo.jpg", 120, 10), file("photo.jpg", 120, 20)];
+        let candidates = classify_name_candidates_cancellable(&files, None).unwrap();
+        assert!(
+            candidates
+                .iter()
+                .all(|entry| entry.kind != DuplicateKind::Exact)
+        );
     }
 
     #[test]

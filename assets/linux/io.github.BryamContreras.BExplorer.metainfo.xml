@@ -25,6 +25,17 @@
   </categories>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="1.0.6" date="2026-10-29" type="development">
+      <description>
+        <p>File-operation safety, portable-device reliability, and bounded previews.</p>
+        <ul>
+          <li>Improved long-filename editing, transfer preparation, safe replacements, and MTP object handling.</li>
+          <li>Verified exact duplicate matches using file contents before automatic selection and removal.</li>
+          <li>Added native ZIP64 support and safer archive extraction, passwords, cancellation, and temporary-file handling.</li>
+          <li>Bounded image caches and previews and improved search, directory monitoring, and Linux helper cleanup.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.5" date="2026-07-31">
       <description>
         <p>Storage analysis, large-folder performance, keyboard navigation, and interface refinement update.</p>

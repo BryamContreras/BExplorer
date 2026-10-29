@@ -1,15 +1,12 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Read, Write};
-use std::os::fd::AsFd;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, mpsc};
-use std::thread;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
-use rustix::pipe::{PipeFlags, pipe_with};
 use wayland_backend::client::{Backend, ObjectId};
 use wayland_client::protocol::{
     wl_data_device::{self, WlDataDevice},
@@ -26,7 +23,9 @@ use wayland_sys::client::{wl_display, wl_proxy};
 
 use crate::utils::errors::{BExplorerError, Result};
 
-const FILE_DROP_MIMES: &[&str] = &["text/uri-list", "x-special/gnome-copied-files"];
+const MAX_DRAG_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PENDING_WRITES: usize = 8;
+const DRAG_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 thread_local! {
     static CONTEXT: RefCell<Option<WaylandDragContext>> = const { RefCell::new(None) };
@@ -50,11 +49,8 @@ struct WaylandDragState {
     pointers: HashMap<u32, WlPointer>,
     data_devices: HashMap<u32, WlDataDevice>,
     active_sources: Vec<WlDataSource>,
-    active_offer: Option<WlDataOffer>,
-    selection_offer: Option<WlDataOffer>,
-    undetermined_offers: Vec<WlDataOffer>,
-    pending_reads: Vec<PendingDropRead>,
-    pending_drops: Vec<Vec<PathBuf>>,
+    ignored_offers: Vec<WlDataOffer>,
+    pending_writes: Vec<PendingDragWrite>,
     last_button_serial: Option<(u32, u32)>,
 }
 
@@ -65,45 +61,18 @@ struct SeatData {
 
 #[derive(Clone, Debug)]
 struct DragPayload {
-    uri_list: String,
-    gnome_copied_files: String,
+    uri_list: Arc<str>,
+    gnome_copied_files: Arc<str>,
 }
 
 #[derive(Debug, Default)]
-struct OfferData {
-    mime_types: Mutex<Vec<String>>,
-    state: Mutex<OfferState>,
-}
+struct OfferData;
 
-#[derive(Debug)]
-enum OfferState {
-    Undetermined { source_actions: DndAction },
-    Drag(DragOfferState),
-    Selection,
-}
-
-impl Default for OfferState {
-    fn default() -> Self {
-        Self::Undetermined {
-            source_actions: DndAction::empty(),
-        }
-    }
-}
-
-#[derive(Debug)]
-struct DragOfferState {
-    serial: u32,
-    source_actions: DndAction,
-    selected_action: DndAction,
-    accepted_mime: Option<String>,
-    dropped: bool,
-    left: bool,
-}
-
-struct PendingDropRead {
-    offer: WlDataOffer,
-    receiver: mpsc::Receiver<std::io::Result<Vec<u8>>>,
-    started_at: Instant,
+struct PendingDragWrite {
+    file: fs::File,
+    contents: Arc<str>,
+    written: usize,
+    last_progress: Instant,
 }
 
 pub fn prepare(raw_display_handle: RawDisplayHandle, raw_window_handle: RawWindowHandle) {
@@ -219,7 +188,7 @@ pub fn poll_active_file_drag(
         };
         context.dispatch_pending()?;
         context.state.retain_active_sources();
-        Ok(!context.state.active_sources.is_empty())
+        Ok(!context.state.active_sources.is_empty() || !context.state.pending_writes.is_empty())
     })
 }
 
@@ -262,16 +231,12 @@ impl WaylandDragContext {
     }
 
     fn dispatch_pending(&mut self) -> Result<()> {
-        if self.state.poll_pending_reads() {
-            let _ = self.connection.flush();
-        }
+        self.state.poll_pending_writes();
         self.queue
             .dispatch_pending(&mut self.state)
             .map_err(|error| BExplorerError::Shell(format!("Wayland dispatch failed: {error}")))?;
         let _ = self.connection.flush();
-        if self.state.poll_pending_reads() {
-            let _ = self.connection.flush();
-        }
+        self.state.poll_pending_writes();
         Ok(())
     }
 
@@ -322,189 +287,37 @@ impl WaylandDragState {
         self.active_sources.retain(WlDataSource::is_alive);
     }
 
-    fn enter_offer(&mut self, offer: WlDataOffer, serial: u32) {
-        self.destroy_active_offer();
-        self.remove_undetermined_offer(&offer);
-        if self
-            .selection_offer
-            .as_ref()
-            .is_some_and(|selection| *selection == offer)
-        {
-            self.selection_offer = None;
+    fn discard_offer(&mut self, offer: WlDataOffer) {
+        self.ignored_offers.retain(|candidate| candidate != &offer);
+        if offer.is_alive() {
+            offer.destroy();
         }
-        set_offer_drag(&offer, serial);
-        if offer.version() >= 3 {
-            offer.set_actions(DndAction::Copy, DndAction::Copy);
-        }
-        self.active_offer = Some(offer);
-        crate::utils::log::info(format!("Wayland native drop entered with serial {serial}"));
-        self.accept_active_offer();
     }
 
-    fn destroy_active_offer(&mut self) {
-        if let Some(offer) = self.active_offer.take() {
-            crate::utils::log::info(format!(
-                "Wayland native drop active offer destroyed: {}",
-                offer_debug_id(&offer)
-            ));
-            if offer.is_alive() {
-                offer.destroy();
+    fn poll_pending_writes(&mut self) {
+        self.pending_writes.retain_mut(|pending| {
+            if pending.last_progress.elapsed() >= DRAG_WRITE_TIMEOUT {
+                return false;
             }
-        }
-    }
-
-    fn set_selection_offer(&mut self, offer: Option<WlDataOffer>) {
-        if let Some(offer) = offer.as_ref() {
-            self.remove_undetermined_offer(offer);
-            set_offer_selection(offer);
-        }
-        if let Some(previous) = self.selection_offer.take()
-            && offer.as_ref() != Some(&previous)
-            && previous.is_alive()
-        {
-            previous.destroy();
-        }
-        if let Some(offer) = offer.as_ref() {
-            crate::utils::log::info(format!(
-                "Wayland selection offer stored for later use: {}",
-                offer_debug_id(offer)
-            ));
-        }
-        self.selection_offer = offer;
-    }
-
-    fn track_data_offer(&mut self, offer: WlDataOffer) {
-        if self
-            .undetermined_offers
-            .iter()
-            .any(|candidate| candidate == &offer)
-        {
-            return;
-        }
-        crate::utils::log::info(format!(
-            "Wayland data offer announced: {}",
-            offer_debug_id(&offer)
-        ));
-        self.undetermined_offers.push(offer);
-    }
-
-    fn remove_undetermined_offer(&mut self, offer: &WlDataOffer) {
-        self.undetermined_offers
-            .retain(|candidate| candidate != offer);
-    }
-
-    fn accept_active_offer(&mut self) {
-        let Some(offer) = self.active_offer.as_ref() else {
-            return;
-        };
-        accept_offer_as_copy(offer);
-    }
-
-    fn receive_active_offer(&mut self, connection: &Connection) {
-        let Some(offer) = self.active_offer.take() else {
-            crate::utils::log::info("Wayland drop event arrived without an active offer");
-            return;
-        };
-        mark_offer_dropped(&offer);
-        let Some(mime_type) = file_drop_mime(&offer) else {
-            crate::utils::log::info("Wayland drop offer did not advertise file URI MIME types");
-            if offer.is_alive() {
-                offer.destroy();
-            }
-            return;
-        };
-
-        if let Some(serial) = offer_drag_serial(&offer) {
-            offer.accept(serial, Some(mime_type.clone()));
-        }
-        if offer.version() >= 3 {
-            offer.set_actions(DndAction::Copy, DndAction::Copy);
-        }
-
-        match receive_offer_pipe(&offer, mime_type) {
-            Ok(file) => {
-                crate::utils::log::info("Wayland native drop receive started");
-                let _ = connection.flush();
-                let (sender, receiver) = mpsc::channel();
-                thread::spawn(move || {
-                    let mut file = file;
-                    let mut data = Vec::new();
-                    let result = file.read_to_end(&mut data).map(|_| data);
-                    let _ = sender.send(result);
-                });
-                self.pending_reads.push(PendingDropRead {
-                    offer,
-                    receiver,
-                    started_at: Instant::now(),
-                });
-            }
-            Err(error) => {
-                crate::utils::log::error(format!("Wayland drop receive failed: {error}"));
-                if offer.is_alive() {
-                    offer.destroy();
-                }
-            }
-        }
-    }
-
-    fn leave_active_offer(&mut self) {
-        if let Some(offer) = self.active_offer.take() {
-            let should_destroy = mark_offer_left(&offer);
-            if should_destroy && offer.is_alive() {
-                offer.destroy();
-            }
-        }
-    }
-
-    fn poll_pending_reads(&mut self) -> bool {
-        let mut finalized_offer = false;
-        let mut index = 0;
-        while index < self.pending_reads.len() {
-            if self.pending_reads[index].started_at.elapsed() > Duration::from_secs(5) {
-                let read = self.pending_reads.remove(index);
-                crate::utils::log::error("Wayland drop read timed out");
-                finish_drop_offer(&read.offer);
-                finalized_offer = true;
-                continue;
-            }
-
-            match self.pending_reads[index].receiver.try_recv() {
-                Ok(Ok(data)) => {
-                    let read = self.pending_reads.remove(index);
-                    finish_drop_offer(&read.offer);
-                    finalized_offer = true;
-                    let text = String::from_utf8_lossy(&data);
-                    let paths = paths_from_uri_list(&text);
-                    if !paths.is_empty() {
-                        crate::utils::log::info(format!(
-                            "Wayland native drop received {} file path(s)",
-                            paths.len()
-                        ));
-                        self.pending_drops.push(paths);
-                    } else {
-                        crate::utils::log::info(
-                            "Wayland native drop data did not contain local paths",
-                        );
+            loop {
+                match pending
+                    .file
+                    .write(&pending.contents.as_bytes()[pending.written..])
+                {
+                    Ok(0) => return false,
+                    Ok(count) => {
+                        pending.written += count;
+                        pending.last_progress = Instant::now();
+                        if pending.written == pending.contents.len() {
+                            return false;
+                        }
                     }
-                }
-                Ok(Err(error)) => {
-                    let read = self.pending_reads.remove(index);
-                    crate::utils::log::error(format!("Wayland drop read failed: {error}"));
-                    finish_drop_offer(&read.offer);
-                    finalized_offer = true;
-                }
-                Err(mpsc::TryRecvError::Empty) => {
-                    index += 1;
-                }
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    let read = self.pending_reads.remove(index);
-                    crate::utils::log::error("Wayland drop read worker disconnected");
-                    finish_drop_offer(&read.offer);
-                    finalized_offer = true;
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => (),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return true,
+                    Err(_) => return false,
                 }
             }
-        }
-        finalized_offer
+        });
     }
 
     fn ensure_data_device(&mut self, seat_name: u32, qh: &QueueHandle<Self>) {
@@ -533,21 +346,26 @@ impl DragPayload {
         let mut gnome_copied_files = String::from("copy\n");
         for path in paths {
             let uri = file_uri(path)?;
+            if uri_list.len().saturating_add(uri.len() + 2) > MAX_DRAG_BYTES {
+                return Err(BExplorerError::Shell(
+                    "The dragged file list is too large".into(),
+                ));
+            }
             uri_list.push_str(&uri);
             uri_list.push_str("\r\n");
             gnome_copied_files.push_str(&uri);
             gnome_copied_files.push('\n');
         }
         Ok(Self {
-            uri_list,
-            gnome_copied_files,
+            uri_list: uri_list.into(),
+            gnome_copied_files: gnome_copied_files.into(),
         })
     }
 
-    fn data_for_mime(&self, mime: &str) -> Option<&str> {
+    fn data_for_mime(&self, mime: &str) -> Option<Arc<str>> {
         match mime {
-            "text/uri-list" => Some(&self.uri_list),
-            "x-special/gnome-copied-files" => Some(&self.gnome_copied_files),
+            "text/uri-list" => Some(self.uri_list.clone()),
+            "x-special/gnome-copied-files" => Some(self.gnome_copied_files.clone()),
             _ => None,
         }
     }
@@ -661,7 +479,7 @@ impl Dispatch<WlDataDeviceManager, ()> for WaylandDragState {
 
 impl Dispatch<WlDataDevice, SeatData> for WaylandDragState {
     wayland_client::event_created_child!(WaylandDragState, WlDataDevice, [
-        0 => (WlDataOffer, OfferData::default())
+        0 => (WlDataOffer, OfferData)
     ]);
 
     fn event(
@@ -669,36 +487,19 @@ impl Dispatch<WlDataDevice, SeatData> for WaylandDragState {
         _device: &WlDataDevice,
         event: wl_data_device::Event,
         _data: &SeatData,
-        connection: &Connection,
+        _connection: &Connection,
         _qh: &QueueHandle<Self>,
     ) {
+        // Iced's Smithay clipboard is the sole inbound file-drop receiver.
+        // This bridge only owns the seat serial and source of outbound drags.
+        // Discard its mirrored offers without requesting data or queuing a
+        // second copy operation.
         match event {
-            wl_data_device::Event::DataOffer { id } => {
-                state.track_data_offer(id);
+            wl_data_device::Event::DataOffer { id } => state.ignored_offers.push(id),
+            wl_data_device::Event::Enter {
+                id: Some(offer), ..
             }
-            wl_data_device::Event::Enter { serial, id, .. } => {
-                if let Some(offer) = id {
-                    state.enter_offer(offer, serial);
-                } else {
-                    crate::utils::log::info(format!(
-                        "Wayland native drop entered without data offer, serial {serial}"
-                    ));
-                }
-            }
-            wl_data_device::Event::Motion { .. } => {
-                state.accept_active_offer();
-            }
-            wl_data_device::Event::Drop => {
-                crate::utils::log::info("Wayland native drop event received");
-                state.receive_active_offer(connection);
-            }
-            wl_data_device::Event::Leave => {
-                crate::utils::log::info("Wayland native drop leave event received");
-                state.leave_active_offer();
-            }
-            wl_data_device::Event::Selection { id } => {
-                state.set_selection_offer(id);
-            }
+            | wl_data_device::Event::Selection { id: Some(offer) } => state.discard_offer(offer),
             _ => {}
         }
     }
@@ -706,64 +507,13 @@ impl Dispatch<WlDataDevice, SeatData> for WaylandDragState {
 
 impl Dispatch<WlDataOffer, OfferData> for WaylandDragState {
     fn event(
-        state: &mut Self,
-        offer: &WlDataOffer,
-        event: wl_data_offer::Event,
-        data: &OfferData,
-        _connection: &Connection,
-        _qh: &QueueHandle<Self>,
+        _: &mut Self,
+        _: &WlDataOffer,
+        _: wl_data_offer::Event,
+        _: &OfferData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
     ) {
-        match event {
-            wl_data_offer::Event::Offer { mime_type } => {
-                if let Ok(mut mime_types) = data.mime_types.lock() {
-                    crate::utils::log::info(format!(
-                        "Wayland offer {} advertised MIME {mime_type}",
-                        offer_debug_id(offer)
-                    ));
-                    mime_types.push(mime_type);
-                    if state
-                        .active_offer
-                        .as_ref()
-                        .is_some_and(|active| active == offer)
-                    {
-                        drop(mime_types);
-                        state.accept_active_offer();
-                    }
-                }
-            }
-            wl_data_offer::Event::Action {
-                dnd_action: WEnum::Value(action),
-            } => {
-                crate::utils::log::info(format!(
-                    "Wayland offer {} selected action {:?}",
-                    offer_debug_id(offer),
-                    action
-                ));
-                set_offer_selected_action(offer, action);
-            }
-            wl_data_offer::Event::SourceActions {
-                source_actions: WEnum::Value(actions),
-            } => {
-                crate::utils::log::info(format!(
-                    "Wayland offer {} source actions {:?}",
-                    offer_debug_id(offer),
-                    actions
-                ));
-                set_offer_source_actions(offer, actions);
-                if state
-                    .active_offer
-                    .as_ref()
-                    .is_some_and(|active| active == offer)
-                    && actions.contains(DndAction::Copy)
-                    && offer.version() >= 3
-                {
-                    offer.set_actions(DndAction::Copy, DndAction::Copy);
-                    crate::utils::log::info("Wayland native drop confirmed copy action");
-                    state.accept_active_offer();
-                }
-            }
-            _ => {}
-        }
     }
 }
 
@@ -786,8 +536,18 @@ impl Dispatch<WlDataSource, DragPayload> for WaylandDragState {
             wl_data_source::Event::Send { mime_type, fd } => {
                 crate::utils::log::info(format!("Wayland external drag is sending {mime_type}"));
                 if let Some(text) = data.data_for_mime(&mime_type) {
-                    let mut file = fs::File::from(fd);
-                    let _ = file.write_all(text.as_bytes());
+                    let file = fs::File::from(fd);
+                    let nonblocking = rustix::fs::fcntl_getfl(&file).and_then(|flags| {
+                        rustix::fs::fcntl_setfl(&file, flags | rustix::fs::OFlags::NONBLOCK)
+                    });
+                    if nonblocking.is_ok() && state.pending_writes.len() < MAX_PENDING_WRITES {
+                        state.pending_writes.push(PendingDragWrite {
+                            file,
+                            contents: text,
+                            written: 0,
+                            last_progress: Instant::now(),
+                        });
+                    }
                 }
             }
             wl_data_source::Event::Cancelled => {
@@ -822,204 +582,6 @@ fn wayland_display(raw_display_handle: RawDisplayHandle) -> Option<usize> {
     }
 }
 
-fn receive_offer_pipe(offer: &WlDataOffer, mime_type: String) -> std::io::Result<fs::File> {
-    let (readfd, writefd) = pipe_with(PipeFlags::CLOEXEC)?;
-    offer.receive(mime_type, writefd.as_fd());
-    drop(writefd);
-    Ok(fs::File::from(readfd))
-}
-
-fn set_offer_drag(offer: &WlDataOffer, serial: u32) {
-    let Some(data) = offer.data::<OfferData>() else {
-        return;
-    };
-    let Ok(mut state) = data.state.lock() else {
-        return;
-    };
-    let source_actions = match &*state {
-        OfferState::Undetermined { source_actions } => *source_actions,
-        OfferState::Drag(drag) => drag.source_actions,
-        OfferState::Selection => DndAction::empty(),
-    };
-    *state = OfferState::Drag(DragOfferState {
-        serial,
-        source_actions,
-        selected_action: DndAction::empty(),
-        accepted_mime: None,
-        dropped: false,
-        left: false,
-    });
-}
-
-fn set_offer_selection(offer: &WlDataOffer) {
-    let Some(data) = offer.data::<OfferData>() else {
-        return;
-    };
-    if let Ok(mut state) = data.state.lock() {
-        *state = OfferState::Selection;
-    }
-}
-
-fn set_offer_source_actions(offer: &WlDataOffer, actions: DndAction) {
-    let Some(data) = offer.data::<OfferData>() else {
-        return;
-    };
-    let Ok(mut state) = data.state.lock() else {
-        return;
-    };
-    match &mut *state {
-        OfferState::Undetermined { source_actions } => *source_actions = actions,
-        OfferState::Drag(drag) => drag.source_actions = actions,
-        OfferState::Selection => {}
-    }
-}
-
-fn set_offer_selected_action(offer: &WlDataOffer, action: DndAction) {
-    let Some(data) = offer.data::<OfferData>() else {
-        return;
-    };
-    let Ok(mut state) = data.state.lock() else {
-        return;
-    };
-    if let OfferState::Drag(drag) = &mut *state {
-        drag.selected_action = action;
-    }
-}
-
-fn mark_offer_dropped(offer: &WlDataOffer) {
-    let Some(data) = offer.data::<OfferData>() else {
-        return;
-    };
-    let Ok(mut state) = data.state.lock() else {
-        return;
-    };
-    if let OfferState::Drag(drag) = &mut *state {
-        drag.dropped = true;
-    }
-}
-
-fn mark_offer_left(offer: &WlDataOffer) -> bool {
-    let Some(data) = offer.data::<OfferData>() else {
-        return false;
-    };
-    let Ok(mut state) = data.state.lock() else {
-        return false;
-    };
-    match &mut *state {
-        OfferState::Drag(drag) => {
-            drag.left = true;
-            !drag.dropped
-        }
-        _ => false,
-    }
-}
-
-fn offer_drag_serial(offer: &WlDataOffer) -> Option<u32> {
-    offer.data::<OfferData>().and_then(|data| {
-        data.state.lock().ok().and_then(|state| match &*state {
-            OfferState::Drag(drag) => Some(drag.serial),
-            _ => None,
-        })
-    })
-}
-
-fn offer_accepted_mime(offer: &WlDataOffer) -> Option<String> {
-    offer.data::<OfferData>().and_then(|data| {
-        data.state.lock().ok().and_then(|state| match &*state {
-            OfferState::Drag(drag) => drag.accepted_mime.clone(),
-            _ => None,
-        })
-    })
-}
-
-fn set_offer_accepted_mime(offer: &WlDataOffer, mime_type: String) {
-    let Some(data) = offer.data::<OfferData>() else {
-        return;
-    };
-    let Ok(mut state) = data.state.lock() else {
-        return;
-    };
-    if let OfferState::Drag(drag) = &mut *state {
-        drag.accepted_mime = Some(mime_type);
-    }
-}
-
-fn accept_offer_as_copy(offer: &WlDataOffer) {
-    let Some(mime_type) = file_drop_mime(offer) else {
-        return;
-    };
-    let Some(serial) = offer_drag_serial(offer) else {
-        return;
-    };
-    let already_accepted = offer_accepted_mime(offer).as_deref() == Some(mime_type.as_str());
-    offer.accept(serial, Some(mime_type.clone()));
-    if offer.version() >= 3 {
-        offer.set_actions(DndAction::Copy, DndAction::Copy);
-    }
-    if already_accepted {
-        return;
-    }
-    set_offer_accepted_mime(offer, mime_type.clone());
-    crate::utils::log::info(format!("Wayland native drop accepted MIME {mime_type}"));
-}
-
-fn finish_drop_offer(offer: &WlDataOffer) {
-    if !offer.is_alive() {
-        return;
-    }
-    if offer.version() >= 3 {
-        if offer_selected_action_is_copy(offer) {
-            offer.finish();
-        } else {
-            crate::utils::log::info("Wayland native drop finished without negotiated copy action");
-        }
-    }
-    if offer.is_alive() {
-        offer.destroy();
-    }
-}
-
-fn offer_selected_action_is_copy(offer: &WlDataOffer) -> bool {
-    offer
-        .data::<OfferData>()
-        .and_then(|data| {
-            data.state.lock().ok().and_then(|state| match &*state {
-                OfferState::Drag(drag) => Some(drag.selected_action),
-                _ => None,
-            })
-        })
-        .is_some_and(|action| action.contains(DndAction::Copy))
-}
-
-fn offer_debug_id(offer: &WlDataOffer) -> String {
-    format!("{:?}", offer.id())
-}
-
-fn file_drop_mime(offer: &WlDataOffer) -> Option<String> {
-    let data = offer.data::<OfferData>()?;
-    let mime_types = data.mime_types.lock().ok()?;
-    FILE_DROP_MIMES
-        .iter()
-        .find(|mime| mime_types.iter().any(|offered| offered == **mime))
-        .map(|mime| (*mime).to_string())
-}
-
-fn paths_from_uri_list(text: &str) -> Vec<PathBuf> {
-    text.lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty()
-                || line.starts_with('#')
-                || line.eq_ignore_ascii_case("copy")
-                || line.eq_ignore_ascii_case("cut")
-            {
-                return None;
-            }
-            crate::platform::shell::path_from_file_uri(line).filter(|path| path.exists())
-        })
-        .collect()
-}
-
 fn file_uri(path: &Path) -> Result<String> {
     let path = fs::canonicalize(path).map_err(BExplorerError::Io)?;
     let mut uri = String::from("file://");
@@ -1038,20 +600,44 @@ fn file_uri(path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rustix::pipe::{PipeFlags, pipe_with};
 
     #[test]
-    fn parses_text_uri_list_drop() {
-        assert_eq!(
-            paths_from_uri_list("# comment\r\nfile:///tmp\r\n"),
-            vec![PathBuf::from("/tmp")]
-        );
+    fn blocked_drag_receiver_cannot_block_the_ui_thread() {
+        let (_reader, writer) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).unwrap();
+        let mut state = WaylandDragState::default();
+        state.pending_writes.push(PendingDragWrite {
+            file: fs::File::from(writer),
+            contents: "x".repeat(1024 * 1024).into(),
+            written: 0,
+            last_progress: Instant::now(),
+        });
+        let started = Instant::now();
+        state.poll_pending_writes();
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(state.pending_writes.len(), 1);
+        state.pending_writes[0].last_progress = Instant::now() - DRAG_WRITE_TIMEOUT;
+        state.poll_pending_writes();
+        assert!(state.pending_writes.is_empty());
     }
 
     #[test]
-    fn parses_gnome_copied_files_drop() {
-        assert_eq!(
-            paths_from_uri_list("copy\nfile:///tmp\n"),
-            vec![PathBuf::from("/tmp")]
-        );
+    fn nonblocking_drag_write_preserves_all_bytes() {
+        use std::io::Read;
+        let (reader, writer) = pipe_with(PipeFlags::CLOEXEC | PipeFlags::NONBLOCK).unwrap();
+        let mut reader = fs::File::from(reader);
+        let mut state = WaylandDragState::default();
+        state.pending_writes.push(PendingDragWrite {
+            file: fs::File::from(writer),
+            contents: "file:///tmp/test\r\n".into(),
+            written: 0,
+            last_progress: Instant::now(),
+        });
+        state.poll_pending_writes();
+        assert!(state.pending_writes.is_empty());
+        // The writer was closed on completion, so this does not wait for EOF.
+        let mut data = Vec::new();
+        reader.read_to_end(&mut data).unwrap();
+        assert_eq!(data, b"file:///tmp/test\r\n");
     }
 }

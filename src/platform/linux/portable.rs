@@ -1,10 +1,12 @@
 use std::collections::HashMap;
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock, TryLockError};
+use std::task::{Context, Poll, Wake, Waker};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -28,6 +30,9 @@ const PORTABLE_ROOT_OBJECT_ID: &str = "DEVICE";
 const GVFS_VOLUME_CACHE_TTL: Duration = Duration::from_secs(2);
 const GVFS_VOLUME_QUERY_TIMEOUT: Duration = Duration::from_millis(1_200);
 const GVFS_MOUNT_TIMEOUT: Duration = Duration::from_secs(4);
+const KIO_METHOD_TIMEOUT: Duration = Duration::from_secs(10);
+const KIO_ACCESS_TIMEOUT: Duration = Duration::from_secs(10);
+const KIO_TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 type KmtpFile = (u32, u32, u32, String, u64, i64, String);
 
@@ -47,9 +52,20 @@ struct KioObject {
 type GvfsVolumeCache = Option<(Instant, Vec<GvfsMtpVolume>)>;
 
 static KIO_MTP_ACCESS: OnceLock<Mutex<()>> = OnceLock::new();
+static KIO_QUARANTINE: OnceLock<Mutex<Option<QuarantinedKioTransfer>>> = OnceLock::new();
 static GVFS_PORTABLE_ICON_NAMES: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
 static GVFS_VOLUME_CACHE: OnceLock<Mutex<GvfsVolumeCache>> = OnceLock::new();
+#[cfg(test)]
 static THUMBNAIL_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+struct QuarantinedKioTransfer {
+    owner: String,
+    reply_serial: Option<u32>,
+    signals: zbus::proxy::SignalStream<'static>,
+    // Keep uncertain downloads private until the daemon finishes or its
+    // connection is replaced. The caller's destination is never exposed to it.
+    _download: Option<PrivateKioDownload>,
+}
 
 pub fn portable_devices() -> Vec<PortableDeviceInfo> {
     let gvfs_volumes = gvfs_mtp_volumes();
@@ -151,6 +167,40 @@ pub fn portable_delete_objects(device_id: &str, object_ids: &[String]) -> Result
     Err(unsupported_device(device_id))
 }
 
+/// Removes only the exported object, never new children added after a copy.
+pub fn portable_delete_exported_object(
+    device_id: &str,
+    object_id: &str,
+    is_folder: bool,
+) -> Result<()> {
+    if device_id.starts_with(KIO_DEVICE_PREFIX) {
+        // KIO only exposes path-based deleteObject, with no nonrecursive or
+        // stable-handle precondition. Retain the source after a completed copy
+        // rather than risk deleting an object/child introduced meanwhile.
+        return Err(BExplorerError::Operation("The copy completed, but KDE MTP cannot safely remove the original as part of Move. The original was kept; use a separate Delete action if you want to remove it.".into()));
+    }
+    if let Some(uri) = device_id.strip_prefix(GVFS_DEVICE_PREFIX) {
+        if object_id == PORTABLE_ROOT_OBJECT_ID
+            || decode_gvfs_object(object_id)?.as_os_str().is_empty()
+        {
+            return Err(BExplorerError::Operation(
+                "Cannot remove a portable storage root".into(),
+            ));
+        }
+        let path = gvfs_object_path(uri, object_id)?;
+        return remove_exported_gvfs_object(&path, is_folder).map_err(Into::into);
+    }
+    Err(unsupported_device(device_id))
+}
+
+fn remove_exported_gvfs_object(path: &Path, is_folder: bool) -> std::io::Result<()> {
+    if is_folder {
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    }
+}
+
 pub fn portable_download_file(device_id: &str, object_id: &str, target: &Path) -> Result<u64> {
     if let Some(device_path) = device_id.strip_prefix(KIO_DEVICE_PREFIX) {
         return kio_download_file(device_path, object_id, target);
@@ -160,9 +210,22 @@ pub fn portable_download_file(device_id: &str, object_id: &str, target: &Path) -
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        return fs::copy(source, target).map_err(Into::into);
+        return download_gvfs_file(&source, target);
     }
     Err(unsupported_device(device_id))
+}
+
+fn download_gvfs_file(source: &Path, target: &Path) -> Result<u64> {
+    let mut source = File::open(source)?;
+    // Preserve another process's file (including symlinks) if it appeared
+    // after the transfer queue reserved this destination name.
+    let mut target = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    let copied = std::io::copy(&mut source, &mut target)?;
+    target.sync_all()?;
+    Ok(copied)
 }
 
 pub fn portable_upload_file(
@@ -211,18 +274,34 @@ pub fn portable_device_thumbnail(
     if !allow_default_resource || max_bytes == 0 {
         return None;
     }
+    if device_id.starts_with(KIO_DEVICE_PREFIX)
+        && KIO_MTP_ACCESS
+            .get()
+            .is_some_and(|lock| lock.try_lock().is_err())
+    {
+        return None;
+    }
     let info = portable_device_object_info(device_id, object_id).ok()?;
     if info.is_folder || info.size.is_none_or(|size| size > max_bytes as u64) {
         return None;
     }
 
-    let sequence = THUMBNAIL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
-        "bexplorer-mtp-thumbnail-{}-{sequence}",
-        std::process::id()
-    ));
+    let directory = PrivateThumbnailDirectory::create().ok()?;
+    let path = directory.0.join("thumbnail");
     let cleanup = TemporaryDownload(path.clone());
-    portable_download_file(device_id, object_id, &path).ok()?;
+    if let Err(error) = portable_download_file(device_id, object_id, &path) {
+        if error.operation_may_continue()
+            && let Some(quarantine) = KIO_QUARANTINE.get()
+            && let Some(pending) = quarantine
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_mut()
+            && let Some(download) = pending._download.as_mut()
+        {
+            download._thumbnail_parent = Some(directory);
+        }
+        return None;
+    }
 
     let capacity = info.size.unwrap_or_default().min(max_bytes as u64) as usize;
     let mut bytes = Vec::with_capacity(capacity);
@@ -235,8 +314,10 @@ pub fn portable_device_thumbnail(
 }
 
 fn kio_portable_devices() -> Vec<PortableDeviceInfo> {
-    let _access = kio_access_lock();
-    let Some(connection) = Connection::session().ok() else {
+    let Ok(_access) = kio_access_lock() else {
+        return Vec::new();
+    };
+    let Some(connection) = kio_connection().ok() else {
         return Vec::new();
     };
     let Some(daemon) = kio_proxy(&connection, KIO_MTP_DAEMON_PATH, KIO_MTP_DAEMON_INTERFACE).ok()
@@ -277,7 +358,7 @@ fn kio_device_objects(
     device_path: &str,
     parent_object_id: &str,
 ) -> Result<Vec<PortableObjectInfo>> {
-    let _access = kio_access_lock();
+    let _access = kio_access_lock()?;
     let connection = kio_connection()?;
     if parent_object_id == PORTABLE_ROOT_OBJECT_ID {
         let device = kio_proxy(&connection, device_path, KIO_MTP_DEVICE_INTERFACE)
@@ -354,7 +435,7 @@ fn kio_object_info(device_path: &str, object_id: &str) -> Result<PortableObjectI
         });
     }
 
-    let _access = kio_access_lock();
+    let _access = kio_access_lock()?;
     let connection = kio_connection()?;
     let object = decode_kio_object(object_id)?;
     kio_validate_storage(&connection, device_path, &object.storage_path)?;
@@ -390,7 +471,7 @@ fn kio_object_info(device_path: &str, object_id: &str) -> Result<PortableObjectI
 }
 
 fn kio_delete_objects(device_path: &str, object_ids: &[String]) -> Result<usize> {
-    let _access = kio_access_lock();
+    let _access = kio_access_lock()?;
     let connection = kio_connection()?;
     let mut completed = 0;
     for object_id in object_ids {
@@ -417,7 +498,7 @@ fn kio_delete_objects(device_path: &str, object_ids: &[String]) -> Result<usize>
 }
 
 fn kio_download_file(device_path: &str, object_id: &str, target: &Path) -> Result<u64> {
-    let _access = kio_access_lock();
+    let _access = kio_access_lock()?;
     let connection = kio_connection()?;
     let object = decode_kio_object(object_id)?;
     kio_validate_storage(&connection, device_path, &object.storage_path)?;
@@ -429,7 +510,6 @@ fn kio_download_file(device_path: &str, object_id: &str, target: &Path) -> Resul
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    let file = File::create(target)?;
     let storage = kio_proxy(&connection, &object.storage_path, KIO_MTP_STORAGE_INTERFACE)
         .map_err(|error| kio_error("Could not open MTP storage", error))?;
     let metadata: KmtpFile = storage
@@ -440,13 +520,42 @@ fn kio_download_file(device_path: &str, object_id: &str, target: &Path) -> Resul
             "The MTP file no longer exists".into(),
         ));
     }
-    kio_transfer_file(
+    let parent = target
+        .parent()
+        .ok_or_else(|| BExplorerError::InvalidPath(target.into()))?;
+    let download = PrivateKioDownload::create(parent)?;
+    let file = File::create(&download.path)?;
+    let download = kio_transfer_file(
         &storage,
         "getFileToFileDescriptor",
         &file,
         &object.remote_path,
-    )?;
+        Some(download),
+    )?
+    .ok_or_else(|| BExplorerError::Operation("Missing private MTP download".into()))?;
+    if file.metadata()?.len() != metadata.4 {
+        return Err(BExplorerError::Operation(
+            "The MTP download size did not match the source".into(),
+        ));
+    }
+    file.sync_all()?;
+    // The provider has confirmed completion. Only now publish the finished
+    // file in the destination namespace, atomically on the same filesystem.
+    publish_kio_download(&download.path, target)?;
     Ok(metadata.4)
+}
+
+fn publish_kio_download(staging: &Path, target: &Path) -> std::io::Result<()> {
+    // Export callers reserve a new name; replacement jobs pass their own new
+    // staging name. Never replace an unrelated entry that appeared meanwhile.
+    rustix::fs::renameat_with(
+        rustix::fs::CWD,
+        staging,
+        rustix::fs::CWD,
+        target,
+        rustix::fs::RenameFlags::NOREPLACE,
+    )?;
+    Ok(())
 }
 
 fn kio_upload_file(
@@ -455,7 +564,7 @@ fn kio_upload_file(
     source: &Path,
     name: &str,
 ) -> Result<String> {
-    let _access = kio_access_lock();
+    let _access = kio_access_lock()?;
     let connection = kio_connection()?;
     let parent = decode_kio_object(parent_object_id)?;
     kio_validate_storage(&connection, device_path, &parent.storage_path)?;
@@ -463,26 +572,28 @@ fn kio_upload_file(
     let file = File::open(source)?;
     let storage = kio_proxy(&connection, &parent.storage_path, KIO_MTP_STORAGE_INTERFACE)
         .map_err(|error| kio_error("Could not open MTP storage", error))?;
-    kio_transfer_file(&storage, "sendFileFromFileDescriptor", &file, &destination)?;
+    kio_transfer_file(
+        &storage,
+        "sendFileFromFileDescriptor",
+        &file,
+        &destination,
+        None,
+    )?;
     Ok(encode_kio_object(&parent.storage_path, &destination))
 }
 
 fn kio_create_folder(device_path: &str, parent_object_id: &str, name: &str) -> Result<String> {
-    let _access = kio_access_lock();
+    let _access = kio_access_lock()?;
     let connection = kio_connection()?;
     let parent = decode_kio_object(parent_object_id)?;
     kio_validate_storage(&connection, device_path, &parent.storage_path)?;
     let destination = join_remote_path(&parent.remote_path, valid_child_name(name)?);
     let storage = kio_proxy(&connection, &parent.storage_path, KIO_MTP_STORAGE_INTERFACE)
         .map_err(|error| kio_error("Could not open MTP storage", error))?;
-    let id: u32 = storage
-        .call("createFolder", &destination)
+    let reply = storage
+        .call_method("createFolder", &destination)
         .map_err(|error| kio_error("Could not create the MTP folder", error))?;
-    if id == 0 {
-        return Err(BExplorerError::Operation(
-            "The MTP device did not create the folder".into(),
-        ));
-    }
+    kio_created_folder_id(&reply)?;
     Ok(encode_kio_object(&parent.storage_path, &destination))
 }
 
@@ -491,32 +602,253 @@ fn kio_transfer_file(
     method: &str,
     file: &File,
     remote_path: &str,
-) -> Result<()> {
-    let mut finished = storage
-        .receive_signal("copyFinished")
-        .map_err(|error| kio_error("Could not monitor the MTP transfer", error))?;
+    download: Option<PrivateKioDownload>,
+) -> Result<Option<PrivateKioDownload>> {
+    use iced::futures::StreamExt;
+    let owner = kio_service_owner(storage.connection())?
+        .ok_or_else(|| BExplorerError::Operation("The KDE MTP service is not available".into()))?;
+    // Bind the operation to one daemon connection, including its start reply
+    // and signals. A replacement owner cannot complete this daemon's job.
+    let storage = Proxy::new_owned(
+        storage.connection().clone(),
+        owner.clone(),
+        storage.path().to_owned(),
+        KIO_MTP_STORAGE_INTERFACE.to_owned(),
+    )
+    .map_err(|error| kio_error("Could not bind the KDE MTP service connection", error))?;
+    let mut signals = future_before_deadline(
+        storage.inner().receive_all_signals(),
+        Instant::now() + KIO_METHOD_TIMEOUT,
+    )
+    .ok_or_else(|| {
+        BExplorerError::Operation("Could not monitor the KDE MTP transfer in time".into())
+    })?
+    .map_err(|error| kio_error("Could not monitor the MTP transfer", error))?;
     let descriptor = Fd::from(file);
-    let result: i32 = storage
-        .call(method, &(descriptor, remote_path))
-        .map_err(|error| kio_error("Could not start the MTP transfer", error))?;
+    let reply = match storage.call_method(method, &(descriptor, remote_path)) {
+        Ok(reply) => reply,
+        Err(error) => {
+            quarantine_kio_transfer(owner, None, signals, download);
+            return Err(BExplorerError::OperationPending(format!(
+                "The MTP transfer start could not be confirmed; the KDE provider was quarantined: {error}"
+            )));
+        }
+    };
+    let reply_serial = reply.primary_header().serial_num().get();
+    let result: i32 = match reply.body().deserialize() {
+        Ok(result) => result,
+        Err(error) => {
+            quarantine_kio_transfer(owner, Some(reply_serial), signals, download);
+            return Err(BExplorerError::OperationPending(format!(
+                "Invalid MTP transfer start response: {error}"
+            )));
+        }
+    };
     if result != 0 {
         return Err(BExplorerError::Operation(format!(
             "The MTP transfer could not be started (code {result})"
         )));
     }
-    let message = finished.next().ok_or_else(|| {
-        BExplorerError::Operation("The MTP device disconnected during the transfer".into())
-    })?;
-    let result: i32 = message
-        .body()
-        .deserialize()
-        .map_err(|error| kio_error("Invalid MTP transfer response", error))?;
-    if result == 0 {
-        Ok(())
+    let mut last_progress = Instant::now();
+    let mut transferred = 0;
+    loop {
+        let Some(Some(message)) =
+            future_before_deadline(signals.next(), last_progress + KIO_TRANSFER_IDLE_TIMEOUT)
+        else {
+            quarantine_kio_transfer(owner, Some(reply_serial), signals, download);
+            return Err(kio_transfer_timeout());
+        };
+        if !signal_follows_reply(&message, reply_serial) {
+            continue;
+        }
+        match message.header().member().map(|member| member.as_str()) {
+            Some("copyProgress") => {
+                if let Ok((bytes, _total)) = message.body().deserialize::<(u64, u64)>()
+                    && bytes > transferred
+                {
+                    transferred = bytes;
+                    last_progress = Instant::now();
+                }
+            }
+            Some("copyFinished") => {
+                let result: i32 = match message.body().deserialize() {
+                    Ok(result) => result,
+                    Err(error) => {
+                        quarantine_kio_transfer(owner, Some(reply_serial), signals, download);
+                        return Err(BExplorerError::OperationPending(format!(
+                            "Invalid MTP transfer response: {error}"
+                        )));
+                    }
+                };
+                return if result == 0 {
+                    Ok(download)
+                } else {
+                    Err(BExplorerError::Operation(format!(
+                        "The MTP transfer failed (code {result})"
+                    )))
+                };
+            }
+            _ => {}
+        }
+    }
+}
+
+fn signal_follows_reply(message: &zbus::Message, reply_serial: u32) -> bool {
+    // The daemon processes transfers asynchronously after replying. Ignore
+    // signals buffered from an earlier operation/client before this reply.
+    (message
+        .primary_header()
+        .serial_num()
+        .get()
+        .wrapping_sub(reply_serial) as i32)
+        > 0
+}
+
+fn quarantine_kio_transfer(
+    owner: String,
+    reply_serial: Option<u32>,
+    signals: zbus::proxy::SignalStream<'static>,
+    download: Option<PrivateKioDownload>,
+) {
+    *KIO_QUARANTINE
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(QuarantinedKioTransfer {
+        owner,
+        reply_serial,
+        signals,
+        _download: download,
+    });
+}
+
+fn kio_service_owner(connection: &Connection) -> Result<Option<String>> {
+    let bus = zbus::blocking::fdo::DBusProxy::new(connection)
+        .map_err(|error| kio_error("Could not inspect the KDE MTP service", error))?;
+    match bus.get_name_owner(
+        KIO_MTP_SERVICE
+            .try_into()
+            .map_err(|error| kio_error("Invalid KDE MTP service name", error))?,
+    ) {
+        Ok(owner) => Ok(Some(owner.to_string())),
+        Err(zbus::fdo::Error::NameHasNoOwner(_)) => Ok(None),
+        Err(error) => Err(kio_error(
+            "Could not inspect the KDE MTP service owner",
+            error,
+        )),
+    }
+}
+
+fn drain_quarantined_signals<S: iced::futures::Stream<Item = zbus::Message> + Unpin>(
+    signals: &mut S,
+    reply_serial: Option<u32>,
+) -> bool {
+    let Some(reply_serial) = reply_serial else {
+        return false;
+    };
+    let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    for _ in 0..64 {
+        match std::pin::Pin::new(&mut *signals).poll_next(&mut context) {
+            Poll::Ready(Some(message))
+                if signal_follows_reply(&message, reply_serial)
+                    && message
+                        .header()
+                        .member()
+                        .is_some_and(|member| member.as_str() == "copyFinished") =>
+            {
+                return true;
+            }
+            Poll::Ready(Some(_)) => (),
+            // A closed stream is not itself proof the transfer finished.
+            // Check the bus owner separately before releasing quarantine.
+            Poll::Ready(None) | Poll::Pending => return false,
+        }
+    }
+    false
+}
+
+fn check_kio_quarantine() -> Result<()> {
+    let Some(quarantine) = KIO_QUARANTINE.get() else {
+        return Ok(());
+    };
+    let mut quarantine = quarantine
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(pending) = quarantine.as_mut() else {
+        return Ok(());
+    };
+    let finished = drain_quarantined_signals(&mut pending.signals, pending.reply_serial);
+    let owner = if finished {
+        None
     } else {
-        Err(BExplorerError::Operation(format!(
-            "The MTP transfer failed (code {result})"
-        )))
+        // A bus failure does not prove that the external writer stopped.
+        match kio_connection().and_then(|connection| kio_service_owner(&connection)) {
+            Ok(owner) => owner,
+            Err(_) => return Err(kio_transfer_timeout()),
+        }
+    };
+    if finished || owner.as_deref() != Some(pending.owner.as_str()) {
+        *quarantine = None;
+        return Ok(());
+    }
+    Err(kio_transfer_timeout())
+}
+
+fn kio_created_folder_id(reply: &zbus::Message) -> Result<u32> {
+    let body = reply.body();
+    // Stable KIO releases return uint32; newer releases use int32 to expose
+    // existing-file/folder errors. Inspect the reply instead of retrying an
+    // operation which may already have created the folder.
+    let id = match body.signature().to_string().as_str() {
+        "u" => i64::from(
+            body.deserialize::<u32>()
+                .map_err(|error| kio_error("Invalid MTP folder response", error))?,
+        ),
+        "i" => i64::from(
+            body.deserialize::<i32>()
+                .map_err(|error| kio_error("Invalid MTP folder response", error))?,
+        ),
+        _ => {
+            return Err(BExplorerError::Operation(
+                "Invalid MTP folder response signature".into(),
+            ));
+        }
+    };
+    if id <= 0 {
+        return Err(BExplorerError::Operation(format!(
+            "The MTP device did not create the folder (code {id})"
+        )));
+    }
+    Ok(id as u32)
+}
+
+fn kio_transfer_timeout() -> BExplorerError {
+    BExplorerError::OperationPending("The KDE MTP service stopped responding. Further KDE MTP operations are blocked until that transfer finishes or the provider reconnects. Your source and destination were preserved.".into())
+}
+
+struct ThreadWake(thread::Thread);
+impl Wake for ThreadWake {
+    fn wake(self: Arc<Self>) {
+        self.0.unpark();
+    }
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.0.unpark();
+    }
+}
+
+fn future_before_deadline<F: std::future::Future>(
+    future: F,
+    deadline: Instant,
+) -> Option<F::Output> {
+    let waker = Waker::from(Arc::new(ThreadWake(thread::current())));
+    let mut context = Context::from_waker(&waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        let remaining = deadline.checked_duration_since(Instant::now())?;
+        if let Poll::Ready(value) = future.as_mut().poll(&mut context) {
+            return Some(value);
+        }
+        thread::park_timeout(remaining);
     }
 }
 
@@ -543,7 +875,7 @@ fn kio_validate_storage(
 }
 
 fn kio_device_name(device_path: &str) -> Option<String> {
-    let _access = kio_access_lock();
+    let _access = kio_access_lock().ok()?;
     let connection = kio_connection().ok()?;
     kio_proxy(&connection, device_path, KIO_MTP_DEVICE_INTERFACE)
         .ok()?
@@ -552,7 +884,8 @@ fn kio_device_name(device_path: &str) -> Option<String> {
 }
 
 fn kio_connection() -> Result<Connection> {
-    Connection::session()
+    zbus::blocking::connection::Builder::session()
+        .and_then(|builder| builder.method_timeout(KIO_METHOD_TIMEOUT).build())
         .map_err(|error| kio_error("Could not connect to the desktop session bus", error))
 }
 
@@ -564,11 +897,31 @@ fn kio_proxy<'a>(
     Proxy::new(connection, KIO_MTP_SERVICE, path, interface)
 }
 
-fn kio_access_lock() -> MutexGuard<'static, ()> {
-    KIO_MTP_ACCESS
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+fn kio_access_lock() -> Result<MutexGuard<'static, ()>> {
+    let guard = lock_before_deadline(
+        KIO_MTP_ACCESS.get_or_init(|| Mutex::new(())),
+        Instant::now() + KIO_ACCESS_TIMEOUT,
+    )?;
+    check_kio_quarantine()?;
+    Ok(guard)
+}
+
+fn lock_before_deadline<T>(lock: &Mutex<T>, deadline: Instant) -> Result<MutexGuard<'_, T>> {
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(error)) => return Ok(error.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(5))
+            }
+            Err(TryLockError::WouldBlock) => {
+                return Err(BExplorerError::Operation(
+                    "The KDE MTP device is busy; try again after its current operation finishes"
+                        .into(),
+                ));
+            }
+        }
+    }
 }
 
 fn kio_error(context: &str, error: impl std::fmt::Display) -> BExplorerError {
@@ -1099,6 +1452,65 @@ fn unsupported_device(device_id: &str) -> BExplorerError {
 
 struct TemporaryDownload(PathBuf);
 
+struct PrivateThumbnailDirectory(PathBuf);
+
+struct PrivateKioDownload {
+    path: PathBuf,
+    _directory: PrivateThumbnailDirectory,
+    _thumbnail_parent: Option<PrivateThumbnailDirectory>,
+}
+
+impl PrivateKioDownload {
+    fn create(parent: &Path) -> std::io::Result<Self> {
+        let directory = PrivateThumbnailDirectory::create_in(parent)?;
+        Ok(Self {
+            path: directory.0.join("payload"),
+            _directory: directory,
+            _thumbnail_parent: None,
+        })
+    }
+}
+
+impl Drop for PrivateKioDownload {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+impl PrivateThumbnailDirectory {
+    fn create() -> std::io::Result<Self> {
+        Self::create_in(&std::env::temp_dir())
+    }
+
+    fn create_in(parent: &Path) -> std::io::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        for _ in 0..16 {
+            let mut random = [0_u8; 16];
+            getrandom::fill(&mut random)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let name = random
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            let path = parent.join(format!(".bexplorer-mtp-private-{name}"));
+            match fs::DirBuilder::new().mode(0o700).create(&path) {
+                Ok(()) => return Ok(Self(path)),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::other(
+            "Could not reserve a private MTP thumbnail directory",
+        ))
+    }
+}
+
+impl Drop for PrivateThumbnailDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.0);
+    }
+}
+
 impl Drop for TemporaryDownload {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
@@ -1108,6 +1520,159 @@ impl Drop for TemporaryDownload {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn transfer_signal(member: &str, serial: u32) -> zbus::Message {
+        zbus::Message::signal("/org/bexplorer/Test", "org.bexplorer.Test", member)
+            .unwrap()
+            .serial(std::num::NonZeroU32::new(serial).unwrap())
+            .build(&0_i32)
+            .unwrap()
+    }
+
+    #[test]
+    fn delayed_finished_signal_cannot_release_a_different_transfer() {
+        use iced::futures::stream;
+        let mut older = stream::iter([transfer_signal("copyFinished", 9)]);
+        assert!(!drain_quarantined_signals(&mut older, Some(10)));
+        let mut progress_only = stream::iter([transfer_signal("copyProgress", 11)]);
+        assert!(!drain_quarantined_signals(&mut progress_only, Some(10)));
+        let mut completed = stream::iter([transfer_signal("copyFinished", 11)]);
+        assert!(drain_quarantined_signals(&mut completed, Some(10)));
+        let mut unknown_start = stream::iter([transfer_signal("copyFinished", 11)]);
+        assert!(!drain_quarantined_signals(&mut unknown_start, None));
+        assert!(signal_follows_reply(
+            &transfer_signal("copyFinished", 2),
+            u32::MAX - 1
+        ));
+    }
+
+    #[test]
+    fn uncertain_download_never_publishes_or_removes_the_destination() {
+        let parent = PrivateThumbnailDirectory::create().unwrap();
+        let destination = parent.0.join("existing.bin");
+        fs::write(&destination, b"original").unwrap();
+        let pending = PrivateKioDownload::create(&parent.0).unwrap();
+        fs::write(&pending.path, b"partial").unwrap();
+        assert_eq!(fs::read(&destination).unwrap(), b"original");
+        let path = pending.path.clone();
+        drop(pending);
+        assert!(!path.exists());
+        assert_eq!(fs::read(&destination).unwrap(), b"original");
+        fs::remove_file(destination).unwrap();
+    }
+
+    #[test]
+    fn completed_kio_download_does_not_replace_a_racing_destination() {
+        let parent = PrivateThumbnailDirectory::create().unwrap();
+        let pending = PrivateKioDownload::create(&parent.0).unwrap();
+        fs::write(&pending.path, b"downloaded").unwrap();
+        let target = parent.0.join("result.bin");
+        fs::write(&target, b"other application").unwrap();
+        assert_eq!(
+            publish_kio_download(&pending.path, &target)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"other application");
+        fs::remove_file(&target).unwrap();
+        publish_kio_download(&pending.path, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"downloaded");
+        fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn gvfs_download_does_not_truncate_an_existing_destination() {
+        let parent = PrivateThumbnailDirectory::create().unwrap();
+        let source = parent.0.join("source.bin");
+        let target = parent.0.join("result.bin");
+        fs::write(&source, b"downloaded").unwrap();
+        fs::write(&target, b"other application").unwrap();
+        assert!(download_gvfs_file(&source, &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"other application");
+        fs::remove_file(&target).unwrap();
+        assert_eq!(download_gvfs_file(&source, &target).unwrap(), 10);
+        assert_eq!(fs::read(&target).unwrap(), b"downloaded");
+        fs::remove_file(source).unwrap();
+        fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn gvfs_move_cleanup_preserves_children_added_after_export() {
+        let parent = PrivateThumbnailDirectory::create().unwrap();
+        let folder = parent.0.join("source");
+        fs::create_dir(&folder).unwrap();
+        let new_child = folder.join("added-after-copy.txt");
+        fs::write(&new_child, b"keep").unwrap();
+        assert!(remove_exported_gvfs_object(&folder, true).is_err());
+        assert_eq!(fs::read(&new_child).unwrap(), b"keep");
+        remove_exported_gvfs_object(&new_child, false).unwrap();
+        remove_exported_gvfs_object(&folder, true).unwrap();
+    }
+
+    #[test]
+    fn portable_thumbnail_temporary_directory_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = PrivateThumbnailDirectory::create().unwrap();
+        assert_eq!(
+            fs::metadata(&directory.0).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let path = directory.0.clone();
+        drop(directory);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn stalled_kio_signal_wait_expires_without_a_reader_thread() {
+        let started = Instant::now();
+        assert!(
+            future_before_deadline(
+                std::future::pending::<()>(),
+                started + Duration::from_millis(30)
+            )
+            .is_none()
+        );
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(
+            future_before_deadline(
+                std::future::ready(42),
+                Instant::now() + Duration::from_secs(1)
+            ),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn busy_kio_access_expires_instead_of_waiting_forever() {
+        let mutex = Mutex::new(());
+        let guard = mutex.lock().unwrap();
+        assert!(lock_before_deadline(&mutex, Instant::now() + Duration::from_millis(20)).is_err());
+        drop(guard);
+        assert!(lock_before_deadline(&mutex, Instant::now() + Duration::from_secs(1)).is_ok());
+    }
+
+    #[test]
+    fn accepts_both_kio_folder_reply_versions_and_reports_existing_items() {
+        // Build actual D-Bus messages so this exercises signature validation.
+        let unsigned =
+            zbus::Message::signal("/org/bexplorer/Test", "org.bexplorer.Test", "Created")
+                .unwrap()
+                .build(&42_u32)
+                .unwrap();
+        let signed = zbus::Message::signal("/org/bexplorer/Test", "org.bexplorer.Test", "Created")
+            .unwrap()
+            .build(&42_i32)
+            .unwrap();
+        let existing =
+            zbus::Message::signal("/org/bexplorer/Test", "org.bexplorer.Test", "Created")
+                .unwrap()
+                .build(&(-1_i32))
+                .unwrap();
+        assert_eq!(kio_created_folder_id(&unsigned).unwrap(), 42);
+        assert_eq!(kio_created_folder_id(&signed).unwrap(), 42);
+        assert!(kio_created_folder_id(&existing).is_err());
+    }
 
     #[test]
     fn parses_gio_mtp_volumes_and_ignores_regular_storage() {

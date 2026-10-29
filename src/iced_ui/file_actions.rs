@@ -440,7 +440,19 @@ impl BExplorerIced {
             );
 
             thread::spawn(move || {
-                transfer_queue::run_transfer(worker_job, tx, worker_control);
+                let job_id = worker_job.id;
+                let failure_tx = tx.clone();
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    transfer_queue::run_transfer(worker_job, tx, worker_control);
+                }))
+                .is_err()
+                {
+                    let _ = failure_tx.send(TransferMessage::Failed {
+                        job_id,
+                        error: "El proceso de transferencia terminó inesperadamente.".into(),
+                        permission_denied: false,
+                    });
+                }
             });
         }
     }
@@ -513,6 +525,7 @@ impl BExplorerIced {
                     error,
                     permission_denied,
                 } => {
+                    crate::utils::log::error(format!("Transfer {job_id} failed: {error}"));
                     let active = self.active_transfers.remove(&job_id);
                     let can_elevate =
                         permission_denied && cfg!(any(target_os = "windows", target_os = "linux"));
@@ -1764,8 +1777,21 @@ impl BExplorerIced {
         let mut messages = Vec::new();
         for id in self.active_archives.keys().copied().collect::<Vec<_>>() {
             if let Some(active) = self.active_archives.get(&id) {
-                while let Ok(message) = active.receiver.try_recv() {
-                    messages.push((id, message));
+                loop {
+                    match active.receiver.try_recv() {
+                        Ok(message) => messages.push((id, message)),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            messages.push((
+                                id,
+                                ArchiveProgressMsg::Finished(Err(
+                                    "El proceso de archivos comprimidos terminó inesperadamente."
+                                        .into(),
+                                )),
+                            ));
+                            break;
+                        }
+                    }
                 }
             }
         }

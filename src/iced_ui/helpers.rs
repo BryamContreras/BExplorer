@@ -14,13 +14,149 @@ pub(super) async fn load_entries(
     path: Option<PathBuf>,
     show_hidden: bool,
 ) -> LoadResult {
-    let entries =
-        run_blocking_file_operation(move || explorer::list_entries(path.as_deref(), show_hidden))
-            .await;
+    let portable =
+        cfg!(target_os = "windows") && path.as_deref().is_some_and(explorer::is_portable_path);
+    let operation =
+        run_blocking_file_operation(move || explorer::list_entries(path.as_deref(), show_hidden));
+    let entries = if portable {
+        with_file_operation_timeout(
+            operation,
+            Duration::from_secs(30),
+            "El dispositivo móvil no respondió. Comprueba que esté conectado y desbloqueado, y actualiza la carpeta.",
+        ).await
+    } else {
+        operation.await
+    };
     LoadResult {
         pane,
         request_id,
         entries,
+    }
+}
+
+async fn with_file_operation_timeout<T>(
+    operation: impl std::future::Future<Output = Result<T, String>>,
+    timeout: Duration,
+    message: &'static str,
+) -> Result<T, String> {
+    use iced::futures::future::{Either, select};
+
+    let (stop_timer, stopped) = mpsc::channel::<()>();
+    let (expired, timer) = iced::futures::channel::oneshot::channel();
+    thread::spawn(move || {
+        if matches!(
+            stopped.recv_timeout(timeout),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ) {
+            let _ = expired.send(());
+        }
+    });
+    let result = match select(Box::pin(operation), timer).await {
+        Either::Left((result, _)) => result,
+        Either::Right((_, _)) => Err(message.into()),
+    };
+    // Cancel the timer immediately when a folder load finishes normally.
+    drop(stop_timer);
+    result
+}
+
+#[cfg(test)]
+mod file_operation_timeout_tests {
+    use super::*;
+
+    #[test]
+    fn an_unresponsive_device_does_not_keep_the_folder_loading_forever() {
+        let result = iced::futures::executor::block_on(with_file_operation_timeout(
+            iced::futures::future::pending::<Result<(), String>>(),
+            Duration::from_millis(5),
+            "device did not respond",
+        ));
+        assert_eq!(result, Err("device did not respond".into()));
+    }
+
+    #[test]
+    fn completed_device_operations_preserve_their_result() {
+        let result = iced::futures::executor::block_on(with_file_operation_timeout(
+            async { Ok(7) },
+            Duration::from_millis(5),
+            "timeout",
+        ));
+        assert_eq!(result, Ok(7));
+    }
+
+    #[test]
+    fn a_panicking_preview_does_not_kill_the_worker_pool() {
+        let failed =
+            iced::futures::executor::block_on(run_preview_operation(|| panic!("fixture panic")));
+        assert!(failed.is_err());
+        assert_eq!(
+            iced::futures::executor::block_on(run_preview_operation(|| 42)),
+            Ok(42)
+        );
+    }
+
+    #[test]
+    fn canceled_and_overlapping_network_probes_do_not_run_again() {
+        let cancel = AtomicBool::new(true);
+        let result: Vec<u8> = network_probe(&cancel, "canceled-test".into(), || panic!("canceled"));
+        assert!(result.is_empty());
+        let result = network_probe(&AtomicBool::new(false), "overlapping-test".into(), || {
+            let nested: Vec<u8> =
+                network_probe(&AtomicBool::new(false), "overlapping-test".into(), || {
+                    panic!("duplicate")
+                });
+            assert!(nested.is_empty());
+            vec![7]
+        });
+        assert_eq!(result, vec![7]);
+        assert_eq!(
+            network_probe(&AtomicBool::new(false), "overlapping-test".into(), || vec![
+                8
+            ]),
+            vec![8]
+        );
+    }
+
+    #[test]
+    fn overlapping_network_requests_share_the_result_instead_of_showing_an_empty_list() {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let owner = thread::spawn(move || {
+            network_probe(&AtomicBool::new(false), "shared-result-test".into(), || {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                vec![42_u8]
+            })
+        });
+        entered_rx.recv().unwrap();
+        let waiter = thread::spawn(|| {
+            network_probe(
+                &AtomicBool::new(false),
+                "shared-result-test".into(),
+                Vec::<u8>::new,
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let coalesced = loop {
+            let waiting = ACTIVE_NETWORK_PROBES
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .get("shared-result-test")
+                .is_some_and(|entry| Arc::strong_count(entry) >= 3);
+            if waiting {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::yield_now();
+        };
+        release_tx.send(()).unwrap();
+        assert_eq!(owner.join().unwrap(), vec![42]);
+        assert_eq!(waiter.join().unwrap(), vec![42]);
+        assert!(coalesced);
     }
 }
 
@@ -42,6 +178,54 @@ where
         .unwrap_or_else(|_| Err(String::from("File operation worker stopped unexpectedly")))
 }
 
+/// Keep decoding and slow preview I/O off the async executor, with a fixed
+/// number of workers. Dropped requests are skipped before doing any I/O.
+pub(super) async fn run_preview_operation<T: Send + 'static>(
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    type Work = Box<dyn FnOnce() + Send>;
+    use iced::futures::{SinkExt, StreamExt};
+    static POOL: std::sync::OnceLock<
+        iced::futures::lock::Mutex<iced::futures::channel::mpsc::Sender<Work>>,
+    > = std::sync::OnceLock::new();
+    let pool = POOL.get_or_init(|| {
+        let (tx, rx) = iced::futures::channel::mpsc::channel::<Work>(128);
+        let rx = Arc::new(std::sync::Mutex::new(rx));
+        for _ in 0..4 {
+            let rx = Arc::clone(&rx);
+            thread::spawn(move || {
+                loop {
+                    let work = iced::futures::executor::block_on(
+                        rx.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .next(),
+                    );
+                    match work {
+                        Some(work) => work(),
+                        None => break,
+                    }
+                }
+            });
+        }
+        iced::futures::lock::Mutex::new(tx)
+    });
+    let (tx, rx) = iced::futures::channel::oneshot::channel();
+    pool.lock()
+        .await
+        .send(Box::new(move || {
+            if tx.is_canceled() {
+                return;
+            }
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+                .map_err(|_| "Preview worker panicked".to_owned());
+            let _ = tx.send(result);
+        }))
+        .await
+        .map_err(|_| "Preview worker stopped".to_owned())?;
+    rx.await
+        .unwrap_or_else(|_| Err("Preview worker stopped".to_owned()))
+}
+
 pub(super) async fn delay(duration: Duration) {
     let (sender, receiver) = iced::futures::channel::oneshot::channel();
     thread::spawn(move || {
@@ -49,6 +233,72 @@ pub(super) async fn delay(duration: Duration) {
         let _ = sender.send(());
     });
     let _ = receiver.await;
+}
+
+struct SharedNetworkProbe {
+    owner: thread::ThreadId,
+    result: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>>,
+    ready: std::sync::Condvar,
+}
+static ACTIVE_NETWORK_PROBES: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, Arc<SharedNetworkProbe>>>,
+> = std::sync::OnceLock::new();
+
+pub(super) fn network_probe<T: Default + Clone + Send + 'static>(
+    cancel: &AtomicBool,
+    key: String,
+    probe: impl FnOnce() -> T,
+) -> T {
+    let active = ACTIVE_NETWORK_PROBES.get_or_init(Default::default);
+    if cancel.load(AtomicOrdering::Relaxed) {
+        return T::default();
+    }
+    let mut keys = active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(shared) = keys.get(&key).cloned() {
+        drop(keys);
+        // Avoid recursive waits while allowing a newer request to reuse the
+        // result of a probe that an older request has already started.
+        if shared.owner == thread::current().id() {
+            return T::default();
+        }
+        let mut result = shared
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if cancel.load(AtomicOrdering::Relaxed) {
+                return T::default();
+            }
+            if let Some(result) = &*result {
+                return result.downcast_ref::<T>().cloned().unwrap_or_default();
+            }
+            result = shared
+                .ready
+                .wait_timeout(result, Duration::from_millis(50))
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .0;
+        }
+    }
+    let shared = Arc::new(SharedNetworkProbe {
+        owner: thread::current().id(),
+        result: std::sync::Mutex::new(None),
+        ready: std::sync::Condvar::new(),
+    });
+    keys.insert(key.clone(), Arc::clone(&shared));
+    drop(keys);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(probe)).unwrap_or_default();
+    *shared
+        .result
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(result.clone()));
+    shared.ready.notify_all();
+    active
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&key);
+    result
 }
 
 pub(super) fn is_mountable_disk_image_entry(entry: &FileEntry) -> bool {

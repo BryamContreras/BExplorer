@@ -57,6 +57,10 @@ impl BExplorerIced {
                     .as_deref()
                     .is_some_and(explorer::is_network_root_path)
                     && self.pane(pane).request_id == request_id;
+                if !is_current_network_root {
+                    return Task::none();
+                }
+                let cancel = Arc::clone(&self.pane(pane).network_discovery_cancel);
                 let elements = self.localized("elementos", "items");
                 let results = self.localized("resultados", "results");
                 let searching = self
@@ -87,11 +91,14 @@ impl BExplorerIced {
                 }
 
                 let tasks = addresses.into_iter().map(|address| {
+                    let cancel = Arc::clone(&cancel);
                     Task::perform(
                         run_blocking_file_operation(move || {
-                            Ok::<_, BExplorerError>(
-                                explorer::network_computer_entry_netbios_address_timed(address),
-                            )
+                            Ok::<_, BExplorerError>(network_probe(
+                                &cancel,
+                                format!("address-{address}"),
+                                || explorer::network_computer_entry_netbios_address_timed(address),
+                            ))
                         }),
                         move |result| {
                             Message::NetworkDiscoveryEntries(
@@ -283,6 +290,12 @@ impl BExplorerIced {
                 self.apply_watched_directory_load(directory, requests, result)
             }
             Message::SidebarStorageLoaded(result) => {
+                self.storage_refresh_active = false;
+                let followup = if std::mem::take(&mut self.storage_refresh_pending) {
+                    self.refresh_sidebar_storage()
+                } else {
+                    Task::none()
+                };
                 let entries = match result {
                     Ok(entries) => entries,
                     Err(error) => {
@@ -300,7 +313,7 @@ impl BExplorerIced {
                                 state.status = error.clone();
                             }
                         }
-                        return if waiting_for_storage {
+                        let error_task = if waiting_for_storage {
                             self.show_error_dialog(
                                 self.localized(
                                     "No se pudieron cargar las unidades",
@@ -312,6 +325,7 @@ impl BExplorerIced {
                         } else {
                             Task::none()
                         };
+                        return Task::batch([followup, error_task]);
                     }
                 };
                 self.startup.complete_storage_root_load();
@@ -329,6 +343,7 @@ impl BExplorerIced {
                     .iter()
                     .map(|path| self.queue_sidebar_path_icon(path))
                     .collect::<Vec<_>>();
+                tasks.push(followup);
                 for pane in [PaneId::Primary, PaneId::Secondary] {
                     if pane == PaneId::Secondary && self.split.is_none() {
                         continue;
@@ -1770,7 +1785,10 @@ impl BExplorerIced {
                     scroll_pane_to_top_task(pane),
                 ])
             }
-            Message::ImageLoaded(result) => {
+            Message::ImageLoaded(result, cancel) => {
+                if cancel.load(AtomicOrdering::Relaxed) {
+                    return Task::none();
+                }
                 let state = result
                     .image
                     .map(|image| {
@@ -1809,12 +1827,13 @@ impl BExplorerIced {
                 let mut first_page_handle = None;
                 let mut next_page = None;
 
-                if let Some(state) = self
-                    .pdf_previews
-                    .get_mut(&result.pane)
-                    .filter(|state| state.path == result.path)
-                {
+                if let Some(state) = self.pdf_previews.get_mut(&result.pane).filter(|state| {
+                    state.path == result.path && Arc::ptr_eq(&state.cancel, &result.cancel)
+                }) {
                     state.loading = false;
+                    if result.document.is_some() {
+                        state.document = result.document;
+                    }
                     if let Some(page_count) = result.page_count {
                         state.page_count = Some(page_count);
                     }
@@ -1825,6 +1844,7 @@ impl BExplorerIced {
                             iced_image::Handle::from_rgba(image.width, image.height, image.rgba);
                         if result.page_index == 0 {
                             first_page_handle = Some(handle.clone());
+                            state.aspect_ratio = aspect_ratio;
                         }
                         if !state
                             .pages
@@ -1834,18 +1854,12 @@ impl BExplorerIced {
                             state.pages.push(PdfPreviewPage {
                                 index: result.page_index,
                                 handle,
-                                aspect_ratio,
                             });
                         }
+                    } else {
+                        state.failed_pages.insert(result.page_index);
                     }
-
-                    if let Some(page_count) = state.page_count {
-                        let candidate = result.page_index.saturating_add(1);
-                        if candidate < page_count {
-                            state.loading = true;
-                            next_page = Some(candidate);
-                        }
-                    }
+                    next_page = state.next_page_to_load();
                 }
 
                 if let Some(handle) = first_page_handle {
@@ -1853,28 +1867,41 @@ impl BExplorerIced {
                         .insert(result.path.clone(), IcedImageState::Ready(handle));
                 }
                 next_page.map_or_else(Task::none, |page_index| {
-                    load_pdf_preview_page_task(result.pane, result.path, page_index)
+                    self.queue_pdf_preview_page(result.pane, result.path, page_index)
                 })
             }
-            Message::PdfPreviewScrolled(pane, path, scroll_y) => {
+            Message::PdfPreviewScrolled(pane, path, scroll_y, viewport_height) => {
                 let page_width = self.config.preview_panel_width.clamp(220.0, 560.0);
+                let padding = self.ui_metric(30.0);
+                let mut next_page = None;
                 if let Some(state) = self
                     .pdf_previews
                     .get_mut(&pane)
                     .filter(|state| state.path == path)
                 {
-                    let mut offset_y = 0.0;
-                    let mut current_page = state.current_page;
-                    for page in &state.pages {
-                        let page_height = pdf_preview_page_height(page_width, page.aspect_ratio);
-                        if scroll_y < offset_y + page_height {
-                            current_page = page.index;
-                            break;
-                        }
-                        offset_y += page_height + 14.0;
-                        current_page = page.index;
-                    }
-                    state.current_page = current_page;
+                    let stride = pdf_preview_page_height(page_width, state.aspect_ratio) + padding;
+                    state.visible_pages =
+                        (viewport_height / stride).ceil().clamp(3.0, 16.0) as usize;
+                    state.current_page = (scroll_y.max(0.0) / stride) as usize;
+                    state.current_page = state
+                        .current_page
+                        .min(state.page_count.unwrap_or(1).saturating_sub(1));
+                    next_page = state.next_page_to_load();
+                }
+                next_page.map_or_else(Task::none, |index| {
+                    self.queue_pdf_preview_page(pane, path, index)
+                })
+            }
+            Message::TextPreviewLoaded(pane, path, cancel, content) => {
+                if let Some(preview) =
+                    self.pane_mut(pane).text_preview.as_mut().filter(|preview| {
+                        preview.path == path && Arc::ptr_eq(&preview.cancel, &cancel)
+                    })
+                {
+                    preview.content =
+                        text_editor::Content::with_text(&content.unwrap_or_else(|| {
+                            "No se pudo cargar una vista previa de este documento.".into()
+                        }));
                 }
                 Task::none()
             }
@@ -3015,7 +3042,7 @@ impl BExplorerIced {
                     self.pane_mut(pane).status = format!("{count} elemento(s) MTP eliminados");
                     self.start_load(pane)
                 }
-                Err(error) => self.report_error(pane, error),
+                Err(error) => Task::batch([self.report_error(pane, error), self.start_load(pane)]),
             },
             Message::PortableTransferFinished(
                 pane,
@@ -3694,9 +3721,7 @@ impl BExplorerIced {
                     let candidates = state
                         .entries
                         .iter()
-                        .filter(|entry| {
-                            entry.kind != crate::fs::duplicates::DuplicateKind::Original
-                        })
+                        .filter(|entry| entry.kind == crate::fs::duplicates::DuplicateKind::Exact)
                         .map(|entry| entry.path.clone())
                         .collect::<Vec<_>>();
                     if selected {
@@ -3707,9 +3732,10 @@ impl BExplorerIced {
                         }
                     }
                     state.all_candidates_selected = selected
-                        && state.entries.iter().any(|entry| {
-                            entry.kind != crate::fs::duplicates::DuplicateKind::Original
-                        });
+                        && state
+                            .entries
+                            .iter()
+                            .any(|entry| entry.kind == crate::fs::duplicates::DuplicateKind::Exact);
                 }
                 Task::none()
             }

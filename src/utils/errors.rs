@@ -17,8 +17,20 @@ pub enum BExplorerError {
     #[error("Operation error: {0}")]
     Operation(String),
 
+    /// An external provider may still own and modify an operation's files.
+    /// Callers must preserve its work area and the source until it terminates.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[error("Operation still pending: {0}")]
+    OperationPending(String),
+
     #[error("Invalid path: {0}")]
     InvalidPath(PathBuf),
+}
+
+impl BExplorerError {
+    pub fn operation_may_continue(&self) -> bool {
+        matches!(self, Self::OperationPending(_))
+    }
 }
 
 #[cfg(target_os = "windows")]

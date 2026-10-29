@@ -371,11 +371,23 @@ impl BExplorerIced {
 
     pub(in crate::iced_ui) fn poll_defender_messages(&mut self) -> Task<Message> {
         let mut finished = false;
-        while let Some(message) = self
-            .defender_rx
-            .as_ref()
-            .and_then(|receiver| receiver.try_recv().ok())
-        {
+        while let Some(receiver) = self.defender_rx.as_ref() {
+            let message = match receiver.try_recv() {
+                Ok(message) => message,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if !finished {
+                        let error = "El proceso de análisis de Defender terminó inesperadamente.";
+                        crate::utils::log::error(error);
+                        self.pane_mut(self.focused_pane()).status = error.into();
+                        if let Some(progress) = self.defender_progress.as_mut() {
+                            progress.state = DefenderScanState::Failed;
+                        }
+                    }
+                    finished = true;
+                    break;
+                }
+            };
             match message {
                 DefenderMessage::Progress(progress) => self.defender_progress = Some(progress),
                 DefenderMessage::Finished(summary) => {

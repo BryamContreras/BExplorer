@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::thread;
 use std::time::Duration;
 
+use crate::utils::process::terminate_with_parent;
 use zbus::blocking::{Connection, Proxy};
 
 pub fn storage_change_receiver() -> Receiver<()> {
@@ -19,16 +20,19 @@ pub fn storage_change_receiver() -> Receiver<()> {
 
 fn spawn_udev_listener(sender: SyncSender<()>) {
     thread::spawn(move || {
-        let Ok(mut child) = Command::new("udevadm")
+        let mut command = Command::new("udevadm");
+        command
             .args(["monitor", "--udev"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
+            .stderr(Stdio::null());
+        terminate_with_parent(&mut command);
+        let Ok(mut child) = command.spawn() else {
             return;
         };
         let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
             return;
         };
 
@@ -43,22 +47,26 @@ fn spawn_udev_listener(sender: SyncSender<()>) {
             }
         }
         let _ = child.kill();
+        let _ = child.wait();
     });
 }
 
 fn spawn_gio_volume_listener(sender: SyncSender<()>) {
     thread::spawn(move || {
-        let Ok(mut child) = Command::new("gio")
+        let mut command = Command::new("gio");
+        command
             .args(["mount", "--monitor", "--detail"])
             .env("LC_ALL", "C")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-        else {
+            .stderr(Stdio::null());
+        terminate_with_parent(&mut command);
+        let Ok(mut child) = command.spawn() else {
             return;
         };
         let Some(stdout) = child.stdout.take() else {
+            let _ = child.kill();
+            let _ = child.wait();
             return;
         };
 
@@ -72,6 +80,7 @@ fn spawn_gio_volume_listener(sender: SyncSender<()>) {
             }
         }
         let _ = child.kill();
+        let _ = child.wait();
     });
 }
 

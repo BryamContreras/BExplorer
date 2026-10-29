@@ -1,11 +1,13 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 use std::io::{Error, ErrorKind, Read, Result, Write};
 use std::mem;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use sctk::data_device_manager::data_device::{DataDevice, DataDeviceHandler};
 use sctk::data_device_manager::data_offer::{DataOfferError, DataOfferHandler, DragOffer};
@@ -22,6 +24,7 @@ use sctk::{
     delegate_seat, registry_handlers,
 };
 
+use sctk::reexports::calloop::timer::{TimeoutAction, Timer};
 use sctk::reexports::calloop::{LoopHandle, PostAction};
 use sctk::reexports::client::globals::GlobalList;
 use sctk::reexports::client::protocol::wl_data_device::WlDataDevice;
@@ -148,7 +151,10 @@ impl State {
             .latest_seat
             .as_ref()
             .ok_or_else(|| Error::other("no events received on any seat"))?;
-        let seat = self.seats.get_mut(latest).ok_or_else(|| Error::other("active seat lost"))?;
+        let seat = self
+            .seats
+            .get_mut(latest)
+            .ok_or_else(|| Error::other("active seat lost"))?;
 
         if !seat.has_focus {
             return Err(Error::other("client doesn't have focus"));
@@ -162,16 +168,21 @@ impl State {
                     .and_then(|data| data.data().selection_offer())
                     .ok_or_else(|| Error::other("selection is empty"))?;
 
-                let mime_type =
-                    selection.with_mime_types(MimeType::find_allowed).ok_or_else(|| {
+                let mime_type = selection
+                    .with_mime_types(MimeType::find_allowed)
+                    .ok_or_else(|| {
                         Error::new(ErrorKind::NotFound, "supported mime-type is not found")
                     })?;
 
                 (
-                    selection.receive(mime_type.to_string()).map_err(|err| match err {
-                        DataOfferError::InvalidReceive => Error::other("offer is not ready yet"),
-                        DataOfferError::Io(err) => err,
-                    })?,
+                    selection
+                        .receive(mime_type.to_string())
+                        .map_err(|err| match err {
+                            DataOfferError::InvalidReceive => {
+                                Error::other("offer is not ready yet")
+                            },
+                            DataOfferError::Io(err) => err,
+                        })?,
                     mime_type,
                 )
             },
@@ -182,8 +193,9 @@ impl State {
                     .and_then(|data| data.data().selection_offer())
                     .ok_or_else(|| Error::other("selection is empty"))?;
 
-                let mime_type =
-                    selection.with_mime_types(MimeType::find_allowed).ok_or_else(|| {
+                let mime_type = selection
+                    .with_mime_types(MimeType::find_allowed)
+                    .ok_or_else(|| {
                         Error::new(ErrorKind::NotFound, "supported mime-type is not found")
                     })?;
 
@@ -196,42 +208,46 @@ impl State {
 
         let mut reader_buffer = [0; 4096];
         let mut content = Vec::new();
-        let _ = self.loop_handle.insert_source(read_pipe, move |_, file, state| {
-            let file = unsafe { file.get_mut() };
-            loop {
-                match file.read(&mut reader_buffer) {
-                    Ok(0) => {
-                        let utf8 = String::from_utf8_lossy(&content);
-                        let content = match utf8 {
-                            Cow::Borrowed(_) => {
-                                // Don't clone the read data.
-                                let mut to_send = Vec::new();
-                                mem::swap(&mut content, &mut to_send);
-                                String::from_utf8(to_send).unwrap()
-                            },
-                            Cow::Owned(content) => content,
-                        };
+        let _ = self
+            .loop_handle
+            .insert_source(read_pipe, move |_, file, state| {
+                let file = unsafe { file.get_mut() };
+                loop {
+                    match file.read(&mut reader_buffer) {
+                        Ok(0) => {
+                            let utf8 = String::from_utf8_lossy(&content);
+                            let content = match utf8 {
+                                Cow::Borrowed(_) => {
+                                    // Don't clone the read data.
+                                    let mut to_send = Vec::new();
+                                    mem::swap(&mut content, &mut to_send);
+                                    String::from_utf8(to_send).unwrap()
+                                },
+                                Cow::Owned(content) => content,
+                            };
 
-                        // Post-process the content according to mime type.
-                        let content = match mime_type {
-                            MimeType::TextPlainUtf8 | MimeType::TextPlain => {
-                                normalize_to_lf(content)
-                            },
-                            MimeType::Utf8String => content,
-                        };
+                            // Post-process the content according to mime type.
+                            let content = match mime_type {
+                                MimeType::TextPlainUtf8 | MimeType::TextPlain => {
+                                    normalize_to_lf(content)
+                                },
+                                MimeType::Utf8String => content,
+                            };
 
-                        let _ = state.reply_tx.send(Ok(content));
-                        break PostAction::Remove;
-                    },
-                    Ok(n) => content.extend_from_slice(&reader_buffer[..n]),
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => break PostAction::Continue,
-                    Err(err) => {
-                        let _ = state.reply_tx.send(Err(err));
-                        break PostAction::Remove;
-                    },
-                };
-            }
-        });
+                            let _ = state.reply_tx.send(Ok(content));
+                            break PostAction::Remove;
+                        },
+                        Ok(n) => content.extend_from_slice(&reader_buffer[..n]),
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                            break PostAction::Continue;
+                        },
+                        Err(err) => {
+                            let _ = state.reply_tx.send(Err(err));
+                            break PostAction::Remove;
+                        },
+                    };
+                }
+            });
 
         Ok(())
     }
@@ -255,20 +271,24 @@ impl State {
         };
 
         let mut written = 0;
-        let _ = self.loop_handle.insert_source(write_pipe, move |_, file, _| {
-            let file = unsafe { file.get_mut() };
-            loop {
-                match file.write(&contents[written..]) {
-                    Ok(n) if written + n == contents.len() => {
-                        written += n;
-                        break PostAction::Remove;
-                    },
-                    Ok(n) => written += n,
-                    Err(err) if err.kind() == ErrorKind::WouldBlock => break PostAction::Continue,
-                    Err(_) => break PostAction::Remove,
+        let _ = self
+            .loop_handle
+            .insert_source(write_pipe, move |_, file, _| {
+                let file = unsafe { file.get_mut() };
+                loop {
+                    match file.write(&contents[written..]) {
+                        Ok(n) if written + n == contents.len() => {
+                            written += n;
+                            break PostAction::Remove;
+                        },
+                        Ok(n) => written += n,
+                        Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                            break PostAction::Continue;
+                        },
+                        Err(_) => break PostAction::Remove,
+                    }
                 }
-            }
-        });
+            });
     }
 }
 
@@ -415,7 +435,7 @@ impl DataDeviceHandler for State {
 
     fn drop_performed(
         &mut self,
-        _: &Connection,
+        connection: &Connection,
         _: &QueueHandle<Self>,
         data_device: &WlDataDevice,
     ) {
@@ -430,15 +450,53 @@ impl DataDeviceHandler for State {
         };
         offer.accept_mime_type(offer.serial, Some(mime_type.clone()));
         offer.set_actions(DndAction::Copy, DndAction::Copy);
-        let Ok(mut pipe) = offer.receive(mime_type) else {
+        let Ok(pipe) = offer.receive(mime_type) else {
             return;
         };
-        let mut data = Vec::new();
-        if pipe.read_to_end(&mut data).is_ok() {
-            crate::push_file_drop(paths_from_uri_list(&String::from_utf8_lossy(&data)));
+        if set_non_blocking(pipe.as_raw_fd()).is_err() || connection.flush().is_err() {
+            offer.destroy();
+            return;
         }
-        offer.finish();
-        offer.destroy();
+
+        // The sender needs the receive request flushed before it can supply
+        // bytes. Never read a drop synchronously from this event callback: it
+        // also dispatches clipboard requests and the worker's Exit command.
+        let offer = Rc::new(RefCell::new(Some(offer)));
+        let timer_token = Rc::new(Cell::new(None));
+        let read_offer = offer.clone();
+        let read_timer = timer_token.clone();
+        let mut data = Vec::new();
+        let Ok(read_token) = self.loop_handle.insert_source(pipe, move |_, file, state| {
+            let file = unsafe { file.get_mut() };
+            match read_drop_bytes(file, &mut data) {
+                Ok(false) => PostAction::Continue,
+                result => {
+                    if let Some(token) = read_timer.take() {
+                        state.loop_handle.remove(token);
+                    }
+                    complete_file_drop(&read_offer, result.is_ok().then_some(data.as_slice()));
+                    PostAction::Remove
+                },
+            }
+        }) else {
+            complete_file_drop(&offer, None);
+            return;
+        };
+        let timeout_offer = offer.clone();
+        match self.loop_handle.insert_source(
+            Timer::from_duration(FILE_DROP_TIMEOUT),
+            move |_, _, state| {
+                state.loop_handle.remove(read_token);
+                complete_file_drop(&timeout_offer, None);
+                TimeoutAction::Drop
+            },
+        ) {
+            Ok(token) => timer_token.set(Some(token)),
+            Err(_) => {
+                self.loop_handle.remove(read_token);
+                complete_file_drop(&offer, None);
+            },
+        }
     }
 
     // The selection is finished and ready to be used.
@@ -533,7 +591,8 @@ impl PrimarySelectionSourceHandler for State {
         _: &QueueHandle<Self>,
         deleted: &ZwpPrimarySelectionSourceV1,
     ) {
-        self.primary_sources.retain(|source| source.inner() != deleted)
+        self.primary_sources
+            .retain(|source| source.inner() != deleted)
     }
 }
 
@@ -628,6 +687,36 @@ fn set_non_blocking(raw_fd: RawFd) -> std::io::Result<()> {
 }
 
 const FILE_DROP_MIME_TYPES: &[&str] = &["text/uri-list", "x-special/gnome-copied-files"];
+const FILE_DROP_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_FILE_DROP_BYTES: usize = 8 * 1024 * 1024;
+
+fn read_drop_bytes(reader: &mut impl Read, data: &mut Vec<u8>) -> Result<bool> {
+    let mut buffer = [0; 4096];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(true),
+            Ok(count) => {
+                if data.len().saturating_add(count) > MAX_FILE_DROP_BYTES {
+                    return Err(Error::other("file drop exceeds its size limit"));
+                }
+                data.extend_from_slice(&buffer[..count]);
+            },
+            Err(error) if error.kind() == ErrorKind::Interrupted => (),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn complete_file_drop(offer: &RefCell<Option<DragOffer>>, bytes: Option<&[u8]>) {
+    if let Some(offer) = offer.borrow_mut().take() {
+        if let Some(bytes) = bytes {
+            crate::push_file_drop(paths_from_uri_list(&String::from_utf8_lossy(bytes)));
+            offer.finish();
+        }
+        offer.destroy();
+    }
+}
 
 fn file_drop_mime_type(offer: &DragOffer) -> Option<String> {
     offer.with_mime_types(|mime_types| {
@@ -640,6 +729,7 @@ fn file_drop_mime_type(offer: &DragOffer) -> Option<String> {
 
 fn paths_from_uri_list(value: &str) -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let mut seen = HashSet::new();
     for line in value.lines().map(str::trim) {
         if line.is_empty()
             || line.starts_with('#')
@@ -651,7 +741,9 @@ fn paths_from_uri_list(value: &str) -> Vec<PathBuf> {
         let Some(path) = path_from_file_uri(line) else {
             continue;
         };
-        if path.exists() && !paths.contains(&path) {
+        // Existence checks can block on disconnected FUSE/network mounts.
+        // The application's transfer worker validates paths off this thread.
+        if seen.insert(path.clone()) {
             paths.push(path);
         }
     }
@@ -670,9 +762,9 @@ fn path_from_file_uri(uri: &str) -> Option<PathBuf> {
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            let high = hex_value(bytes[index + 1])?;
-            let low = hex_value(bytes[index + 2])?;
+        if bytes[index] == b'%' {
+            let high = hex_value(*bytes.get(index + 1)?)?;
+            let low = hex_value(*bytes.get(index + 2)?)?;
             decoded.push(high << 4 | low);
             index += 3;
         } else {
@@ -680,7 +772,8 @@ fn path_from_file_uri(uri: &str) -> Option<PathBuf> {
             index += 1;
         }
     }
-    String::from_utf8(decoded).ok().map(PathBuf::from)
+    use std::os::unix::ffi::OsStringExt;
+    Some(std::ffi::OsString::from_vec(decoded).into())
 }
 
 fn hex_value(value: u8) -> Option<u8> {
@@ -689,5 +782,44 @@ fn hex_value(value: u8) -> Option<u8> {
         b'a'..=b'f' => Some(value - b'a' + 10),
         b'A'..=b'F' => Some(value - b'A' + 10),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod file_drop_tests {
+    use super::*;
+    use std::io::Cursor;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn stalled_sender_does_not_block_the_clipboard_worker() {
+        let (mut reader, mut writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.write_all(b"file:///tmp/example").unwrap();
+        let mut data = Vec::new();
+        assert!(!read_drop_bytes(&mut reader, &mut data).unwrap());
+        drop(writer);
+        assert!(read_drop_bytes(&mut reader, &mut data).unwrap());
+        assert_eq!(data, b"file:///tmp/example");
+    }
+
+    #[test]
+    fn oversized_drop_is_rejected_before_unbounded_allocation() {
+        let mut reader = Cursor::new(vec![b'x'; MAX_FILE_DROP_BYTES + 1]);
+        let mut data = Vec::new();
+        assert!(read_drop_bytes(&mut reader, &mut data).is_err());
+        assert!(data.len() <= MAX_FILE_DROP_BYTES);
+    }
+
+    #[test]
+    fn uri_payload_preserves_unix_names_and_rejects_invalid_escapes() {
+        use std::os::unix::ffi::OsStrExt;
+        let path = path_from_file_uri("file:///tmp/name%FF").unwrap();
+        assert_eq!(path.as_os_str().as_bytes(), b"/tmp/name\xff");
+        assert!(path_from_file_uri("file:///tmp/name%").is_none());
+        assert_eq!(
+            paths_from_uri_list("file:///tmp/a\nfile:///tmp/a\n").len(),
+            1
+        );
     }
 }

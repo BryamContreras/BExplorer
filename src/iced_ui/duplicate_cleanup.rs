@@ -136,7 +136,21 @@ impl BExplorerIced {
                     state.error = Some(error);
                     state.current_path = None;
                 }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    if matches!(
+                        state.phase,
+                        DuplicateCleanupPhase::Counting | DuplicateCleanupPhase::Scanning
+                    ) {
+                        state.phase = DuplicateCleanupPhase::Failed;
+                        state.error = Some(
+                            "The duplicate scan stopped before completing. Try scanning again."
+                                .into(),
+                        );
+                        state.current_path = None;
+                    }
+                    break;
+                }
             }
         }
     }
@@ -199,8 +213,10 @@ impl BExplorerIced {
         state.deleting = true;
         let paths = state.selected.iter().cloned().collect::<Vec<_>>();
         let worker_paths = paths.clone();
+        let entries = state.entries.clone();
         Task::perform(
             run_blocking_file_operation(move || {
+                crate::fs::duplicates::verify_delete_selection(&entries, &worker_paths)?;
                 operations::delete_to_trash_with_undo(&worker_paths)
             }),
             move |result| Message::DuplicateDeleteFinished(paths, result),
@@ -468,7 +484,7 @@ pub(in crate::iced_ui) fn refresh_all_duplicate_candidates_selected(
     let mut candidates = state
         .entries
         .iter()
-        .filter(|entry| entry.kind != crate::fs::duplicates::DuplicateKind::Original);
+        .filter(|entry| entry.kind == crate::fs::duplicates::DuplicateKind::Exact);
     let Some(first) = candidates.next() else {
         state.all_candidates_selected = false;
         return;
@@ -497,7 +513,16 @@ fn duplicate_scan_worker(root: PathBuf) -> (Receiver<DuplicateScanEvent>, Arc<At
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&cancel);
     thread::spawn(move || {
-        crate::fs::duplicates::scan_folder(root, sender, worker_cancel);
+        let failure_sender = sender.clone();
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::fs::duplicates::scan_folder(root, sender, worker_cancel);
+        }))
+        .is_err()
+        {
+            let _ = failure_sender.send(DuplicateScanEvent::Failed(
+                "The duplicate scan stopped unexpectedly. Try scanning again.".into(),
+            ));
+        }
     });
     (receiver, cancel)
 }

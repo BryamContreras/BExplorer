@@ -250,9 +250,10 @@ enum Message {
     SetGroupMode(PaneId, GroupMode),
     SetGroupAscending(PaneId, bool),
     SortColumn(PaneId, TableColumn),
-    ImageLoaded(IcedImageLoadResult),
+    ImageLoaded(IcedImageLoadResult, Arc<AtomicBool>),
+    TextPreviewLoaded(PaneId, PathBuf, Arc<AtomicBool>, Option<String>),
     PdfPreviewPageLoaded(PdfPreviewLoadResult),
-    PdfPreviewScrolled(PaneId, PathBuf, f32),
+    PdfPreviewScrolled(PaneId, PathBuf, f32, f32),
     TextPreviewAction(PaneId, PathBuf, text_editor::Action),
     TextPreviewCopy(PaneId, PathBuf),
     PanePointerMoved(PaneId, Point),
@@ -1265,7 +1266,6 @@ struct IcedImageLoadResult {
 struct PdfPreviewPage {
     index: usize,
     handle: iced_image::Handle,
-    aspect_ratio: f32,
 }
 
 struct PdfPreviewState {
@@ -1273,7 +1273,82 @@ struct PdfPreviewState {
     page_count: Option<usize>,
     pages: Vec<PdfPreviewPage>,
     current_page: usize,
+    visible_pages: usize,
     loading: bool,
+    document: Option<Arc<thumbnail_data::PdfPreviewDocument>>,
+    aspect_ratio: f32,
+    failed_pages: HashSet<usize>,
+    cancel: Arc<AtomicBool>,
+    abort: Option<iced::futures::future::AbortHandle>,
+}
+
+impl Drop for PdfPreviewState {
+    fn drop(&mut self) {
+        self.cancel.store(true, AtomicOrdering::Relaxed);
+        if let Some(abort) = &self.abort { abort.abort(); }
+    }
+}
+
+impl PdfPreviewState {
+    fn page_window(&self) -> std::ops::Range<usize> {
+        let start = self.current_page.saturating_sub(1);
+        start..self.page_count.unwrap_or(1).min(self.current_page.saturating_add(self.visible_pages.clamp(3, 16) + 1))
+    }
+
+    fn next_page_to_load(&mut self) -> Option<usize> {
+        if self.loading { return None; }
+        let range = self.page_window();
+        self.pages.retain(|page| range.contains(&page.index));
+        let next = range.into_iter().find(|index| !self.failed_pages.contains(index) && !self.pages.iter().any(|page| page.index == *index));
+        self.loading = next.is_some();
+        next
+    }
+}
+
+#[cfg(test)]
+mod pdf_preview_tests {
+    use super::*;
+
+    #[test]
+    fn scrolling_large_documents_keeps_only_nearby_pages_and_does_not_retry_failures() {
+        let mut state = PdfPreviewState {
+            path: "document.pdf".into(), page_count: Some(10_000),
+            pages: vec![PdfPreviewPage { index: 0, handle: iced_image::Handle::from_rgba(1, 1, vec![0; 4]) }],
+            current_page: 5_000, visible_pages: 3, loading: false, document: None, aspect_ratio: 0.707,
+            failed_pages: HashSet::new(),
+            cancel: Arc::new(AtomicBool::new(false)),
+            abort: None,
+        };
+        assert_eq!(state.next_page_to_load(), Some(4999));
+        assert!(state.pages.is_empty());
+        assert_eq!(state.page_window().len(), 5);
+        assert_eq!(state.next_page_to_load(), None, "one request at a time");
+        state.loading = false;
+        state.failed_pages.extend(state.page_window());
+        assert_eq!(state.next_page_to_load(), None, "failed pages must not spin");
+        state.current_page = 9999;
+        assert_eq!(state.page_window(), 9998..10000);
+        let cancel = Arc::clone(&state.cancel);
+        let (abort, registration) = iced::futures::future::AbortHandle::new_pair();
+        state.abort = Some(abort);
+        drop(state);
+        assert!(cancel.load(AtomicOrdering::Relaxed));
+        assert!(iced::futures::executor::block_on(iced::futures::future::Abortable::new(
+            iced::futures::future::pending::<()>(), registration
+        )).is_err());
+    }
+
+    #[test]
+    fn leaving_a_text_preview_aborts_its_pending_read() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (abort, registration) = iced::futures::future::AbortHandle::new_pair();
+        let preview = TextPreviewState { path: "document.txt".into(), content: text_editor::Content::with_text("…"), cancel: Arc::clone(&cancel), abort };
+        drop(preview);
+        assert!(cancel.load(AtomicOrdering::Relaxed));
+        assert!(iced::futures::executor::block_on(iced::futures::future::Abortable::new(
+            iced::futures::future::pending::<()>(), registration
+        )).is_err());
+    }
 }
 
 /// Stateful, read-only text preview. `TextEditor::Content` retains the cursor,
@@ -1282,6 +1357,15 @@ struct PdfPreviewState {
 struct TextPreviewState {
     path: PathBuf,
     content: text_editor::Content,
+    cancel: Arc<AtomicBool>,
+    abort: iced::futures::future::AbortHandle,
+}
+
+impl Drop for TextPreviewState {
+    fn drop(&mut self) {
+        self.cancel.store(true, AtomicOrdering::Relaxed);
+        self.abort.abort();
+    }
 }
 
 impl std::fmt::Debug for TextPreviewState {
@@ -1300,6 +1384,8 @@ struct PdfPreviewLoadResult {
     page_index: usize,
     page_count: Option<usize>,
     image: Option<IcedRgbaImage>,
+    document: Option<Arc<thumbnail_data::PdfPreviewDocument>>,
+    cancel: Arc<AtomicBool>,
 }
 
 fn pdf_preview_page_height(panel_width: f32, aspect_ratio: f32) -> f32 {
@@ -1504,6 +1590,7 @@ struct PaneState {
     status: String,
     request_id: u64,
     network_discovery_pending: usize,
+    network_discovery_cancel: Arc<AtomicBool>,
     search_cancel: Option<Arc<AtomicBool>>,
     search_receiver: Option<Receiver<crate::fs::search::SearchEvent>>,
     recursive_search_active: bool,
@@ -1548,6 +1635,7 @@ impl Default for PaneState {
             status: String::from("0 elements"),
             request_id: 0,
             network_discovery_pending: 0,
+            network_discovery_cancel: Arc::new(AtomicBool::new(false)),
             search_cancel: None,
             search_receiver: None,
             recursive_search_active: false,

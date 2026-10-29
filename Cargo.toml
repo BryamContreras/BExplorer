@@ -1,6 +1,6 @@
 [package]
 name = "bexplorer"
-version = "1.0.5"
+version = "1.0.6"
 edition = "2024"
 rust-version = "1.92"
 description = "A native Rust file explorer for Windows and Linux."
@@ -105,6 +105,9 @@ windows = { version = "0.58", features = [
     "Win32_NetworkManagement_WNet",
     "Win32_System_DataExchange",
     "Win32_System_Com",
+    "Win32_System_JobObjects",
+    "Win32_System_Pipes",
+    "Win32_Security",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ioctl",
     "Win32_System_Memory",
@@ -112,6 +115,7 @@ windows = { version = "0.58", features = [
     "Win32_System_Registry",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
+    "Win32_System_Variant",
     "Win32_Storage_FileSystem",
     "Win32_System_WindowsProgramming",
     "Win32_UI_Controls",

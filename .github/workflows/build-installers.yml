@@ -1,39 +1,54 @@
-name: Build installers
+name: Build executables and installers
+run-name: Build BExplorer 1.0.6 - ${{ github.event_name }}
 
 on:
   push:
-    branches:
-      - master
-    tags:
-      - "v*"
+    branches: [master]
+  pull_request:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: installers-${{ github.ref }}
+  group: packages-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
   RUST_BACKTRACE: "1"
 
 jobs:
-  windows-setup:
-    name: Windows Setup
-    runs-on: windows-latest
+  windows:
+    name: Windows executable and installer
+    runs-on: windows-2022
     timeout-minutes: 90
-
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
       - name: Install Rust 1.92
         shell: pwsh
         run: |
-          rustup toolchain install 1.92.0 --profile minimal
+          rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           rustup default 1.92.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-2022-rust-1.92
+          cache-on-failure: true
+
+      - name: Check formatting, lint, and test Windows
+        shell: pwsh
+        run: |
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --all-targets
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Ensure Inno Setup is available
         shell: pwsh
@@ -46,96 +61,259 @@ jobs:
           )
           if (-not ($candidates | Where-Object { Test-Path -LiteralPath $_ })) {
             choco install innosetup --no-progress --yes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
 
-      - name: Build Windows Setup
+      - name: Build Windows executable and Setup
         shell: pwsh
         run: ./scripts/windows/package.ps1
 
-      - name: Verify Windows artifacts
+      - name: Verify Windows files and installer
         shell: pwsh
         run: |
-          $setups = @(Get-ChildItem dist/BExplorer-*-Setup-x64.exe)
-          $checksums = @(Get-ChildItem dist/BExplorer-*-Setup-x64.exe.sha256.txt)
-          if ($setups.Count -ne 1 -or $checksums.Count -ne 1) {
-            throw "Expected one Windows Setup and one checksum"
+          $version = ((Get-Content Cargo.toml | Select-String '^version = "([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value)
+          $portable = @(Get-ChildItem dist/BExplorer-*-windows-*.exe)
+          $setup = @(Get-ChildItem dist/BExplorer-*-Setup-x64.exe)
+          $licenses = @(Get-ChildItem dist/BExplorer-*-licenses.txt)
+          if ($portable.Count -ne 1 -or $setup.Count -ne 1 -or $licenses.Count -ne 1) {
+            throw "Expected one executable, installer, and license file"
           }
+          if (@(Get-ChildItem dist -File -Filter *.zip).Count -ne 0) { throw "ZIP output is forbidden" }
+          foreach ($file in @($portable[0], $setup[0])) {
+            $actual = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expected = (Get-Content -LiteralPath "$($file.FullName).sha256.txt").Split(' ')[0]
+            if ($actual -ne $expected) { throw "Checksum mismatch: $($file.Name)" }
+            if ($file.VersionInfo.ProductVersion -ne $version) { throw "Version mismatch: $($file.Name)" }
+          }
+          function Invoke-Checked([string]$File, [string[]]$Arguments) {
+            $info = [System.Diagnostics.ProcessStartInfo]::new($File)
+            $info.UseShellExecute = $false
+            $info.CreateNoWindow = $true
+            $info.RedirectStandardOutput = $true
+            foreach ($argument in $Arguments) { $info.ArgumentList.Add($argument) }
+            $process = [System.Diagnostics.Process]::Start($info)
+            try {
+              if (-not $process.WaitForExit(120000)) { $process.Kill($true); throw "Process timed out: $File" }
+              $output = $process.StandardOutput.ReadToEnd().Trim()
+              if ($process.ExitCode -ne 0) { throw "Process failed: $File (exit $($process.ExitCode))" }
+              return $output
+            } finally { $process.Dispose() }
+          }
+          if ((Invoke-Checked $portable[0].FullName @('--version')) -ne "BExplorer $version") {
+            throw "Executable version smoke test failed"
+          }
+          $install = Join-Path $env:RUNNER_TEMP 'BExplorer-install'
+          Invoke-Checked $setup[0].FullName @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/TASKS=', "/DIR=$install") | Out-Null
+          $installed = Join-Path $install 'BExplorer.exe'
+          if ((Invoke-Checked $installed @('--version')) -ne "BExplorer $version") { throw "Installed executable failed" }
+          Invoke-Checked (Join-Path $install 'unins000.exe') @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') | Out-Null
 
-      - name: Upload Windows Setup
+      # v7 uploads one file directly when archive is false. Do not combine paths.
+      - name: Upload Windows executable
         uses: actions/upload-artifact@v7
         with:
-          name: bexplorer-windows-setup-${{ github.sha }}
-          path: |
-            dist/BExplorer-*-Setup-x64.exe
-            dist/BExplorer-*-Setup-x64.exe.sha256.txt
+          path: dist/BExplorer-*-windows-*.exe
+          archive: false
           if-no-files-found: error
           retention-days: 30
 
-  linux-packages:
-    name: Linux DEB and RPM
-    runs-on: ubuntu-latest
-    timeout-minutes: 90
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/BExplorer-*-Setup-x64.exe
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
 
+      - name: Upload executable checksum
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/BExplorer-*-windows-*.exe.sha256.txt
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload installer checksum
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/BExplorer-*-Setup-x64.exe.sha256.txt
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload portable license text
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/BExplorer-*-licenses.txt
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+  debian:
+    name: Linux executable and Debian package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
+
+      - name: Install Linux build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends build-essential dpkg-dev pkg-config libdbus-1-dev libegl1-mesa-dev libfontconfig1-dev libgl1-mesa-dev libudev-dev libwayland-dev libx11-dev libxext-dev libx11-xcb-dev libxcb1-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcursor-dev libxi-dev libxkbcommon-dev libxkbcommon-x11-dev
 
       - name: Install Rust 1.92
         run: |
-          rustup toolchain install 1.92.0 --profile minimal
+          rustup toolchain install 1.92.0 --profile minimal --component clippy --component rustfmt
           rustup default 1.92.0
 
-      - name: Install Linux build and packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends \
-            build-essential \
-            libdbus-1-dev \
-            libegl1-mesa-dev \
-            libfontconfig1-dev \
-            libgl1-mesa-dev \
-            libudev-dev \
-            libwayland-dev \
-            libx11-dev \
-            libx11-xcb-dev \
-            libxcb1-dev \
-            libxcb-render0-dev \
-            libxcb-shape0-dev \
-            libxcb-xfixes0-dev \
-            libxcursor-dev \
-            libxi-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            pkg-config \
-            rpm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-24.04-rust-1.92
+          cache-on-failure: true
 
-      - name: Build Linux packages
+      - name: Check formatting, lint, and test Linux
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked --all-targets
+          sh scripts/linux/test-vendored.sh
+          for script in scripts/linux/*.sh tools/*linux*.sh; do
+            test ! -f "$script" || sh -n "$script"
+          done
+
+      - name: Build executable and DEB
+        env:
+          PACKAGE_FORMATS: deb
         run: sh scripts/linux/package.sh
 
-      - name: Verify Linux artifacts
+      - name: Verify raw executable and package checksums
         run: |
-          set -eu
           test "$(find dist -maxdepth 1 -type f -name 'bexplorer_*.deb' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f -name 'bexplorer-*.rpm' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f -name 'bexplorer_*.deb.sha256.txt' | wc -l)" -eq 1
-          test "$(find dist -maxdepth 1 -type f -name 'bexplorer-*.rpm.sha256.txt' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name 'bexplorer-*-linux-x86_64-unknown-linux-gnu' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name '*.zip' -o -name '*.tar.gz' | wc -l)" -eq 0
+          (cd dist && sha256sum --check ./*.sha256.txt)
+
+      - name: Verify Debian and Ubuntu installation in clean containers
+        run: |
+          for base in ubuntu:24.04 debian:13; do
+            docker run --rm -v "$PWD/dist:/packages:ro" "$base" sh -ec '
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends /packages/bexplorer_*.deb
+              dpkg --verify bexplorer
+              ldd /usr/bin/bexplorer > /tmp/bexplorer-libraries.txt
+              cat /tmp/bexplorer-libraries.txt
+              ! grep -q "not found" /tmp/bexplorer-libraries.txt
+              expected=$(dpkg-query -W -f="\${Version}" bexplorer)
+              test "$(bexplorer --version)" = "BExplorer $expected"
+            '
+          done
+
+      - name: Upload Linux executable
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/bexplorer-*-linux-x86_64-unknown-linux-gnu
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Linux executable checksum
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/bexplorer-*-linux-x86_64-unknown-linux-gnu.sha256.txt
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload Debian package
         uses: actions/upload-artifact@v7
         with:
-          name: bexplorer-deb-${{ github.sha }}
-          path: |
-            dist/bexplorer_*.deb
-            dist/bexplorer_*.deb.sha256.txt
+          path: dist/bexplorer_*.deb
+          archive: false
           if-no-files-found: error
           retention-days: 30
 
-      - name: Upload RPM package
+      - name: Upload Debian checksum
         uses: actions/upload-artifact@v7
         with:
-          name: bexplorer-rpm-${{ github.sha }}
-          path: |
-            dist/bexplorer-*.rpm
-            dist/bexplorer-*.rpm.sha256.txt
+          path: dist/bexplorer_*.deb.sha256.txt
+          archive: false
           if-no-files-found: error
           retention-days: 30
+
+  fedora:
+    name: Native Fedora RPM
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    timeout-minutes: 90
+    outputs:
+      rpm-file: ${{ steps.package.outputs.rpm-file }}
+    steps:
+      - name: Install Fedora build tools
+        run: |
+          dnf install -y gcc gcc-c++ make binutils pkgconf-pkg-config rpm-build redhat-rpm-config wayland-devel libX11-devel libXext-devel libX11-xcb libxcb-devel libXcursor-devel libXi-devel libxkbcommon-devel libxkbcommon-x11-devel mesa-libEGL-devel mesa-libGL-devel fontconfig-devel systemd-devel dbus-devel git tar xz findutils file curl-minimal
+
+      - uses: actions/checkout@v6
+
+      - name: Install Rust 1.92
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.92.0
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fedora-44-rust-1.92
+          cache-on-failure: true
+
+      - name: Test the native archive engine on Fedora
+        run: cargo test --locked --bin bexplorer fs::archive -- --test-threads=1
+
+      - name: Build Fedora RPM
+        id: package
+        env:
+          PACKAGE_FORMATS: rpm
+        run: |
+          sh scripts/linux/package.sh
+          set -- dist/bexplorer-*.rpm
+          test "$#" -eq 1
+          echo "rpm-file=$(basename "$1")" >> "$GITHUB_OUTPUT"
+          (cd dist && sha256sum --check ./*.sha256.txt)
+
+      - name: Upload Fedora RPM
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/bexplorer-*.rpm
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Fedora checksum
+        uses: actions/upload-artifact@v7
+        with:
+          path: dist/bexplorer-*.rpm.sha256.txt
+          archive: false
+          if-no-files-found: error
+          retention-days: 30
+
+  verify-fedora:
+    name: Verify Fedora installation
+    needs: fedora
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download the raw RPM
+        uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.fedora.outputs.rpm-file }}
+          path: packages
+
+      - name: Install and check RPM in a clean Fedora container
+        run: |
+          docker run --rm -v "$PWD/packages:/packages:ro" -v "$PWD/scripts/linux:/checks:ro" fedora:44 sh -ec '
+            set -- /packages/*.rpm
+            test "$#" -eq 1
+            sh /checks/smoke-fedora-rpm.sh "$1"
+          '

@@ -55,6 +55,19 @@ impl BExplorerIced {
         state.has_vertical_overflow = false;
         state.text_preview = None;
         state.mark_entries_changed();
+        let keep = [PaneId::Primary, PaneId::Secondary]
+            .into_iter()
+            .filter(|other| *other != pane)
+            .flat_map(|other| {
+                self.pane(other)
+                    .entries
+                    .iter()
+                    .map(|entry| entry.path.clone())
+            })
+            .collect::<HashSet<_>>();
+        self.thumbnail_cache.cancel_pending_except(&keep);
+        self.small_thumbnail_cache.cancel_pending_except(&keep);
+        self.preview_cache.cancel_pending_except(&keep);
         self.start_load(pane)
     }
 
@@ -81,6 +94,11 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn start_load(&mut self, pane: PaneId) -> Task<Message> {
+        self.pane(pane)
+            .network_discovery_cancel
+            .store(true, AtomicOrdering::Relaxed);
+        self.thumbnail_cache.clear_portable_misses();
+        self.small_thumbnail_cache.clear_portable_misses();
         self.sync_visible_directory_watches();
         self.cancel_recursive_search(pane);
         self.sync_pane_view_mode_from_tab(pane);
@@ -137,6 +155,8 @@ impl BExplorerIced {
     /// source add results as it completes instead of waiting for the slowest
     /// source to finish.
     fn start_network_root_load(&mut self, pane: PaneId) -> Task<Message> {
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.pane_mut(pane).network_discovery_cancel = Arc::clone(&cancel);
         let cached_entries = explorer::network_root_cached_entries();
         let searching = self
             .localized(
@@ -172,11 +192,14 @@ impl BExplorerIced {
             .iter()
             .copied()
             .map(|source| {
+                let cancel = Arc::clone(&cancel);
                 Task::perform(
                     run_blocking_file_operation(move || {
-                        Ok::<_, BExplorerError>(
-                            explorer::list_network_discovery_source_entries_timed(source),
-                        )
+                        Ok::<_, BExplorerError>(network_probe(
+                            &cancel,
+                            format!("source-{source:?}"),
+                            || explorer::list_network_discovery_source_entries_timed(source),
+                        ))
                     }),
                     move |result| {
                         Message::NetworkDiscoveryEntries(
@@ -189,8 +212,12 @@ impl BExplorerIced {
             })
             .collect::<Vec<_>>();
         tasks.push(Task::perform(
-            run_blocking_file_operation(|| {
-                Ok::<_, BExplorerError>(explorer::list_network_netbios_neighbor_addresses_timed())
+            run_blocking_file_operation(move || {
+                Ok::<_, BExplorerError>(network_probe(
+                    &cancel,
+                    "neighbors".into(),
+                    explorer::list_network_netbios_neighbor_addresses_timed,
+                ))
             }),
             move |result| {
                 Message::NetworkDiscoveryAddresses(pane, request_id, result.unwrap_or_default())
@@ -200,7 +227,12 @@ impl BExplorerIced {
         Task::batch(tasks)
     }
 
-    pub(in crate::iced_ui) fn refresh_sidebar_storage(&self) -> Task<Message> {
+    pub(in crate::iced_ui) fn refresh_sidebar_storage(&mut self) -> Task<Message> {
+        if self.storage_refresh_active {
+            self.storage_refresh_pending = true;
+            return Task::none();
+        }
+        self.storage_refresh_active = true;
         let show_hidden_system_drives = self.config.show_hidden_system_drives;
         Task::perform(
             run_blocking_file_operation(move || {
@@ -505,6 +537,33 @@ impl BExplorerIced {
         Task::batch(tasks)
     }
 
+    pub(super) fn queue_pdf_preview_page(
+        &mut self,
+        pane: PaneId,
+        path: PathBuf,
+        index: usize,
+    ) -> Task<Message> {
+        let Some(state) = self
+            .pdf_previews
+            .get_mut(&pane)
+            .filter(|state| state.path == path)
+        else {
+            return Task::none();
+        };
+        let (abort, registration) = iced::futures::future::AbortHandle::new_pair();
+        if let Some(previous) = state.abort.replace(abort) {
+            previous.abort();
+        }
+        load_pdf_preview_page_task(
+            pane,
+            path,
+            index,
+            state.document.clone(),
+            Arc::clone(&state.cancel),
+            registration,
+        )
+    }
+
     pub(in crate::iced_ui) fn queue_selected_preview(&mut self, pane: PaneId) -> Task<Message> {
         if !self.preview_enabled_for_pane(pane) {
             self.pdf_previews.remove(&pane);
@@ -534,6 +593,7 @@ impl BExplorerIced {
             return Task::none();
         }
         if thumbnail_data::is_pdf_preview_candidate(&entry) {
+            self.pane_mut(pane).text_preview = None;
             if self
                 .pdf_previews
                 .get(&pane)
@@ -541,6 +601,7 @@ impl BExplorerIced {
             {
                 return Task::none();
             }
+            let cancel = Arc::new(AtomicBool::new(false));
             self.pdf_previews.insert(
                 pane,
                 PdfPreviewState {
@@ -548,10 +609,17 @@ impl BExplorerIced {
                     page_count: None,
                     pages: Vec::new(),
                     current_page: 0,
+                    visible_pages: (self.window_size.height / 260.0).ceil().clamp(3.0, 16.0)
+                        as usize,
                     loading: true,
+                    document: None,
+                    aspect_ratio: 0.707,
+                    failed_pages: HashSet::new(),
+                    cancel: Arc::clone(&cancel),
+                    abort: None,
                 },
             );
-            return load_pdf_preview_page_task(pane, entry.path, 0);
+            return self.queue_pdf_preview_page(pane, entry.path, 0);
         }
 
         self.pdf_previews.remove(&pane);
@@ -562,15 +630,40 @@ impl BExplorerIced {
                 .as_ref()
                 .is_some_and(|preview| preview.path == entry.path);
             if !already_loaded {
-                let content =
-                    thumbnail_data::read_text_preview(&entry.path, self.config.preview_limit_bytes)
-                        .unwrap_or_else(|| {
-                            "No se pudo cargar una vista previa de este documento.".into()
-                        });
+                let cancel = Arc::new(AtomicBool::new(false));
+                let (abort, registration) = iced::futures::future::AbortHandle::new_pair();
                 self.pane_mut(pane).text_preview = Some(TextPreviewState {
                     path: entry.path.clone(),
-                    content: text_editor::Content::with_text(&content),
+                    content: text_editor::Content::with_text("…"),
+                    cancel: Arc::clone(&cancel),
+                    abort,
                 });
+                let path = entry.path;
+                let limit = self.config.preview_limit_bytes;
+                let operation = async move {
+                    let worker_path = path.clone();
+                    let worker_cancel = Arc::clone(&cancel);
+                    let content = run_preview_operation(move || {
+                        if worker_cancel.load(AtomicOrdering::Relaxed) {
+                            None
+                        } else {
+                            thumbnail_data::read_text_preview(&worker_path, limit)
+                        }
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    (path, cancel, content)
+                };
+                return Task::perform(
+                    iced::futures::future::Abortable::new(operation, registration),
+                    move |result| match result {
+                        Ok((path, cancel, content)) => {
+                            Message::TextPreviewLoaded(pane, path, cancel, content)
+                        }
+                        Err(_) => Message::Noop,
+                    },
+                );
             }
             return Task::none();
         }
@@ -583,7 +676,7 @@ impl BExplorerIced {
 
         self.preview_cache
             .insert(entry.path.clone(), IcedImageState::Loading);
-        load_iced_image_task(IcedImageJob::Preview { path: entry.path })
+        self.load_iced_image_task(IcedImageJob::Preview { path: entry.path })
     }
 
     pub(in crate::iced_ui) fn queue_entry_images(
@@ -615,7 +708,7 @@ impl BExplorerIced {
                     let allow_default_resource = entry
                         .size
                         .is_some_and(|size| size <= self.config.preview_limit_bytes as u64);
-                    tasks.push(load_iced_image_task(IcedImageJob::Thumbnail {
+                    tasks.push(self.load_iced_image_task(IcedImageJob::Thumbnail {
                         path: entry.path.clone(),
                         max_bytes,
                         allow_default_resource,
@@ -627,7 +720,7 @@ impl BExplorerIced {
                 if !self.thumbnail_cache_for(variant).contains_key(&entry.path) {
                     self.thumbnail_cache_for_mut(variant)
                         .insert(entry.path.clone(), IcedImageState::Loading);
-                    tasks.push(load_iced_image_task(IcedImageJob::Thumbnail {
+                    tasks.push(self.load_iced_image_task(IcedImageJob::Thumbnail {
                         path: entry.path.clone(),
                         max_bytes: self.config.preview_limit_bytes,
                         allow_default_resource: false,
@@ -644,7 +737,7 @@ impl BExplorerIced {
         {
             self.native_icon_cache_for_mut(variant)
                 .insert(cache_key.clone(), IcedImageState::Loading);
-            tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
+            tasks.push(self.load_iced_image_task(IcedImageJob::NativeIcon {
                 cache_key,
                 path,
                 is_directory,
@@ -656,37 +749,28 @@ impl BExplorerIced {
         tasks
     }
 
-    fn thumbnail_cache_for(&self, variant: IcedImageVariant) -> &HashMap<PathBuf, IcedImageState> {
+    pub(super) fn thumbnail_cache_for(&self, variant: IcedImageVariant) -> &ImageCache {
         match variant {
             IcedImageVariant::Standard => &self.thumbnail_cache,
             IcedImageVariant::Small => &self.small_thumbnail_cache,
         }
     }
 
-    fn thumbnail_cache_for_mut(
-        &mut self,
-        variant: IcedImageVariant,
-    ) -> &mut HashMap<PathBuf, IcedImageState> {
+    fn thumbnail_cache_for_mut(&mut self, variant: IcedImageVariant) -> &mut ImageCache {
         match variant {
             IcedImageVariant::Standard => &mut self.thumbnail_cache,
             IcedImageVariant::Small => &mut self.small_thumbnail_cache,
         }
     }
 
-    fn native_icon_cache_for(
-        &self,
-        variant: IcedImageVariant,
-    ) -> &HashMap<PathBuf, IcedImageState> {
+    pub(super) fn native_icon_cache_for(&self, variant: IcedImageVariant) -> &ImageCache {
         match variant {
             IcedImageVariant::Standard => &self.native_icon_cache,
             IcedImageVariant::Small => &self.small_native_icon_cache,
         }
     }
 
-    fn native_icon_cache_for_mut(
-        &mut self,
-        variant: IcedImageVariant,
-    ) -> &mut HashMap<PathBuf, IcedImageState> {
+    fn native_icon_cache_for_mut(&mut self, variant: IcedImageVariant) -> &mut ImageCache {
         match variant {
             IcedImageVariant::Standard => &mut self.native_icon_cache,
             IcedImageVariant::Small => &mut self.small_native_icon_cache,
@@ -739,7 +823,7 @@ impl BExplorerIced {
         }
         self.small_native_icon_cache
             .insert(cache_key.clone(), IcedImageState::Loading);
-        load_iced_image_task(IcedImageJob::NativeIcon {
+        self.load_iced_image_task(IcedImageJob::NativeIcon {
             cache_key,
             path,
             is_directory,
@@ -770,7 +854,7 @@ impl BExplorerIced {
         }
         self.small_native_icon_cache
             .insert(cache_key.clone(), IcedImageState::Loading);
-        load_iced_image_task(IcedImageJob::NativeIcon {
+        self.load_iced_image_task(IcedImageJob::NativeIcon {
             cache_key,
             path: path.to_path_buf(),
             is_directory: true,
@@ -790,7 +874,7 @@ impl BExplorerIced {
         }
         self.small_native_icon_cache
             .insert(cache_key.clone(), IcedImageState::Loading);
-        load_iced_image_task(IcedImageJob::NativeIcon {
+        self.load_iced_image_task(IcedImageJob::NativeIcon {
             cache_key,
             path,
             is_directory,

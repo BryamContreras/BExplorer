@@ -7,6 +7,10 @@ mod platform;
 mod utils;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--version")) {
+        println!("BExplorer {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     utils::log::init_log_dir();
 
     if let Some(exit_code) = fs::archive::try_run_archive_helper_from_args() {

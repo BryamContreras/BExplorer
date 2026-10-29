@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 
 #[cfg(not(target_os = "windows"))]
 use directories::UserDirs;
@@ -417,7 +417,7 @@ pub fn load_preview_image(path: &Path) -> Option<NativeIconImage> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let bytes = std::fs::read(path).ok()?;
+        let bytes = read_limited_source(path, MAX_PDF_PREVIEW_BYTES)?;
         load_image_from_bytes(&bytes, PREVIEW_MAX_EDGE)
             .or_else(|| render_svg_image(path, PREVIEW_MAX_EDGE))
             .or_else(|| load_desktop_thumbnail_image(path, PREVIEW_MAX_EDGE))
@@ -425,19 +425,43 @@ pub fn load_preview_image(path: &Path) -> Option<NativeIconImage> {
 }
 
 pub fn render_pdf_preview_page(path: &Path, page_index: usize) -> Option<(usize, NativeIconImage)> {
-    if std::fs::metadata(path).ok()?.len() > MAX_PDF_PREVIEW_BYTES {
-        return None;
+    let document = open_pdf_preview(path)?;
+    render_pdf_document_page(&document, page_index)
+}
+
+pub struct PdfPreviewDocument {
+    pdf: hayro::hayro_syntax::Pdf,
+}
+
+impl std::fmt::Debug for PdfPreviewDocument {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PdfPreviewDocument").finish_non_exhaustive()
     }
-    let bytes = std::fs::read(path).ok()?;
-    let pdf = hayro::hayro_syntax::Pdf::new(bytes).ok()?;
-    let pages = pdf.pages();
+}
+
+pub fn open_pdf_preview(path: &Path) -> Option<Arc<PdfPreviewDocument>> {
+    let bytes = read_limited_source(path, MAX_PDF_PREVIEW_BYTES)?;
+    Some(Arc::new(PdfPreviewDocument {
+        pdf: hayro::hayro_syntax::Pdf::new(bytes).ok()?,
+    }))
+}
+
+pub fn render_pdf_document_page(
+    document: &PdfPreviewDocument,
+    page_index: usize,
+) -> Option<(usize, NativeIconImage)> {
+    let _permit = acquire_image_decode_permit();
+    let pages = document.pdf.pages();
     let page_count = pages.len();
     let page = pages.get(page_index)?;
     let cache = hayro::RenderCache::new();
     let interpreter_settings = hayro::hayro_interpret::InterpreterSettings::default();
+    let (page_width, page_height) = page.render_dimensions();
+    let scale =
+        bounded_render_scale(page_width, page_height, PREVIEW_MAX_EDGE)?.min(PDF_PREVIEW_SCALE);
     let render_settings = hayro::RenderSettings {
-        x_scale: PDF_PREVIEW_SCALE,
-        y_scale: PDF_PREVIEW_SCALE,
+        x_scale: scale,
+        y_scale: scale,
         bg_color: hayro::vello_cpu::color::palette::css::WHITE,
         ..Default::default()
     };
@@ -571,15 +595,38 @@ fn resize_native_image(image: NativeIconImage, max_edge: u32) -> Option<NativeIc
 }
 
 fn render_svg_image(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
-    if std::fs::metadata(path).ok()?.len() > MAX_SVG_SOURCE_BYTES {
+    let bytes = read_limited_source(path, MAX_SVG_SOURCE_BYTES)?;
+    render_svg_bytes(&bytes, max_edge)
+}
+
+fn read_limited_source(path: &Path, limit: u64) -> Option<Vec<u8>> {
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > limit {
         return None;
     }
-    let bytes = std::fs::read(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(limit + 1).read_to_end(&mut bytes).ok()?;
+    (bytes.len() as u64 <= limit).then_some(bytes)
+}
+
+fn bounded_render_scale(width: f32, height: f32, max_edge: u32) -> Option<f32> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    let edge = max_edge.clamp(1, PREVIEW_MAX_EDGE) as f32;
+    Some((edge / width.max(height)).min(1.0))
+}
+
+fn render_svg_bytes(bytes: &[u8], max_edge: u32) -> Option<NativeIconImage> {
+    let _permit = acquire_image_decode_permit();
     let options = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_data(&bytes, &options).ok()?;
+    let tree = resvg::usvg::Tree::from_data(bytes, &options).ok()?;
     let base_size = tree.size().to_int_size();
-    let scale =
-        (max_edge as f32 / base_size.width().max(base_size.height()) as f32).clamp(0.01, 1.0);
+    let scale = bounded_render_scale(
+        base_size.width() as f32,
+        base_size.height() as f32,
+        max_edge,
+    )?;
     let width = ((base_size.width() as f32 * scale).round() as u32).max(1);
     let height = ((base_size.height() as f32 * scale).round() as u32).max(1);
     let mut pixmap = resvg::tiny_skia::Pixmap::new(width, height)?;
@@ -614,13 +661,23 @@ pub fn load_portable_thumbnail_image(
     max_edge: u32,
 ) -> Option<NativeIconImage> {
     let (device_id, object_id) = explorer::portable_object_from_path(path)?;
-    let bytes = crate::platform::portable_device_thumbnail(
-        &device_id,
-        &object_id,
-        max_bytes,
-        allow_default_resource,
-    )?;
-    load_thumbnail_image_from_bytes(&bytes, max_edge)
+    // Optional WPD thumbnails can be skipped while a transfer owns the device.
+    // Retry only a small number of times; an explicit refresh can try again.
+    let attempts = if cfg!(target_os = "windows") { 3 } else { 1 };
+    for attempt in 0..attempts {
+        if let Some(bytes) = crate::platform::portable_device_thumbnail(
+            &device_id,
+            &object_id,
+            max_bytes,
+            allow_default_resource,
+        ) {
+            return load_thumbnail_image_from_bytes(&bytes, max_edge);
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+    None
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
@@ -636,6 +693,64 @@ pub fn load_portable_thumbnail_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn huge_svg_is_rendered_within_the_requested_pixel_budget() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1000000" height="1000000"><rect width="1000000" height="1000000" fill="red"/></svg>"#;
+        let image = render_svg_bytes(svg, 48).expect("bounded SVG render");
+        assert_eq!(
+            (image.width, image.height, image.rgba.len()),
+            (48, 48, 48 * 48 * 4)
+        );
+        assert!(bounded_render_scale(f32::INFINITY, 1.0, 1200).is_none());
+        assert!(bounded_render_scale(0.0, 1.0, 1200).is_none());
+    }
+
+    #[test]
+    fn pdf_reuses_the_parsed_document_and_bounds_huge_page_dimensions() {
+        use std::fmt::Write as _;
+        let objects = [
+            "<< /Type /Catalog /Pages 2 0 R >>",
+            "<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 1000000 2000000] /Resources <<>> /Contents 5 0 R >>",
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 200] /Resources <<>> /Contents 5 0 R >>",
+            "<< /Length 0 >>\nstream\n\nendstream",
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            writeln!(pdf, "{} 0 obj\n{object}\nendobj", index + 1).unwrap();
+        }
+        let xref = pdf.len();
+        writeln!(pdf, "xref\n0 6\n0000000000 65535 f ").unwrap();
+        for offset in offsets {
+            writeln!(pdf, "{offset:010} 00000 n ").unwrap();
+        }
+        writeln!(
+            pdf,
+            "trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF"
+        )
+        .unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "bexplorer-pdf-budget-{}-{}.pdf",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, pdf).unwrap();
+        let document = open_pdf_preview(&path).expect("open document");
+        std::fs::remove_file(&path).unwrap();
+        let (count, first) = render_pdf_document_page(&document, 0).expect("render huge page");
+        assert_eq!(count, 2);
+        assert!(first.width <= 1200 && first.height <= 1200);
+        assert!(first.rgba.len() <= 1200 * 1200 * 4);
+        let (_, second) = render_pdf_document_page(&document, 1)
+            .expect("render another page after source was removed");
+        assert!(second.width <= 1200 && second.height <= 1200);
+    }
 
     #[test]
     fn local_video_files_are_thumbnail_candidates() {

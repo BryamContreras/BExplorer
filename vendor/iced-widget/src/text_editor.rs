@@ -354,7 +354,9 @@ where
         let internal = self.content.0.borrow_mut();
 
         let text_bounds = bounds.shrink(self.padding);
-        let translation = text_bounds.position() - Point::ORIGIN;
+        let translation = text_bounds.position()
+            - Point::ORIGIN
+            - Vector::new(state.horizontal_offset, 0.0);
 
         let cursor = match internal.editor.selection() {
             Selection::Caret(position) => position,
@@ -527,10 +529,46 @@ pub struct State<Highlighter: text::Highlighter> {
     last_click: Option<mouse::Click>,
     drag_click: Option<mouse::click::Kind>,
     partial_scroll: f32,
+    horizontal_offset: f32,
     last_theme: RefCell<Option<String>>,
     highlighter: RefCell<Highlighter>,
     highlighter_settings: Highlighter::Settings,
     highlighter_format_address: usize,
+}
+
+fn horizontal_cursor_position(selection: Selection, cursor: Cursor) -> f32 {
+    match selection {
+        Selection::Caret(position) => position.x,
+        Selection::Range(ranges) => {
+            // Follow the moving end of the selection, including Shift+Left.
+            let extends_right = cursor.selection.is_none_or(|anchor| {
+                (cursor.position.line, cursor.position.column)
+                    >= (anchor.line, anchor.column)
+            });
+
+            if extends_right {
+                ranges.last().map_or(0.0, |range| range.x + range.width)
+            } else {
+                ranges.first().map_or(0.0, |range| range.x)
+            }
+        }
+    }
+}
+
+fn horizontal_scroll_offset(
+    previous: f32,
+    cursor_x: f32,
+    width: f32,
+    content_width: f32,
+) -> f32 {
+    // Leave enough room to draw the caret at the end of an overflowing line.
+    let visible_width = (width - 5.0).max(0.0);
+    let cursor_x = cursor_x.max(0.0);
+    let maximum = (content_width - visible_width).max(0.0);
+
+    previous
+        .clamp((cursor_x - visible_width).max(0.0), cursor_x)
+        .min(maximum)
 }
 
 #[derive(Debug, Clone)]
@@ -602,6 +640,7 @@ where
             last_click: None,
             drag_click: None,
             partial_scroll: 0.0,
+            horizontal_offset: 0.0,
             last_theme: RefCell::default(),
             highlighter: RefCell::new(Highlighter::new(
                 &self.highlighter_settings,
@@ -657,6 +696,21 @@ where
             self.wrapping,
             state.highlighter.borrow_mut().deref_mut(),
         );
+
+        state.horizontal_offset = if self.wrapping == Wrapping::None {
+            let cursor = internal.editor.cursor();
+            let cursor_x =
+                horizontal_cursor_position(internal.editor.selection(), cursor);
+
+            horizontal_scroll_offset(
+                state.horizontal_offset,
+                cursor_x,
+                internal.editor.bounds().width,
+                internal.editor.min_bounds().width,
+            )
+        } else {
+            0.0
+        };
 
         match self.height {
             Length::Fill | Length::FillPortion(_) | Length::Fixed(_) => {
@@ -741,9 +795,10 @@ where
             match update {
                 Update::Click(click) => {
                     let action = match click.kind() {
-                        mouse::click::Kind::Single => {
-                            Action::Click(click.position())
-                        }
+                        mouse::click::Kind::Single => Action::Click(
+                            click.position()
+                                + Vector::new(state.horizontal_offset, 0.0),
+                        ),
                         mouse::click::Kind::Double => Action::SelectWord,
                         mouse::click::Kind::Triple => Action::SelectLine,
                     };
@@ -756,7 +811,9 @@ where
                     shell.capture_event();
                 }
                 Update::Drag(position) => {
-                    shell.publish(on_edit(Action::Drag(position)));
+                    shell.publish(on_edit(Action::Drag(
+                        position + Vector::new(state.horizontal_offset, 0.0),
+                    )));
                 }
                 Update::Release => {
                     state.drag_click = None;
@@ -1010,13 +1067,16 @@ where
         } else {
             renderer.fill_editor(
                 &internal.editor,
-                text_bounds.position(),
+                text_bounds.position()
+                    - Vector::new(state.horizontal_offset, 0.0),
                 style.value,
                 text_bounds,
             );
         }
 
-        let translation = text_bounds.position() - Point::ORIGIN;
+        let translation = text_bounds.position()
+            - Point::ORIGIN
+            - Vector::new(state.horizontal_offset, 0.0);
 
         if let Some(focus) = state.focus.as_ref() {
             match internal.editor.selection() {
@@ -1523,4 +1583,95 @@ pub(crate) fn convert_macos_shortcut(
     };
 
     Some(keyboard::Key::Named(key))
+}
+
+#[cfg(test)]
+mod horizontal_scroll_tests {
+    use super::*;
+    use crate::graphics::text::Editor;
+
+    const WIDTH: f32 = 120.0;
+    const LONG_NAME: &str = "Informe de investigacion con un nombre muy largo para renombrar completo.txt";
+
+    fn layout(editor: &mut Editor) {
+        editor.update(
+            Size::new(WIDTH, 24.0),
+            crate::core::Font::DEFAULT,
+            Pixels(14.0),
+            LineHeight::default(),
+            Wrapping::None,
+            &mut highlighter::PlainText,
+        );
+    }
+
+    fn follow_cursor(editor: &mut Editor, previous: f32) -> f32 {
+        layout(editor);
+        let cursor_x =
+            horizontal_cursor_position(editor.selection(), editor.cursor());
+        let offset = horizontal_scroll_offset(
+            previous,
+            cursor_x,
+            WIDTH,
+            editor.min_bounds().width,
+        );
+
+        assert!(cursor_x - offset >= -0.01);
+        assert!(cursor_x - offset <= WIDTH - 1.0);
+        offset
+    }
+
+    #[test]
+    fn arrows_keep_the_caret_visible_in_both_directions() {
+        let mut editor = Editor::with_text(LONG_NAME);
+        let mut offset = follow_cursor(&mut editor, 0.0);
+
+        for _ in 0..LONG_NAME.chars().count() {
+            editor.perform(Action::Move(Motion::Right));
+            offset = follow_cursor(&mut editor, offset);
+        }
+        assert!(offset > WIDTH);
+
+        for _ in 0..LONG_NAME.chars().count() {
+            editor.perform(Action::Move(Motion::Left));
+            offset = follow_cursor(&mut editor, offset);
+        }
+        assert_eq!(offset, 0.0);
+    }
+
+    #[test]
+    fn shift_arrows_follow_the_active_end_of_the_selection() {
+        let mut editor = Editor::with_text(LONG_NAME);
+        let mut offset = follow_cursor(&mut editor, 0.0);
+
+        for _ in 0..LONG_NAME.chars().count() {
+            editor.perform(Action::Select(Motion::Right));
+            offset = follow_cursor(&mut editor, offset);
+        }
+        assert!(offset > WIDTH);
+        assert_eq!(editor.copy().as_deref(), Some(LONG_NAME));
+
+        editor.perform(Action::Move(Motion::DocumentEnd));
+        for _ in 0..LONG_NAME.chars().count() {
+            editor.perform(Action::Select(Motion::Left));
+            offset = follow_cursor(&mut editor, offset);
+        }
+        assert_eq!(offset, 0.0);
+        assert_eq!(editor.copy().as_deref(), Some(LONG_NAME));
+    }
+
+    #[test]
+    fn home_end_and_replacing_a_long_name_update_the_viewport() {
+        let mut editor = Editor::with_text(LONG_NAME);
+        layout(&mut editor);
+        editor.perform(Action::Move(Motion::End));
+        let offset = follow_cursor(&mut editor, 0.0);
+        assert!(offset > WIDTH);
+
+        editor.perform(Action::Move(Motion::Home));
+        assert_eq!(follow_cursor(&mut editor, offset), 0.0);
+
+        editor.perform(Action::SelectAll);
+        editor.perform(Action::Edit(Edit::Paste(Arc::new("corto.txt".into()))));
+        assert_eq!(follow_cursor(&mut editor, offset), 0.0);
+    }
 }

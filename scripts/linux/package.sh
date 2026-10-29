@@ -4,10 +4,42 @@ umask 022
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 TARGET=${TARGET:-x86_64-unknown-linux-gnu}
+CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-"$ROOT_DIR/target"}
+export CARGO_TARGET_DIR
+PACKAGE_FORMATS=${PACKAGE_FORMATS:-auto}
+if [ "$PACKAGE_FORMATS" = auto ]; then
+  if command -v dpkg-deb >/dev/null 2>&1; then PACKAGE_FORMATS=deb
+  elif command -v rpmbuild >/dev/null 2>&1; then PACKAGE_FORMATS=rpm
+  else PACKAGE_FORMATS=binary
+  fi
+fi
+case "$PACKAGE_FORMATS" in
+  deb) BUILD_DEB=1; BUILD_RPM=0 ;;
+  rpm) BUILD_DEB=0; BUILD_RPM=1 ;;
+  binary) BUILD_DEB=0; BUILD_RPM=0 ;;
+  *) printf 'PACKAGE_FORMATS must be auto, deb, rpm, or binary\n' >&2; exit 1 ;;
+esac
+if [ "$BUILD_DEB" -eq 1 ]; then
+  command -v dpkg-deb >/dev/null 2>&1 && command -v dpkg-shlibdeps >/dev/null 2>&1 || {
+    printf 'Debian packaging requires dpkg-deb and dpkg-shlibdeps (dpkg-dev)\n' >&2; exit 1
+  }
+fi
+if [ "$BUILD_RPM" -eq 1 ]; then
+  command -v rpmbuild >/dev/null 2>&1 || { printf 'Fedora packaging requires rpm-build\n' >&2; exit 1; }
+  HOST_DISTRIBUTION=$(sed -n 's/^ID=//p' /etc/os-release 2>/dev/null | tr -d '"')
+  [ "$HOST_DISTRIBUTION" = fedora ] || {
+    printf 'Build the Fedora RPM inside Fedora so its ABI and dependency generators match the target system\n' >&2; exit 1
+  }
+fi
+case "$TARGET" in
+  x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu | i686-unknown-linux-gnu | i586-unknown-linux-gnu) ;;
+  *) printf 'Unsupported GNU/Linux packaging target: %s\n' "$TARGET" >&2; exit 1 ;;
+esac
+
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -n 1)
 [ -n "$VERSION" ] || { printf 'Could not read the BExplorer version from Cargo.toml\n' >&2; exit 1; }
 APPDIR="$ROOT_DIR/dist/bexplorer-linux-$TARGET"
-TARBALL="$ROOT_DIR/dist/bexplorer-$VERSION-linux-$TARGET.tar.gz"
+BINARY="$ROOT_DIR/dist/bexplorer-$VERSION-linux-$TARGET"
 DEBROOT="$ROOT_DIR/dist/bexplorer-deb"
 RPMBUILD="$ROOT_DIR/dist/rpmbuild"
 
@@ -20,10 +52,14 @@ case "$TARGET" in
   *) DEB_ARCH=; RPM_ARCH= ;;
 esac
 
-DEB="$ROOT_DIR/dist/bexplorer_${VERSION}_${DEB_ARCH:-unsupported}.deb"
-RPM="$ROOT_DIR/dist/bexplorer-${VERSION}-1.${RPM_ARCH:-unsupported}.rpm"
+if [ "$BUILD_RPM" -eq 1 ] && [ "$(rpm --eval '%{_arch}')" != "$RPM_ARCH" ]; then
+  printf 'Build the Fedora RPM natively for %s (cross-packaging is not supported)\n' "$RPM_ARCH" >&2
+  exit 1
+fi
 
-cargo build --manifest-path "$ROOT_DIR/Cargo.toml" --release --target "$TARGET"
+DEB="$ROOT_DIR/dist/bexplorer_${VERSION}_${DEB_ARCH:-unsupported}.deb"
+
+cargo build --locked --manifest-path "$ROOT_DIR/Cargo.toml" --release --target "$TARGET"
 
 rm -rf "$APPDIR" "$DEBROOT" "$RPMBUILD"
 mkdir -p \
@@ -35,7 +71,7 @@ mkdir -p \
   "$APPDIR/usr/share/polkit-1/actions" \
   "$APPDIR/usr/share/doc/bexplorer"
 
-install -m 0755 "$ROOT_DIR/target/$TARGET/release/bexplorer" "$APPDIR/usr/bin/bexplorer"
+install -m 0755 "$CARGO_TARGET_DIR/$TARGET/release/bexplorer" "$APPDIR/usr/bin/bexplorer"
 install -m 0644 "$ROOT_DIR/assets/linux/bexplorer.desktop" "$APPDIR/usr/share/applications/bexplorer.desktop"
 install -m 0644 "$ROOT_DIR/assets/icons/appicon.png" "$APPDIR/usr/share/pixmaps/bexplorer.png"
 for ICON in "$ROOT_DIR"/assets/linux/hicolor/*/apps/bexplorer.png; do
@@ -54,62 +90,83 @@ install -m 0644 "$ROOT_DIR/vendor/7zip-src/DOC/copying.txt" "$APPDIR/usr/share/d
 install -m 0644 "$ROOT_DIR/vendor/7zip-src/DOC/unRarLicense.txt" "$APPDIR/usr/share/doc/bexplorer/unRarLicense.txt"
 
 mkdir -p "$ROOT_DIR/dist"
-tar -C "$APPDIR" -czf "$TARBALL" .
-printf 'Created %s\n' "$TARBALL"
-sha256sum "$TARBALL" > "$TARBALL.sha256.txt"
-printf 'Created %s\n' "$TARBALL.sha256.txt"
+install -m 0755 "$APPDIR/usr/bin/bexplorer" "$BINARY"
+(cd "$ROOT_DIR/dist" && sha256sum "$(basename "$BINARY")") > "$BINARY.sha256.txt"
+printf 'Created %s and checksum\n' "$BINARY"
 
-if ! command -v rpmbuild >/dev/null 2>&1; then
-  printf 'Skipping .rpm: rpmbuild is not installed\n'
-elif [ -z "$RPM_ARCH" ]; then
-  printf 'Skipping .rpm: unsupported target architecture %s\n' "$TARGET"
-else
+if [ "$BUILD_RPM" -eq 1 ]; then
   mkdir -p \
     "$RPMBUILD/BUILD" \
     "$RPMBUILD/BUILDROOT" \
     "$RPMBUILD/RPMS" \
-    "$RPMBUILD/SOURCES/bexplorer-$VERSION" \
+    "$RPMBUILD/SOURCES" \
     "$RPMBUILD/SPECS" \
     "$RPMBUILD/SRPMS"
-  cp -a "$APPDIR/usr" "$RPMBUILD/SOURCES/bexplorer-$VERSION/usr"
-  tar -C "$RPMBUILD/SOURCES" \
-    -czf "$RPMBUILD/SOURCES/bexplorer-$VERSION.tar.gz" \
-    "bexplorer-$VERSION"
-  rm -rf "$RPMBUILD/SOURCES/bexplorer-$VERSION"
+  cp -a "$APPDIR/usr" "$RPMBUILD/SOURCES/usr"
 
   cat > "$RPMBUILD/SPECS/bexplorer.spec" <<EOF
+%global debug_package %{nil}
+
 Name:           bexplorer
 Version:        $VERSION
-Release:        1
+Release:        1%{?dist}
 Summary:        Native Rust file explorer
 License:        MIT
 Vendor:         BExplorer Project
-Source0:        %{name}-%{version}.tar.gz
 BuildArch:      $RPM_ARCH
+AutoReqProv:    yes
 
+# ELF Requires remain automatic; these also cover libraries loaded at runtime.
+Requires:       glib2%{?_isa}
+Requires:       fontconfig%{?_isa}
+Requires:       libX11%{?_isa}
+Requires:       libX11-xcb%{?_isa}
+Requires:       libXext%{?_isa}
+Requires:       libXcursor%{?_isa}
+Requires:       libXi%{?_isa}
+Requires:       libxcb%{?_isa}
+Requires:       libxkbcommon%{?_isa}
+Requires:       libxkbcommon-x11%{?_isa}
+Requires:       libwayland-client%{?_isa}
+Requires:       libwayland-cursor%{?_isa}
+Requires:       libglvnd-egl%{?_isa}
+Requires:       libglvnd-glx%{?_isa}
 Requires:       hicolor-icon-theme
 Requires:       polkit
 Requires:       shared-mime-info
 Requires:       udisks2
 Requires:       xdg-desktop-portal
+Requires:       (xdg-desktop-portal-gtk or xdg-desktop-portal-gnome or xdg-desktop-portal-kde)
 Requires:       xdg-utils
 Recommends:     desktop-file-utils
 Recommends:     gvfs-fuse
 Recommends:     gvfs-mtp
+Recommends:     gvfs-smb
+Recommends:     samba-client
+Recommends:     avahi-tools
+Recommends:     wl-clipboard
+Recommends:     e2fsprogs
+Recommends:     dosfstools
+Recommends:     exfatprogs
+Recommends:     ntfsprogs
+Recommends:     btrfs-progs
+Recommends:     xfsprogs
+Recommends:     mesa-vulkan-drivers
 Suggests:       kio-extras
+Suggests:       kio-fuse
+Suggests:       perl-File-MimeInfo
 
 %description
 BExplorer is a native Rust desktop file explorer with tabs, split-pane
 workflows, archive handling, previews, and Linux desktop integration.
 
 %prep
-%setup -q
 
 %build
 
 %install
 mkdir -p %{buildroot}
-cp -a usr %{buildroot}/
+cp -a "%{_sourcedir}/usr" %{buildroot}/
 
 %post
 if command -v update-desktop-database >/dev/null 2>&1; then
@@ -142,56 +199,61 @@ fi
 %license %{_datadir}/doc/bexplorer/LICENSE
 
 %changelog
-* Fri Jul 24 2026 BExplorer Project <noreply@github.com> - $VERSION-1
+* $(LC_ALL=C date '+%a %b %d %Y') BExplorer Project <noreply@github.com> - $VERSION-1
 - Automated BExplorer package.
 EOF
 
   rpmbuild --define "_topdir $RPMBUILD" \
     -bb "$RPMBUILD/SPECS/bexplorer.spec"
   RPM_CREATED=$(find "$RPMBUILD/RPMS" -type f \
-    -name "bexplorer-$VERSION-1.$RPM_ARCH.rpm" -print | head -n 1)
+    -name "bexplorer-$VERSION-1*.$RPM_ARCH.rpm" -print | head -n 1)
   [ -n "$RPM_CREATED" ] || {
     printf 'rpmbuild completed but the package was not found\n' >&2
     exit 1
   }
+  RPM="$ROOT_DIR/dist/$(basename "$RPM_CREATED")"
   cp "$RPM_CREATED" "$RPM"
   printf 'Created %s\n' "$RPM"
   EXPECTED_VERSION=$VERSION EXPECTED_ARCH=$RPM_ARCH \
     sh "$ROOT_DIR/scripts/linux/validate-rpm.sh" "$RPM"
-  sha256sum "$RPM" > "$RPM.sha256.txt"
+  (cd "$ROOT_DIR/dist" && sha256sum "$(basename "$RPM")") > "$RPM.sha256.txt"
   printf 'Created %s\n' "$RPM.sha256.txt"
 fi
 
-if ! command -v dpkg-deb >/dev/null 2>&1; then
-  printf 'Skipping .deb: dpkg-deb is not installed\n'
-  exit 0
-fi
-
-if [ -z "$DEB_ARCH" ]; then
-  printf 'Skipping .deb: unsupported target architecture %s\n' "$TARGET"
-  exit 0
-fi
+[ "$BUILD_DEB" -eq 1 ] || exit 0
 
 mkdir -p "$DEBROOT/DEBIAN"
 cp -a "$APPDIR/usr" "$DEBROOT/usr"
 
-# Keep the declared libc baseline aligned with the host used to build the
-# distributable. Building in an older supported container therefore lowers
-# the package requirement automatically instead of silently producing a .deb
-# that APT can install but whose executable cannot start.
-GLIBC_VERSION=$(LC_ALL=C grep -aoE 'GLIBC_[0-9]+(\.[0-9]+)+' \
-  "$APPDIR/usr/bin/bexplorer" 2>/dev/null \
-  | sed 's/^GLIBC_//' \
-  | sort -V \
-  | tail -n 1 || true)
-case "$GLIBC_VERSION" in
-  '') printf 'Could not determine the minimum GLIBC version required by BExplorer\n' >&2; exit 1 ;;
-  *[!0-9.]*) printf 'Invalid GLIBC version detected: %s\n' "$GLIBC_VERSION" >&2; exit 1 ;;
-  *)
-    LIBC_DEPENDENCY="libc6 (>= $GLIBC_VERSION)"
-    printf 'Detected GNU libc baseline: %s\n' "$GLIBC_VERSION"
-    ;;
-esac
+# Resolve every ELF dependency and its versioned symbols, including C++ ABI
+# requirements from embedded 7-Zip. A GLIBC-only string scan misses GLIBCXX /
+# CXXABI requirements and can produce an installable but unusable package.
+command -v dpkg-shlibdeps >/dev/null 2>&1 || {
+  printf 'dpkg-dev (dpkg-shlibdeps) is required to determine Debian ABI dependencies\n' >&2
+  exit 1
+}
+ABIROOT=$(mktemp -d "$ROOT_DIR/dist/.bexplorer-abi.XXXXXX")
+trap 'rm -rf "$ABIROOT"' EXIT HUP INT TERM
+mkdir -p "$ABIROOT/debian"
+cat > "$ABIROOT/debian/control" <<EOF
+Source: bexplorer
+Section: utils
+Priority: optional
+Maintainer: BExplorer Project <noreply@github.com>
+
+Package: bexplorer
+Architecture: $DEB_ARCH
+Description: Native Rust file explorer
+EOF
+ELF_DEPENDENCIES=$(cd "$ABIROOT" && dpkg-shlibdeps -O -e "$APPDIR/usr/bin/bexplorer" \
+  | sed -n 's/^shlibs:Depends=//p')
+[ -n "$ELF_DEPENDENCIES" ] || {
+  printf 'Could not determine ELF runtime dependencies\n' >&2
+  exit 1
+}
+rm -rf "$ABIROOT"
+trap - EXIT HUP INT TERM
+printf 'Detected ELF runtime dependencies: %s\n' "$ELF_DEPENDENCIES"
 
 cat > "$DEBROOT/DEBIAN/control" <<EOF
 Package: bexplorer
@@ -200,9 +262,7 @@ Section: utils
 Priority: optional
 Architecture: $DEB_ARCH
 Maintainer: BExplorer Project <noreply@github.com>
-Depends: $LIBC_DEPENDENCY,
- libgcc-s1,
- libstdc++6,
+Depends: $ELF_DEPENDENCIES,
  libx11-6,
  libxext6,
  libxcb1,
@@ -280,5 +340,5 @@ fi
 printf 'Created %s\n' "$DEB"
 EXPECTED_VERSION=$VERSION EXPECTED_ARCH=$DEB_ARCH \
   "$ROOT_DIR/scripts/linux/validate-deb.sh" "$DEB"
-sha256sum "$DEB" > "$DEB.sha256.txt"
+(cd "$ROOT_DIR/dist" && sha256sum "$(basename "$DEB")") > "$DEB.sha256.txt"
 printf 'Created %s\n' "$DEB.sha256.txt"

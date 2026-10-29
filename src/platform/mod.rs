@@ -620,6 +620,15 @@ pub fn portable_download_file(device_id: &str, object_id: &str, target: &Path) -
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn portable_delete_exported_object(
+    device_id: &str,
+    object_id: &str,
+    is_folder: bool,
+) -> Result<()> {
+    linux::portable_delete_exported_object(device_id, object_id, is_folder)
+}
+
+#[cfg(target_os = "linux")]
 pub fn portable_upload_file(
     device_id: &str,
     parent_object_id: &str,

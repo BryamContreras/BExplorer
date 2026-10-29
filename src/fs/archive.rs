@@ -25,6 +25,7 @@ use walkdir::WalkDir;
 
 use crate::utils::errors::{BExplorerError, Result};
 
+mod output;
 mod seven_zip;
 pub mod types;
 mod zip;
@@ -33,8 +34,8 @@ pub use seven_zip::list_7z_entries;
 #[cfg(test)]
 use seven_zip::parse_7z_slt_entries;
 use seven_zip::{
-    archive_selection_entries, compress_with_7zip, extract_selected_with_7zip, extract_with_7zip,
-    run_7zip_list_to_stdout,
+    archive_selection_entries, compress_with_7zip, compress_with_7zip_in_place,
+    extract_selected_with_7zip, extract_with_7zip, run_7zip_list_to_stdout,
 };
 pub use zip::list_zip_entries;
 use zip::{
@@ -47,10 +48,33 @@ pub use types::{
     ArchiveProgress, ArchiveProgressMsg, ArchiveState, ExtractMode,
 };
 
+/// Lists archive metadata while allowing a cancelled search to terminate its
+/// listing helper, including a gzip-to-TAR materialization in that helper.
+pub fn list_archive_entries_cancellable(
+    path: &Path,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> Result<Vec<ArchiveListEntry>> {
+    if cancel.load(AtomicOrdering::Relaxed) {
+        return Err(BExplorerError::Operation(
+            "Archive listing cancelled".into(),
+        ));
+    }
+    let entries = if is_zip(path) {
+        zip::list_zip_entries_cancellable(path, Some(cancel))
+    } else {
+        seven_zip::list_7z_entries_cancellable(path, cancel)
+    }?;
+    if cancel.load(AtomicOrdering::Relaxed) {
+        return Err(BExplorerError::Operation(
+            "Archive listing cancelled".into(),
+        ));
+    }
+    Ok(entries)
+}
+
 const ZIP_LOCAL_FILE_HEADER: u32 = 0x0403_4b50;
 const ZIP_CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4b50;
 const ZIP_END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4b50;
-const ZIP_VERSION: u16 = 20;
 const ZIP_UTF8_FLAG: u16 = 1 << 11;
 const ZIP_ENCRYPTED_FLAG: u16 = 1;
 const ZIP_METHOD_STORE: u16 = 0;
@@ -61,6 +85,7 @@ const DOS_DATE_1980_01_01: u16 = 33;
 const ARCHIVE_PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
 const ARCHIVE_HELPER_ARG: &str = "--bexplorer-archive-helper";
 const ARCHIVE_LIST_HELPER_ARG: &str = "--bexplorer-archive-list-helper";
+const MAX_ARCHIVE_HELPER_REQUEST_BYTES: u64 = 16 * 1024 * 1024;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -68,6 +93,14 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 #[serde(tag = "type", content = "payload")]
 enum ArchiveHelperMessage {
     Progress(ArchiveProgress),
+}
+
+#[derive(Deserialize, Serialize)]
+struct ArchiveHelperRequest {
+    #[serde(flatten)]
+    job: ArchiveJob,
+    #[serde(default)]
+    original_destination: Option<PathBuf>,
 }
 
 #[cfg(windows)]
@@ -411,17 +444,6 @@ fn should_run_archive_job_in_helper(job: &ArchiveJob) -> bool {
     }
 }
 
-fn archive_helper_request_path(job_id: u64) -> PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    std::env::temp_dir().join(format!(
-        "bexplorer-archive-job-{}-{job_id}-{stamp}.json",
-        std::process::id()
-    ))
-}
-
 fn read_archive_helper_stdout<R: Read + Send + 'static>(reader: R, tx: Sender<ArchiveProgressMsg>) {
     let reader = BufReader::new(reader);
     for line in reader.lines().map_while(std::result::Result::ok) {
@@ -441,25 +463,54 @@ fn run_archive_job_in_helper(
     tx: Sender<ArchiveProgressMsg>,
     cancel_flag: &AtomicU32,
 ) -> Result<PathBuf> {
-    let request_path = archive_helper_request_path(job.id);
-    let request_json = serde_json::to_vec(job).map_err(|error| {
+    // The parent owns this directory, so killing/crashing the helper still
+    // removes its partial output without touching a preexisting archive.
+    let workspace = if job.kind == ArchiveJobKind::Compress {
+        Some(TemporaryExtractDirectory::new_in(
+            archive_destination_parent(&job.destination),
+        )?)
+    } else {
+        None
+    };
+    let mut helper_job = job.clone();
+    if let Some(workspace) = &workspace {
+        helper_job.destination = workspace
+            .path()
+            .join(format!("output.{}", job.format.extension()));
+        copy_existing_archive(&job.destination, &helper_job.destination, cancel_flag)?;
+    }
+    let request = ArchiveHelperRequest {
+        job: helper_job.clone(),
+        original_destination: workspace.as_ref().map(|_| job.destination.clone()),
+    };
+    let request_json = serde_json::to_vec(&request).map_err(|error| {
         BExplorerError::Operation(format!("Archive helper request failed: {error}"))
     })?;
-    fs::write(&request_path, request_json)?;
-
+    if request_json.len() as u64 > MAX_ARCHIVE_HELPER_REQUEST_BYTES {
+        return Err(BExplorerError::Operation(
+            "Archive helper request is too large".into(),
+        ));
+    }
     let exe = std::env::current_exe()?;
     let mut command = Command::new(exe);
     command
         .arg(ARCHIVE_HELPER_ARG)
-        .arg(&request_path)
-        .stdin(Stdio::null())
+        // Passwords and source paths stay in the inherited pipe, never in a
+        // command line or a temporary request file.
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 
     let mut child = command.spawn()?;
+    let tree = contain_archive_helper(&mut child)?;
 
     let stdout_reader = child.stdout.take().map(|stdout| {
         let tx = tx.clone();
@@ -473,12 +524,29 @@ fn run_archive_job_in_helper(
         })
     });
 
+    let request_result = child
+        .stdin
+        .take()
+        .ok_or_else(|| io::Error::other("Archive helper stdin is unavailable"))
+        .and_then(|mut stdin| stdin.write_all(&request_json));
+    if let Err(error) = request_result {
+        tree.terminate();
+        let _ = child.kill();
+        let _ = child.wait();
+        if let Some(handle) = stdout_reader {
+            let _ = handle.join();
+        }
+        if let Some(handle) = stderr_reader {
+            let _ = handle.join();
+        }
+        return Err(error.into());
+    }
+
     let status = loop {
         if cancel_flag.load(AtomicOrdering::Relaxed) != 0 {
+            tree.terminate();
             let _ = child.kill();
             let _ = child.wait();
-            let _ = fs::remove_file(&request_path);
-            cleanup_partial_archive_destination(job);
             if let Some(handle) = stdout_reader {
                 let _ = handle.join();
             }
@@ -489,13 +557,27 @@ fn run_archive_job_in_helper(
                 "Archive operation cancelled".into(),
             ));
         }
-        if let Some(status) = child.try_wait()? {
-            break status;
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => (),
+            Err(error) => {
+                tree.terminate();
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(handle) = stdout_reader {
+                    let _ = handle.join();
+                }
+                if let Some(handle) = stderr_reader {
+                    let _ = handle.join();
+                }
+                return Err(error.into());
+            }
         }
         thread::sleep(Duration::from_millis(40));
     };
 
-    let _ = fs::remove_file(&request_path);
+    // A finished/crashed parent must not leave descendants holding its pipes.
+    tree.terminate();
     if let Some(handle) = stdout_reader {
         let _ = handle.join();
     }
@@ -504,7 +586,6 @@ fn run_archive_job_in_helper(
         .unwrap_or_default();
 
     if !status.success() {
-        cleanup_partial_archive_destination(job);
         let error = stderr.trim();
         let message = if error.is_empty() {
             format!("Archive helper failed with status {status}")
@@ -515,7 +596,10 @@ fn run_archive_job_in_helper(
     }
 
     match job.kind {
-        ArchiveJobKind::Compress => Ok(job.destination.clone()),
+        ArchiveJobKind::Compress => {
+            fs::rename(&helper_job.destination, &job.destination)?;
+            Ok(job.destination.clone())
+        }
         ArchiveJobKind::Extract => {
             if job.destination.as_os_str().is_empty() {
                 extract_destination(&job.archive_path, job.extract_mode)
@@ -526,13 +610,27 @@ fn run_archive_job_in_helper(
     }
 }
 
+fn contain_archive_helper(
+    child: &mut std::process::Child,
+) -> Result<crate::utils::process::ProcessTree> {
+    match crate::utils::process::ProcessTree::attach(child) {
+        Some(tree) => Ok(tree),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(BExplorerError::Operation(
+                "Could not contain the archive helper process".into(),
+            ))
+        }
+    }
+}
+
 pub fn try_run_archive_helper_from_args() -> Option<i32> {
     let mut args = std::env::args_os();
     let _exe = args.next();
     let marker = args.next()?;
     if marker == OsStr::new(ARCHIVE_HELPER_ARG) {
-        let request_path = PathBuf::from(args.next()?);
-        return Some(match run_archive_helper(&request_path) {
+        return Some(match run_archive_helper(io::stdin().lock()) {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("{error}");
@@ -555,12 +653,26 @@ pub fn try_run_archive_helper_from_args() -> Option<i32> {
     None
 }
 
-fn run_archive_helper(request_path: &Path) -> Result<()> {
-    let request_json = fs::read_to_string(request_path)?;
-    let job: ArchiveJob = serde_json::from_str(request_json.trim_start_matches('\u{feff}'))
-        .map_err(|error| {
-            BExplorerError::Operation(format!("Archive helper request decode failed: {error}"))
-        })?;
+fn decode_archive_helper_job(reader: impl Read) -> Result<ArchiveHelperRequest> {
+    // Bound malformed input before allocating. Requests contain metadata, not
+    // file contents, and even very large selections fit this budget.
+    let mut request = Vec::new();
+    reader
+        .take(MAX_ARCHIVE_HELPER_REQUEST_BYTES + 1)
+        .read_to_end(&mut request)?;
+    if request.len() as u64 > MAX_ARCHIVE_HELPER_REQUEST_BYTES {
+        return Err(BExplorerError::Operation(
+            "Archive helper request is too large".into(),
+        ));
+    }
+    serde_json::from_slice(&request).map_err(|error| {
+        BExplorerError::Operation(format!("Archive helper request decode failed: {error}"))
+    })
+}
+
+fn run_archive_helper(reader: impl Read) -> Result<()> {
+    let request = decode_archive_helper_job(reader)?;
+    let job = request.job;
     let cancel_flag = AtomicU32::new(0);
     let _progress_registration = register_stdout_progress_callback();
 
@@ -580,12 +692,23 @@ fn run_archive_helper(request_path: &Path) -> Result<()> {
                     command: "Compress".to_string(),
                     file_name: display_name,
                 });
-                compress_with_7zip(
+                if request.original_destination.is_none() {
+                    return compress_with_7zip(
+                        &job.sources,
+                        &job.destination,
+                        job.format,
+                        job.method,
+                        job.password.as_deref(),
+                        &cancel_flag,
+                    );
+                }
+                compress_with_7zip_in_place(
                     &job.sources,
                     &job.destination,
                     job.format,
                     job.method,
                     job.password.as_deref(),
+                    request.original_destination.as_deref(),
                     &cancel_flag,
                 )
             } else {
@@ -598,7 +721,6 @@ fn run_archive_helper(request_path: &Path) -> Result<()> {
             } else {
                 job.destination.clone()
             };
-            fs::create_dir_all(&destination)?;
             if is_zip(&job.archive_path) && !job.has_password() {
                 extract_zip_archive(&job.archive_path, &destination, &cancel_flag)
             } else {
@@ -620,20 +742,6 @@ fn run_archive_list_helper(archive_path: &Path) -> Result<()> {
         run_7zip_list_to_stdout(materialized.archive_path(), &cancel_flag)
     } else {
         run_7zip_list_to_stdout(archive_path, &cancel_flag)
-    }
-}
-
-fn cleanup_partial_archive_destination(job: &ArchiveJob) {
-    if job.kind != ArchiveJobKind::Compress || job.destination.as_os_str().is_empty() {
-        return;
-    }
-    if let Err(error) = fs::remove_file(&job.destination)
-        && error.kind() != io::ErrorKind::NotFound
-    {
-        crate::utils::log::error(format!(
-            "Could not remove partial archive {}: {error}",
-            job.destination.display()
-        ));
     }
 }
 
@@ -696,7 +804,6 @@ pub fn extract(archive: &Path, mode: ExtractMode) -> Result<PathBuf> {
     }
 
     let destination = extract_destination(archive, mode)?;
-    fs::create_dir_all(&destination)?;
 
     let dummy_cancel = AtomicU32::new(0);
     if is_zip(archive) {
@@ -779,7 +886,6 @@ pub fn extract_with_progress(
         return Err(BExplorerError::InvalidPath(archive.to_path_buf()));
     }
     let destination = extract_destination(archive, mode)?;
-    fs::create_dir_all(&destination)?;
     if is_zip(archive) && !password_has_value(password) {
         extract_zip_archive_with_progress(archive, &destination, tx, cancel_flag)?;
     } else {
@@ -799,6 +905,7 @@ pub fn extract_with_progress(
 
 #[allow(dead_code)]
 fn copy_selected_outputs(temp_dir: &Path, roots: &[String], destination: &Path) -> Result<()> {
+    let output = output::ExtractionRoot::new(destination)?;
     for root in roots {
         let source = archive_temp_path(temp_dir, root)?;
         if !source.exists() {
@@ -808,7 +915,10 @@ fn copy_selected_outputs(temp_dir: &Path, roots: &[String], destination: &Path) 
             continue;
         };
         let target = unique_extract_destination(&destination.join(name), source.is_dir());
-        copy_archive_output_recursively(&source, &target)?;
+        let name = target
+            .file_name()
+            .ok_or_else(|| BExplorerError::InvalidPath(target.clone()))?;
+        copy_archive_output_recursively(&source, &output, &name.to_string_lossy())?;
     }
     Ok(())
 }
@@ -826,18 +936,40 @@ fn archive_temp_path(temp_dir: &Path, internal_path: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn copy_archive_output_recursively(source: &Path, target: &Path) -> Result<()> {
-    if source.is_dir() {
-        fs::create_dir_all(target)?;
+fn copy_archive_output_recursively(
+    source: &Path,
+    target: &output::ExtractionRoot,
+    name: &str,
+) -> Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    #[allow(unused_mut)]
+    let mut is_link = metadata.file_type().is_symlink();
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        is_link |= metadata.file_attributes() & 0x400 != 0;
+    }
+    if is_link {
+        return Err(BExplorerError::Operation(format!(
+            "Archive links are not extracted: {}",
+            source.display()
+        )));
+    }
+    if metadata.is_dir() {
+        target.create_directory(name)?;
         for item in fs::read_dir(source)? {
             let item = item?;
-            copy_archive_output_recursively(&item.path(), &target.join(item.file_name()))?;
+            copy_archive_output_recursively(
+                &item.path(),
+                target,
+                &format!("{name}/{}", item.file_name().to_string_lossy()),
+            )?;
         }
     } else {
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(source, target)?;
+        let mut input = output::open_source(source)?;
+        let mut output = target.create_file(name)?;
+        io::copy(&mut input, &mut output)?;
+        output.flush()?;
     }
     Ok(())
 }
@@ -872,16 +1004,78 @@ fn unique_extract_destination(base: &Path, is_dir: bool) -> PathBuf {
 }
 
 fn create_temp_extract_dir() -> Result<PathBuf> {
+    create_temp_extract_dir_in(&std::env::temp_dir())
+}
+
+fn create_temp_extract_dir_in(parent: &Path) -> Result<PathBuf> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let dir = std::env::temp_dir().join(format!(
+    let dir = parent.join(format!(
         "bexplorer-archive-extract-{}-{stamp}",
         std::process::id()
     ));
-    fs::create_dir_all(&dir)?;
+    #[allow(unused_mut)]
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    // Exclusive creation is essential: never reuse an attacker-created folder.
+    builder.create(&dir)?;
     Ok(dir)
+}
+
+struct TemporaryExtractDirectory(PathBuf);
+
+impl TemporaryExtractDirectory {
+    fn new() -> Result<Self> {
+        create_temp_extract_dir().map(Self)
+    }
+    fn new_in(parent: &Path) -> Result<Self> {
+        create_temp_extract_dir_in(parent).map(Self)
+    }
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn archive_destination_parent(destination: &Path) -> &Path {
+    destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+}
+
+fn copy_existing_archive(source: &Path, destination: &Path, cancel: &AtomicU32) -> Result<()> {
+    let mut source = match File::open(source) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut destination = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    let mut buffer = [0; 128 * 1024];
+    loop {
+        check_archive_cancelled(cancel)?;
+        let count = source.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..count])?;
+    }
+    destination.flush()?;
+    Ok(())
+}
+
+impl Drop for TemporaryExtractDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
 struct MaterializedTarArchive {
@@ -1296,6 +1490,40 @@ mod tests {
         let unsafe_path = safe_output_path(&root, "../bad.txt");
         assert!(unsafe_path.is_err());
         fs::remove_dir_all(root).expect("cleanup temp test dir");
+    }
+
+    #[test]
+    fn archive_helper_decodes_a_password_request_from_a_stream() {
+        let job = ArchiveJob {
+            id: 42,
+            kind: ArchiveJobKind::Compress,
+            format: ArchiveFormat::SevenZip,
+            method: ArchiveCompressionMethod::Normal,
+            password: Some("test-only-password".into()),
+            sources: vec![PathBuf::from("source.txt")],
+            destination: PathBuf::from("destination.7z"),
+            archive_path: PathBuf::new(),
+            extract_mode: ExtractMode::Here,
+        };
+        let request = serde_json::to_vec(&job).unwrap();
+        let decoded = decode_archive_helper_job(request.as_slice()).unwrap();
+        assert_eq!(decoded.job.password.as_deref(), Some("test-only-password"));
+        assert_eq!(decoded.job.sources, job.sources);
+        assert_eq!(decoded.job.destination, job.destination);
+        assert!(decode_archive_helper_job(b"invalid json".as_slice()).is_err());
+    }
+
+    #[test]
+    fn cancelled_listing_does_not_open_the_archive_or_spawn_a_helper() {
+        let cancelled = std::sync::atomic::AtomicBool::new(true);
+        for path in [
+            "does-not-exist.zip",
+            "does-not-exist.7z",
+            "does-not-exist.tar.gz",
+        ] {
+            let error = list_archive_entries_cancellable(Path::new(path), &cancelled).unwrap_err();
+            assert!(error.to_string().contains("cancelled"));
+        }
     }
 
     #[test]

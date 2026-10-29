@@ -25,7 +25,7 @@ impl BExplorerIced {
             }
             self.native_icon_cache
                 .insert(key.clone(), IcedImageState::Loading);
-            tasks.push(load_iced_image_task(IcedImageJob::ApplicationIcon {
+            tasks.push(self.load_iced_image_task(IcedImageJob::ApplicationIcon {
                 cache_key: key,
                 application,
                 size: thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
@@ -55,7 +55,7 @@ impl BExplorerIced {
                     }
                     self.small_native_icon_cache
                         .insert(cache_key.clone(), IcedImageState::Loading);
-                    tasks.push(load_iced_image_task(IcedImageJob::NativeIcon {
+                    tasks.push(self.load_iced_image_task(IcedImageJob::NativeIcon {
                         cache_key,
                         path,
                         is_directory,

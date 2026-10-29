@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::io::{Read, Write};
@@ -20,6 +21,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::fs::{explorer, portable};
 use crate::utils::errors::{BExplorerError, Result};
+
+#[cfg(test)]
+mod large_copy_tests;
+mod local;
+#[cfg(test)]
+mod local_tests;
+pub(crate) use local::{FileIdentity, opened_file_identity, path_identity};
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
@@ -161,6 +169,10 @@ struct TransferRuntime {
     tracked_targets: HashSet<PathBuf>,
     reserved_targets: Vec<PathBuf>,
     completed_roots: Vec<TransferCompletedRoot>,
+    source_totals: HashMap<PathBuf, (u64, usize)>,
+    copied_sources: Vec<local::SourceSnapshot>,
+    #[cfg(not(test))]
+    diagnostic_checkpoint: (Instant, Option<TransferState>),
 }
 
 impl TransferRuntime {
@@ -177,6 +189,10 @@ impl TransferRuntime {
             tracked_targets: HashSet::new(),
             reserved_targets: Vec::new(),
             completed_roots: Vec::new(),
+            source_totals: HashMap::new(),
+            copied_sources: Vec::new(),
+            #[cfg(not(test))]
+            diagnostic_checkpoint: (Instant::now(), None),
         }
     }
 
@@ -192,16 +208,36 @@ impl TransferRuntime {
     }
 
     fn track_completed_root(&mut self, source: &Path, target: &Path) {
+        self.protect_destination(target);
         self.completed_roots.push(TransferCompletedRoot {
             source: source.to_path_buf(),
             target: target.to_path_buf(),
         });
     }
+
+    fn protect_destination(&mut self, target: &Path) {
+        self.created_targets
+            .retain(|path| !path.starts_with(target));
+        self.tracked_targets
+            .retain(|path| !path.starts_with(target));
+    }
 }
 
 pub fn run_transfer(job: TransferJob, tx: Sender<TransferMessage>, control: TransferControl) {
+    #[cfg(not(test))]
+    crate::utils::log::info(format!(
+        "Transfer {} started: kind={:?} roots={}",
+        job.id,
+        job.kind,
+        job.sources.len()
+    ));
     match run_transfer_inner(&job, &tx, &control) {
         Ok(outcome) => {
+            #[cfg(not(test))]
+            crate::utils::log::info(format!(
+                "Transfer {} ended: state=Finished files={}",
+                job.id, outcome.completed_files
+            ));
             let _ = tx.send(TransferMessage::Finished {
                 job_id: job.id,
                 kind: job.kind,
@@ -209,11 +245,15 @@ pub fn run_transfer(job: TransferJob, tx: Sender<TransferMessage>, control: Tran
                 completed_roots: outcome.completed_roots,
             });
         }
-        Err(error) if control.cancel.load(Ordering::Relaxed) => {
+        Err(error) if control.cancel.load(Ordering::Relaxed) && !error.operation_may_continue() => {
+            #[cfg(not(test))]
+            crate::utils::log::info(format!("Transfer {} ended: state=Cancelled", job.id));
             let _ = tx.send(TransferMessage::Cancelled { job_id: job.id });
             crate::utils::log::error(error.to_string());
         }
         Err(error) => {
+            #[cfg(not(test))]
+            crate::utils::log::info(format!("Transfer {} ended: state=Failed", job.id));
             let _ = tx.send(TransferMessage::Failed {
                 job_id: job.id,
                 error: error.to_string(),
@@ -358,7 +398,9 @@ fn run_elevated_transfer_helper(request_path: &Path, result_path: &Path) -> i32 
         let writer = thread::Builder::new()
             .name("elevated-transfer-progress-writer".into())
             .spawn(move || {
-                send_elevated_progress(progress_endpoint, progress_token, job_id, rx);
+                // Progress transport is best effort; the helper writes the
+                // authoritative operation result to its secured result file.
+                let _ = send_elevated_progress(progress_endpoint, progress_token, job_id, rx);
             })?;
         let outcome = run_transfer_inner(&job, &tx, &TransferControl::new());
         drop(tx);
@@ -523,31 +565,23 @@ fn send_elevated_progress(
     token: String,
     job_id: u64,
     progress_rx: Receiver<TransferMessage>,
-) {
-    let Ok(mut stream) = TcpStream::connect_timeout(&endpoint, ELEVATED_PROGRESS_CONNECT_TIMEOUT)
-    else {
-        return;
-    };
+) -> Result<()> {
+    let mut stream = TcpStream::connect_timeout(&endpoint, ELEVATED_PROGRESS_CONNECT_TIMEOUT)?;
     let _ = stream.set_nodelay(true);
     let handshake = ElevatedProgressHandshake { job_id, token };
-    if serde_json::to_writer(&mut stream, &handshake).is_err()
-        || stream.write_all(b"\n").is_err()
-        || stream.flush().is_err()
-    {
-        return;
-    }
+    serde_json::to_writer(&mut stream, &handshake)?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
 
     for message in progress_rx {
         let TransferMessage::Progress(progress) = message else {
             continue;
         };
-        if serde_json::to_writer(&mut stream, &progress).is_err()
-            || stream.write_all(b"\n").is_err()
-            || stream.flush().is_err()
-        {
-            return;
-        }
+        serde_json::to_writer(&mut stream, &progress)?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
     }
+    Ok(())
 }
 
 fn run_transfer_inner(
@@ -578,9 +612,8 @@ fn run_transfer_inner(
         return Err(BExplorerError::InvalidPath(job.destination.clone()));
     }
 
-    let total_bytes = job.sources.iter().map(|path| path_total_bytes(path)).sum();
-    let total_files = job.sources.iter().map(|path| path_file_count(path)).sum();
-    let mut runtime = TransferRuntime::new(total_bytes, total_files);
+    let mut runtime = TransferRuntime::new(0, 0);
+    local::prepare(job, tx, control, &mut runtime)?;
 
     emit_progress_checkpoint(job, "", TransferState::Copying, &mut runtime, tx);
 
@@ -588,9 +621,10 @@ fn run_transfer_inner(
         for source in &job.sources {
             check_cancelled(control)?;
             wait_if_paused(job, "", &mut runtime, tx, control)?;
-            if !source.exists() {
+            if fs::symlink_metadata(source).is_err() {
                 continue;
             }
+            local::ensure_supported(source, &fs::symlink_metadata(source)?)?;
 
             let Some(name) = source.file_name() else {
                 continue;
@@ -608,8 +642,9 @@ fn run_transfer_inner(
             // source pasted into its own directory is the lone exception:
             // replacing it would destroy the input before it can be read, so
             // treat it as a completed no-op instead.
-            if source == &target {
+            if source == &target || local::same_file(source, &target)? {
                 mark_source_skipped(job, source, &mut runtime, tx);
+                release_reserved_targets(std::slice::from_ref(&target));
                 continue;
             }
             runtime.track_reserved(&target);
@@ -620,7 +655,8 @@ fn run_transfer_inner(
                 }
                 (TransferKind::Move, true) => {
                     replace_path_staged(job, source, &target, tx, control, &mut runtime)?;
-                    remove_source(source)?;
+                    runtime.protect_destination(&target);
+                    local::remove_copied_source(source, &runtime.copied_sources, control)?;
                 }
                 (TransferKind::Copy, false) => {
                     copy_path(job, source, &target, tx, control, &mut runtime)?
@@ -637,8 +673,8 @@ fn run_transfer_inner(
         })
     })();
 
-    if result.is_err() && control.cancel.load(Ordering::Relaxed) {
-        cleanup_created_targets(&runtime.created_targets);
+    if let Err(error) = &result {
+        cleanup_failed_transfer(&runtime.created_targets, error, control);
     }
     release_reserved_targets(&runtime.reserved_targets);
 
@@ -666,29 +702,22 @@ fn run_portable_transfer(
         ));
     }
 
-    let total_bytes = job
+    let mut runtime = TransferRuntime::new(0, 0);
+    local::prepare(job, tx, control, &mut runtime)?;
+    for source in job
         .sources
         .iter()
-        .map(|path| {
-            if explorer::is_portable_path(path) {
-                portable::path_total_bytes(path)
-            } else {
-                path_total_bytes(path)
-            }
-        })
-        .sum();
-    let total_files = job
-        .sources
-        .iter()
-        .map(|path| {
-            if explorer::is_portable_path(path) {
-                portable::path_file_count(path)
-            } else {
-                path_file_count(path)
-            }
-        })
-        .sum();
-    let mut runtime = TransferRuntime::new(total_bytes, total_files);
+        .filter(|source| explorer::is_portable_path(source))
+    {
+        let (bytes, files) = portable::path_totals_cancellable(source, || {
+            check_cancelled(control)?;
+            emit_progress_if_due(job, "", TransferState::Pending, &mut runtime, tx);
+            Ok(())
+        })?;
+        runtime.total_bytes = runtime.total_bytes.saturating_add(bytes);
+        runtime.total_files = runtime.total_files.saturating_add(files);
+        runtime.source_totals.insert(source.clone(), (bytes, files));
+    }
     emit_progress_checkpoint(job, "", TransferState::Copying, &mut runtime, tx);
 
     let result = if explorer::is_portable_path(&job.destination) {
@@ -698,8 +727,8 @@ fn run_portable_transfer(
     };
 
     release_reserved_targets(&runtime.reserved_targets);
-    if result.is_err() && control.cancel.load(Ordering::Relaxed) {
-        cleanup_created_targets(&runtime.created_targets);
+    if let Err(error) = &result {
+        cleanup_failed_transfer(&runtime.created_targets, error, control);
     }
     result.map(|completed_files| TransferOutcome {
         completed_files,
@@ -737,7 +766,7 @@ fn run_local_to_portable_transfer(
         };
         portable::import_from_local(source, &job.destination, &mut event)?;
         if job.kind == TransferKind::Move {
-            remove_source(source)?;
+            local::remove_copied_source(source, &runtime.copied_sources, control)?;
         }
     }
     Ok(runtime.files_done)
@@ -758,7 +787,7 @@ fn run_portable_to_local_transfer(
         wait_if_paused(job, &display_name(source), runtime, tx, control)?;
 
         if explorer::is_portable_path(source) {
-            let name = portable::path_name(source);
+            let name = portable::safe_child_name(&portable::path_name(source));
             let Some(target) = reserve_destination(
                 &job.destination.join(name),
                 portable::path_is_folder(source),
@@ -769,34 +798,41 @@ fn run_portable_to_local_transfer(
             };
             runtime.track_reserved(&target);
             let replacing = job.conflict_policy == ConflictPolicy::Replace && target.exists();
+            let export;
             if replacing {
                 let staging = unused_transfer_sibling(&target, "staging");
                 let mut event = |event: portable::PortableTransferEvent<'_>| {
                     handle_portable_event(job, event, runtime, tx, control)
                 };
-                let export_result = portable::export_to_local(source, &staging, &mut event);
-                if let Err(error) = export_result {
-                    let _ = remove_source(&staging);
-                    return Err(error);
-                }
+                export =
+                    match portable::export_to_local_with_inventory(source, &staging, &mut event) {
+                        Ok(export) => export,
+                        Err(error) => {
+                            if runtime.tracked_targets.contains(&staging) {
+                                cleanup_failed_staging(&staging, &error);
+                            }
+                            return Err(error);
+                        }
+                    };
                 sync_copied_path(&staging)?;
                 if let Err(error) = commit_staged_path(&staging, &target) {
                     let _ = remove_source(&staging);
                     return Err(error);
                 }
             } else {
-                runtime.track_created(&target);
                 let mut event = |event: portable::PortableTransferEvent<'_>| {
                     handle_portable_event(job, event, runtime, tx, control)
                 };
-                portable::export_to_local(source, &target, &mut event)?;
+                export = portable::export_to_local_with_inventory(source, &target, &mut event)?;
             }
             if job.kind == TransferKind::Move {
                 if !replacing {
                     sync_copied_path(&target)?;
                 }
-                portable::delete_paths(std::slice::from_ref(source))?;
+                runtime.protect_destination(&target);
+                portable::remove_exported_sources(&export, || check_cancelled(control))?;
             }
+            runtime.protect_destination(&target);
             continue;
         }
 
@@ -819,8 +855,9 @@ fn run_portable_to_local_transfer(
         // pasted into its own directory is the lone exception: replacing it
         // would destroy the input before it can be read, so treat it as a
         // completed no-op instead.
-        if source == &target {
+        if source == &target || local::same_file(source, &target)? {
             mark_source_skipped(job, source, runtime, tx);
+            release_reserved_targets(std::slice::from_ref(&target));
             continue;
         }
         runtime.track_reserved(&target);
@@ -831,7 +868,8 @@ fn run_portable_to_local_transfer(
             }
             (TransferKind::Move, true) => {
                 replace_path_staged(job, source, &target, tx, control, runtime)?;
-                remove_source(source)?;
+                runtime.protect_destination(&target);
+                local::remove_copied_source(source, &runtime.copied_sources, control)?;
             }
             (TransferKind::Copy, false) => copy_path(job, source, &target, tx, control, runtime)?,
             (TransferKind::Move, false) => move_path(job, source, &target, tx, control, runtime)?,
@@ -850,6 +888,9 @@ fn handle_portable_event(
     control: &TransferControl,
 ) -> Result<()> {
     match event {
+        portable::PortableTransferEvent::TargetCreated(path) => {
+            runtime.track_created(path);
+        }
         portable::PortableTransferEvent::BeforeItem(name) => {
             check_cancelled(control)?;
             wait_if_paused(job, name, runtime, tx, control)?;
@@ -883,10 +924,9 @@ fn move_path(
     if !(job.conflict_policy == ConflictPolicy::Replace && target.exists())
         && fs::rename(source, target).is_ok()
     {
-        runtime.copied_bytes = runtime
-            .copied_bytes
-            .saturating_add(path_total_bytes(target));
-        runtime.files_done = runtime.files_done.saturating_add(path_file_count(target));
+        let (bytes, files) = runtime.source_totals.get(source).copied().unwrap_or((0, 0));
+        runtime.copied_bytes = runtime.copied_bytes.saturating_add(bytes);
+        runtime.files_done = runtime.files_done.saturating_add(files);
         emit_progress_checkpoint(
             job,
             current_name(target),
@@ -902,7 +942,8 @@ fn move_path(
     // before deleting the only remaining source. Ordinary copies deliberately
     // rely on the operating system's writeback and safe-eject path instead.
     sync_copied_path(target)?;
-    remove_source(source)?;
+    runtime.protect_destination(target);
+    local::remove_copied_source(source, &runtime.copied_sources, control)?;
     Ok(())
 }
 
@@ -923,8 +964,8 @@ fn replace_path_staged(
         sync_copied_path(&staging)?;
         commit_staged_path(&staging, target)
     })();
-    if result.is_err() {
-        let _ = remove_source(&staging);
+    if let Err(error) = &result {
+        cleanup_failed_staging(&staging, error);
     }
     result
 }
@@ -979,6 +1020,10 @@ fn unused_transfer_sibling(target: &Path, purpose: &str) -> PathBuf {
 
 fn sync_copied_path(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    local::ensure_supported(path, &metadata)?;
     if metadata.is_file() {
         fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
     } else if metadata.is_dir() {
@@ -1002,11 +1047,29 @@ fn copy_path(
     check_cancelled(control)?;
     wait_if_paused(job, current_name(source), runtime, tx, control)?;
 
-    if source.is_dir() {
-        let existed = target.exists();
-        fs::create_dir_all(target)?;
-        if !existed {
-            runtime.track_created(target);
+    let metadata = fs::symlink_metadata(source)?;
+    let snapshot = local::SourceSnapshot::capture(source)?;
+    if metadata.file_type().is_symlink() {
+        local::copy_link(source, target)?;
+        runtime.track_created(target);
+        if job.kind == TransferKind::Move {
+            runtime.copied_sources.push(snapshot);
+        }
+        runtime.files_done = runtime.files_done.saturating_add(1);
+        emit_progress_checkpoint(
+            job,
+            current_name(source),
+            TransferState::Copying,
+            runtime,
+            tx,
+        );
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        fs::create_dir(target)?;
+        runtime.track_created(target);
+        if job.kind == TransferKind::Move {
+            runtime.copied_sources.push(snapshot);
         }
         for item in fs::read_dir(source)? {
             let item = item?;
@@ -1027,23 +1090,35 @@ fn copy_path(
     }
 
     let mut input = fs::File::open(source)?;
-    let existed = target.exists();
-    let mut output = fs::File::create(target)?;
-    if !existed {
-        runtime.track_created(target);
+    if !snapshot.matches_open_file(&input)? {
+        return Err(BExplorerError::Operation(format!(
+            "The source changed before copying: {}",
+            source.display()
+        )));
     }
+    let mut output = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(target)?;
+    runtime.track_created(target);
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     let current_name = current_name(source).to_string();
     emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
+    let mut file_bytes = 0_u64;
 
     loop {
         check_cancelled(control)?;
         wait_if_paused(job, &current_name, runtime, tx, control)?;
+        #[cfg(test)]
+        large_copy_tests::trace_io("reading source", runtime.copied_bytes);
         let read = input.read(&mut buffer)?;
         if read == 0 {
             break;
         }
+        #[cfg(test)]
+        large_copy_tests::trace_io("writing destination", runtime.copied_bytes);
         output.write_all(&buffer[..read])?;
+        file_bytes = file_bytes.saturating_add(read as u64);
         runtime.copied_bytes = runtime.copied_bytes.saturating_add(read as u64);
         emit_progress_if_due(job, &current_name, TransferState::Copying, runtime, tx);
     }
@@ -1054,7 +1129,21 @@ fn copy_path(
     if runtime.copied_bytes != runtime.last_emitted_bytes {
         emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
     }
+    #[cfg(test)]
+    large_copy_tests::trace_io("flushing destination", runtime.copied_bytes);
     output.flush()?;
+    if file_bytes != snapshot.size() || !snapshot.unchanged() {
+        return Err(BExplorerError::Operation(format!(
+            "The source changed while copying: {}",
+            source.display()
+        )));
+    }
+    if let Some(modified) = snapshot.modified() {
+        output.set_times(fs::FileTimes::new().set_modified(modified))?;
+    }
+    if job.kind == TransferKind::Move {
+        runtime.copied_sources.push(snapshot);
+    }
     runtime.files_done = runtime.files_done.saturating_add(1);
     emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
     Ok(())
@@ -1066,10 +1155,9 @@ fn mark_source_skipped(
     runtime: &mut TransferRuntime,
     tx: &Sender<TransferMessage>,
 ) {
-    runtime.copied_bytes = runtime
-        .copied_bytes
-        .saturating_add(path_total_bytes(source));
-    runtime.files_done = runtime.files_done.saturating_add(path_file_count(source));
+    let (bytes, files) = runtime.source_totals.get(source).copied().unwrap_or((0, 0));
+    runtime.copied_bytes = runtime.copied_bytes.saturating_add(bytes);
+    runtime.files_done = runtime.files_done.saturating_add(files);
     emit_progress_checkpoint(
         job,
         current_name(source),
@@ -1085,12 +1173,9 @@ fn mark_portable_source_skipped(
     runtime: &mut TransferRuntime,
     tx: &Sender<TransferMessage>,
 ) {
-    runtime.copied_bytes = runtime
-        .copied_bytes
-        .saturating_add(portable::path_total_bytes(source));
-    runtime.files_done = runtime
-        .files_done
-        .saturating_add(portable::path_file_count(source));
+    let (bytes, files) = runtime.source_totals.get(source).copied().unwrap_or((0, 0));
+    runtime.copied_bytes = runtime.copied_bytes.saturating_add(bytes);
+    runtime.files_done = runtime.files_done.saturating_add(files);
     emit_progress_checkpoint(
         job,
         &portable::path_name(source),
@@ -1143,6 +1228,21 @@ fn emit_progress_checkpoint(
     runtime: &mut TransferRuntime,
     tx: &Sender<TransferMessage>,
 ) {
+    #[cfg(not(test))]
+    if runtime.diagnostic_checkpoint.0.elapsed() >= Duration::from_secs(10)
+        || runtime.diagnostic_checkpoint.1 != Some(state)
+    {
+        crate::utils::log::info(format!(
+            "Transfer {} checkpoint: phase={state:?} copied_bytes={} total_bytes={} files_done={} total_files={} elapsed_ms={}",
+            job.id,
+            runtime.copied_bytes,
+            runtime.total_bytes,
+            runtime.files_done,
+            runtime.total_files,
+            runtime.started.elapsed().as_millis()
+        ));
+        runtime.diagnostic_checkpoint = (Instant::now(), Some(state));
+    }
     emit_progress(job, current_name, state, runtime, tx);
     runtime.last_emit = Instant::now();
     runtime.last_emitted_bytes = runtime.copied_bytes;
@@ -1178,69 +1278,44 @@ fn check_cancelled(control: &TransferControl) -> Result<()> {
     }
 }
 
-fn path_total_bytes(path: &Path) -> u64 {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if metadata.is_file() {
-        return metadata.len();
-    }
-    if !metadata.is_dir() {
-        return 0;
-    }
-
-    fs::read_dir(path)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.ok())
-        .map(|item| path_total_bytes(&item.path()))
-        .sum()
-}
-
-fn path_file_count(path: &Path) -> usize {
-    let Ok(metadata) = fs::symlink_metadata(path) else {
-        return 0;
-    };
-    if metadata.is_file() {
-        return 1;
-    }
-    if !metadata.is_dir() {
-        return 0;
-    }
-
-    fs::read_dir(path)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|item| item.ok())
-        .map(|item| path_file_count(&item.path()))
-        .sum()
-}
-
 fn remove_source(path: &Path) -> Result<()> {
-    if path.is_dir() {
-        fs::remove_dir_all(path)?;
-    } else if path.exists() {
-        fs::remove_file(path)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if local::is_directory_reparse_point(&metadata) => fs::remove_dir(path)?,
+        Ok(metadata) if metadata.file_type().is_symlink() => local::remove_link(path)?,
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)?,
+        Ok(_) => fs::remove_file(path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     Ok(())
 }
 
 fn cleanup_created_targets(paths: &[PathBuf]) {
     for path in paths.iter().rev() {
-        let result = if path.is_dir() {
-            fs::remove_dir_all(path)
-        } else if path.exists() {
-            fs::remove_file(path)
-        } else {
-            Ok(())
+        let result = match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => local::remove_link(path),
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir(path),
+            Ok(_) => fs::remove_file(path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
         };
         if let Err(error) = result {
             crate::utils::log::error(format!(
                 "Could not clean cancelled transfer target: {error}"
             ));
         }
+    }
+}
+
+fn cleanup_failed_staging(path: &Path, error: &BExplorerError) {
+    if !error.operation_may_continue() {
+        let _ = remove_source(path);
+    }
+}
+
+fn cleanup_failed_transfer(paths: &[PathBuf], error: &BExplorerError, control: &TransferControl) {
+    if control.cancel.load(Ordering::Relaxed) && !error.operation_may_continue() {
+        cleanup_created_targets(paths);
     }
 }
 
@@ -1253,7 +1328,7 @@ fn reserve_destination(base: &Path, is_dir: bool, policy: ConflictPolicy) -> Opt
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let target = resolve_conflict_with_reservations(base, is_dir, policy, &reserved)?;
-    reserved.insert(target.clone());
+    reserved.insert(local::reservation_key(&target));
     Some(target)
 }
 
@@ -1262,7 +1337,7 @@ fn release_reserved_targets(paths: &[PathBuf]) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     for path in paths {
-        reserved.remove(path);
+        reserved.remove(&local::reservation_key(path));
     }
 }
 
@@ -1274,14 +1349,14 @@ fn resolve_conflict_with_reservations(
 ) -> Option<PathBuf> {
     match policy {
         ConflictPolicy::Replace => {
-            if reserved.contains(base) {
+            if reserved.contains(&local::reservation_key(base)) {
                 Some(unique_destination(base, is_dir, reserved))
             } else {
                 Some(base.to_path_buf())
             }
         }
         ConflictPolicy::Skip => {
-            if base.exists() || reserved.contains(base) {
+            if base.exists() || reserved.contains(&local::reservation_key(base)) {
                 None
             } else {
                 Some(base.to_path_buf())
@@ -1292,7 +1367,7 @@ fn resolve_conflict_with_reservations(
 }
 
 fn unique_destination(base: &Path, is_dir: bool, reserved: &HashSet<PathBuf>) -> PathBuf {
-    if !base.exists() && !reserved.contains(base) {
+    if !base.exists() && !reserved.contains(&local::reservation_key(base)) {
         return base.to_path_buf();
     }
 
@@ -1312,7 +1387,7 @@ fn unique_destination(base: &Path, is_dir: bool, reserved: &HashSet<PathBuf>) ->
             format!("{stem} ({index})")
         };
         let candidate = parent.join(candidate_name);
-        if !candidate.exists() && !reserved.contains(&candidate) {
+        if !candidate.exists() && !reserved.contains(&local::reservation_key(&candidate)) {
             return candidate;
         }
     }
@@ -1544,18 +1619,28 @@ mod tests {
             bytes_per_second: 13.0,
         };
         let mut invalid_stream = TcpStream::connect(endpoint).expect("connect invalid client");
-        serde_json::to_writer(
-            &mut invalid_stream,
-            &ElevatedProgressHandshake {
-                job_id: expected_job_id,
-                token: "wrong-token".into(),
-            },
-        )
-        .expect("write invalid handshake");
-        invalid_stream.write_all(b"\n").expect("end handshake");
-        serde_json::to_writer(&mut invalid_stream, &invalid_progress)
-            .expect("write invalid progress");
-        invalid_stream.write_all(b"\n").expect("end progress");
+        let mut invalid_payload = serde_json::to_vec(&ElevatedProgressHandshake {
+            job_id: expected_job_id,
+            token: "wrong-token".into(),
+        })
+        .expect("serialize invalid handshake");
+        invalid_payload.push(b'\n');
+        invalid_payload
+            .extend(serde_json::to_vec(&invalid_progress).expect("serialize invalid progress"));
+        invalid_payload.push(b'\n');
+        // Rejecting the handshake may close/reset the socket while the client
+        // is still writing. That is the correct authentication behavior.
+        if let Err(error) = invalid_stream.write_all(&invalid_payload) {
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ),
+                "unexpected socket failure: {error}"
+            );
+        }
         drop(invalid_stream);
 
         let valid_progress = TransferProgress {
@@ -1566,22 +1651,28 @@ mod tests {
         };
         let (wire_tx, wire_rx) = mpsc::channel();
         let writer = thread::spawn(move || {
-            send_elevated_progress(endpoint, token, expected_job_id, wire_rx);
+            send_elevated_progress(endpoint, token, expected_job_id, wire_rx)
         });
         wire_tx
             .send(TransferMessage::Progress(valid_progress))
             .expect("queue valid progress");
         drop(wire_tx);
 
-        writer.join().expect("progress writer finished");
+        let received = progress_rx.recv_timeout(Duration::from_secs(10));
+        stop.store(true, Ordering::Release);
+        let written = writer.join();
         relay.join().expect("progress relay finished");
-        let messages = progress_rx.try_iter().collect::<Vec<_>>();
-        assert_eq!(messages.len(), 1);
-        let TransferMessage::Progress(progress) = &messages[0] else {
+        written
+            .expect("progress writer finished")
+            .expect("authenticated writer delivered all frames");
+        let TransferMessage::Progress(progress) =
+            received.expect("receive authenticated progress before deadline")
+        else {
             panic!("unexpected relayed message");
         };
         assert_eq!(progress.current_name, "trusted.bin");
         assert_eq!(progress.copied_bytes, 42);
+        assert_eq!(progress_rx.try_iter().count(), 0);
     }
 
     #[test]

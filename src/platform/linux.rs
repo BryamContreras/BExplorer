@@ -13,9 +13,9 @@ mod storage_watch;
 mod wayland_drag;
 
 pub use portable::{
-    portable_create_folder, portable_delete_objects, portable_device_object_info,
-    portable_device_objects_result, portable_device_thumbnail, portable_devices,
-    portable_download_file, portable_upload_file,
+    portable_create_folder, portable_delete_exported_object, portable_delete_objects,
+    portable_device_object_info, portable_device_objects_result, portable_device_thumbnail,
+    portable_devices, portable_download_file, portable_upload_file,
 };
 #[cfg(target_os = "linux")]
 pub use storage_watch::storage_change_receiver;
@@ -348,11 +348,13 @@ pub fn ensure_kwin_blur_effect() -> Result<bool> {
         return Ok(false);
     }
 
-    let connection = zbus::blocking::Connection::session().map_err(|error| {
-        BExplorerError::Operation(format!(
-            "Could not connect to the Plasma session bus: {error}"
-        ))
-    })?;
+    let connection = zbus::blocking::connection::Builder::session()
+        .and_then(|builder| builder.method_timeout(Duration::from_secs(2)).build())
+        .map_err(|error| {
+            BExplorerError::Operation(format!(
+                "Could not connect to the Plasma session bus: {error}"
+            ))
+        })?;
     let reply = connection
         .call_method(
             Some("org.kde.KWin"),

@@ -1,8 +1,8 @@
 # BExplorer
 
-BExplorer 1.0.5 es un explorador de archivos estable y liviano para Windows y
-Linux, escrito en Rust. Su objetivo es mejorar la gestion diaria de archivos
-sin intentar reemplazar todo el shell del sistema.
+BExplorer es un explorador de archivos para Windows y Linux, escrito en Rust.
+El codigo fuente corresponde a la version 1.0.6. Su objetivo es mejorar la
+gestion diaria de archivos sin intentar reemplazar todo el shell del sistema.
 
 El proyecto esta organizado para que la logica especifica de cada sistema
 operativo quede separada. Windows y Linux son plataformas soportadas con
@@ -10,7 +10,8 @@ integraciones nativas propias; macOS sigue siendo un objetivo experimental.
 
 ## Estado
 
-BExplorer 1.0.5 es la version estable actual para Windows y Linux. La interfaz,
+Las compilaciones 1.0.6 se distribuyen como artefactos de GitHub Actions; la
+actualizacion de version no crea una Release de GitHub. La interfaz,
 el motor de operaciones, los formatos de configuracion y sesion, los flujos de
 comprimidos y las integraciones de plataforma forman la base compatible de la
 serie 1.x.
@@ -84,7 +85,8 @@ La compatibilidad continua se valida especialmente en:
 - Papelera nativa en Windows y Linux con restauracion, eliminacion permanente y
   vaciado.
 - Limpieza recursiva de duplicados en carpetas y unidades extraibles, con
-  resultados agrupados y seleccionables.
+  resultados agrupados y seleccionables, y coincidencias exactas verificadas
+  mediante el contenido.
 - Analisis de almacenamiento para carpetas y unidades montadas, con totales por
   categoria en vivo y grafico de dona por colores.
 - Las transferencias, eliminaciones, compresiones, extracciones, busquedas de
@@ -185,24 +187,43 @@ compatible concreta.
 | Difuminado | Efectos nativos | KWin o Blur My Shell opcional | Experimental |
 | Microsoft Defender | Compatible | No aplica | No aplica |
 
-Compatibilidad del paquete Linux 1.0.5 generado en la base actual:
+Compatibilidad de la base del paquete DEB de CI para 1.0.6:
 
-| Distribucion o entorno | `.deb` actual | Nivel de validacion |
+| Distribucion o entorno | Base DEB de Ubuntu 24.04 | Nivel de validacion |
 | --- | --- | --- |
 | Debian 13 con GNOME o KDE Plasma | Compatible | Funciones principales probadas en ambos entornos |
 | Ubuntu 26.04 con GNOME | Compatible | Flujo principal probado |
 | Ubuntu 24.04 y derivadas con `libc6 >= 2.39` | Compatible por ABI y dependencias | No se han probado todas las derivadas ni todos sus escritorios |
-| Debian 12 | No compatible con este `.deb` | La aplicacion se probo anteriormente con una compilacion compatible, pero el artefacto actual exige una GLIBC posterior |
-| Ubuntu 22.04 | No compatible con este `.deb` | Requiere compilar en una base antigua compatible; no forma parte de la matriz validada actual |
+| Debian 12 | Requiere una compilacion compatible y validacion propia | La aplicacion se probo anteriormente con una compilacion compatible |
+| Ubuntu 22.04 | Requiere una compilacion compatible y validacion propia | No forma parte de la base actual de CI |
 | Otras derivadas de Debian/Ubuntu | Condicional | Requieren `libc6 >= 2.39`, las dependencias declaradas y pruebas en el entorno concreto |
+| Fedora 44 | Usar el RPM nativo de Fedora | Compilacion e instalacion en contenedores Fedora 44; escritorios y dispositivos se validan por separado |
 
-El script de empaquetado detecta la version maxima de GLIBC utilizada por el
-binario y la escribe como requisito de `libc6`, evitando que APT instale un
-ejecutable que no puede arrancar. Compilar el paquete dentro de una base mas
+Las filas de escritorios reflejan pruebas manuales existentes de la serie 1.x.
+La validacion local de estos cambios tambien incluye Windows y Debian 13 bajo
+WSL. Las comprobaciones en WSL y contenedores cubren compilacion, pruebas y
+dependencias; no equivalen a probar GNOME/KDE, Wayland/X11 ni dispositivos
+fisicos con esta version.
+
+El script de empaquetado usa `dpkg-shlibdeps` para detectar las bibliotecas y
+versiones de simbolos ELF utilizadas por el binario. Esto incluye `libc6` y los
+requisitos `GLIBCXX`/`CXXABI` del motor 7-Zip, evitando depender solamente de un
+analisis de cadenas GLIBC. CI fija Ubuntu 24.04 como base para DEB y binario
+Linux, y Fedora 44 para RPM nativo. Los requisitos exactos se consultan en los
+metadatos del paquete generado. Compilar el paquete dentro de una base mas
 antigua puede reducir ese requisito, pero esa compilacion se debe probar por
 separado. La capa grafica mediante `iced`/`winit` admite sesiones Wayland y
 X11; otros escritorios Freedesktop pueden usar las funciones base, pero no se
 declaran probados solo por compartir las mismas bibliotecas.
+
+CI comprueba formato, Clippy y pruebas en Windows y Linux antes de generar
+instaladores. Tambien verifica la instalacion de dependencias del `.deb` y la
+resolucion de bibliotecas ELF en contenedores limpios Ubuntu 24.04 y Debian 13;
+esto no equivale a probar sesiones GNOME/KDE, Wayland/X11 ni dispositivos
+fisicos. El empaquetado Debian requiere `dpkg-dev`. Las regresiones del
+portapapeles Wayland se ejecutan con `sh scripts/linux/test-vendored.sh` despues
+de descargar o compilar las dependencias bloqueadas de la aplicacion; el script
+usa una copia temporal y no modifica los lockfiles del repositorio.
 
 ## Windows
 
@@ -265,6 +286,11 @@ Diferencias e integraciones opcionales en Linux:
   `ripdrag`, `dragon-drag-and-drop`, `dragon` o `dragon-drop`;
 - MTP necesita `kio-extras` en KDE o el backend MTP de GVfs junto con
   `gvfs-fuse` (`gvfs-backends` en Debian/Ubuntu y `gvfs-mtp` en Fedora);
+- al mover desde KDE KIO se conserva el original tras completar la copia:
+  su API de borrado por ruta no permite garantizar que solo se elimine el
+  objeto exportado. La operacion informa que no retiro el origen; sigue
+  disponible la accion Eliminar explicita. Una transferencia KIO incierta
+  bloquea nuevas operaciones KIO hasta finalizar o reconectar el proveedor;
 - el descubrimiento de red depende de los servicios disponibles, las
   credenciales y la configuracion de la red local;
 - el enriquecimiento KIO no reemplaza GVfs, Samba o Avahi y solo se usa cuando
@@ -315,9 +341,12 @@ cargo clippy --all-targets -- -D warnings
 cargo run
 ```
 
-Los paquetes Linux se generan con `scripts/linux/package.sh`; el tarball, los
-paquetes `.deb` y `.rpm`, y sus checksums incluyen los avisos y textos de
-licencia. El script valida automaticamente metadatos, arquitectura y ejecutable
+Los paquetes Linux se generan con `scripts/linux/package.sh`. El script crea
+un ejecutable independiente y su checksum. `PACKAGE_FORMATS=deb` genera DEB,
+`PACKAGE_FORMATS=rpm` genera RPM dentro de Fedora, y `PACKAGE_FORMATS=binary`
+selecciona solo el binario. El modo predeterminado `auto` usa el constructor
+nativo disponible. Los paquetes incluyen los avisos y textos de licencia.
+El script valida automaticamente metadatos, arquitectura y ejecutable
 con `scripts/linux/validate-deb.sh` y `scripts/linux/validate-rpm.sh`. Ambos
 paquetes instalan el ejecutable en `/usr/bin/bexplorer`, registran la aplicacion
 en el menu del escritorio e instalan sus iconos escalados en el tema `hicolor`.
@@ -325,17 +354,36 @@ Esos tamaños se generan desde `assets/icons/appicon.png`; despues de cambiar el
 icono canonico debe ejecutarse `scripts/linux/sync-icons.sh`.
 El `.deb` puede instalarse con `scripts/linux/install-deb.sh`.
 
-En Windows, `scripts/windows/package.ps1` crea un ZIP portable y un instalador
-Inno Setup con checksum SHA-256. El instalador permite elegir espanol o ingles,
+En Windows, `scripts/windows/package.ps1` crea un EXE portable, un instalador
+Inno Setup, checksums SHA-256 y el texto combinado de licencias. La opcion
+`-SkipInstaller` genera el EXE portable con sus avisos y checksum. El instalador
+permite elegir espanol o ingles,
 crea por defecto una entrada en el menu Inicio y ofrece casillas para crear un
 acceso directo en el escritorio y agregar BExplorer al `PATH`. Al desinstalar
 retira solamente su propia entrada del `PATH`, y el desinstalador aparece
 simplemente como BExplorer, sin la version en su nombre. Los comandos antiguos
 de `tools/` se conservan como wrappers compatibles.
 
-El flujo `Build installers` de GitHub Actions se ejecuta con cada push a
-`master`, con etiquetas de version o manualmente. Publica como artefactos el
-Setup de Windows, el `.deb`, el `.rpm` y sus checksums SHA-256.
+El flujo `Build executables and installers` de GitHub Actions se ejecuta en
+pull requests, pushes a `master` y ejecuciones manuales.
+Compila Windows, DEB/binario en Ubuntu 24.04 y RPM nativo en Fedora 44.
+Comprueba tambien la instalacion del RPM, su integridad y sus bibliotecas en
+un contenedor Fedora nuevo. Cada artefacto descargable es un archivo normal
+con su extension original; no genera ZIPs, etiquetas ni Releases de GitHub.
+
+Archivos de la compilacion 1.0.6:
+
+| Artefacto | Archivo |
+| --- | --- |
+| EXE portable de Windows | `BExplorer-1.0.6-windows-x86_64-pc-windows-msvc.exe` |
+| Instalador de Windows | `BExplorer-1.0.6-Setup-x64.exe` |
+| Binario Linux con base Ubuntu 24.04 | `bexplorer-1.0.6-linux-x86_64-unknown-linux-gnu` |
+| Paquete Debian/Ubuntu | `bexplorer_1.0.6_amd64.deb` |
+| Paquete Fedora 44 | `bexplorer-1.0.6-1.fc44.x86_64.rpm` |
+
+Los checksums se entregan como archivos `.sha256.txt` separados. El archivo
+`BExplorer-1.0.6-licenses.txt` debe guardarse junto al ejecutable independiente.
+`bexplorer --version` muestra la version sin abrir una ventana.
 
 ## Comprimidos
 
@@ -344,7 +392,7 @@ formatos de comprimidos.
 
 Flujos soportados:
 
-- crear archivos ZIP;
+- crear archivos ZIP/ZIP64 nativos con Store o Deflate;
 - crear archivos 7z;
 - crear ZIP y 7z protegidos con contrasena;
 - elegir nombre, formato ZIP/7z y nivel rapido, normal o alto desde la barra

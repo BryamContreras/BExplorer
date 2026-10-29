@@ -502,28 +502,92 @@ pub(in crate::iced_ui) fn inline_icon<'a>(
         .into()
 }
 
-pub(in crate::iced_ui) fn load_iced_image_task(job: IcedImageJob) -> Task<Message> {
-    Task::perform(async move { load_iced_image(job) }, Message::ImageLoaded)
+pub(in crate::iced_ui) fn iced_image_job_key(job: &IcedImageJob) -> IcedImageKey {
+    match job {
+        IcedImageJob::Thumbnail { path, variant, .. } => IcedImageKey::Thumbnail {
+            path: path.clone(),
+            variant: *variant,
+        },
+        IcedImageJob::Preview { path } => IcedImageKey::Preview(path.clone()),
+        IcedImageJob::NativeIcon {
+            cache_key, variant, ..
+        } => IcedImageKey::NativeIcon {
+            path: cache_key.clone(),
+            variant: *variant,
+        },
+        IcedImageJob::ApplicationIcon { cache_key, .. } => IcedImageKey::NativeIcon {
+            path: cache_key.clone(),
+            variant: IcedImageVariant::Standard,
+        },
+    }
+}
+
+pub(in crate::iced_ui) fn load_iced_image_task(
+    job: IcedImageJob,
+    cancel: Arc<AtomicBool>,
+    registration: iced::futures::future::AbortRegistration,
+) -> Task<Message> {
+    let operation = async move {
+        let key = iced_image_job_key(&job);
+        let worker_cancel = Arc::clone(&cancel);
+        let result = run_preview_operation(move || {
+            (!worker_cancel.load(AtomicOrdering::Relaxed)).then(|| load_iced_image(job))
+        })
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(IcedImageLoadResult { key, image: None });
+        (result, cancel)
+    };
+    Task::perform(
+        iced::futures::future::Abortable::new(operation, registration),
+        |result| match result {
+            Ok((result, cancel)) => Message::ImageLoaded(result, cancel),
+            Err(_) => Message::Noop,
+        },
+    )
 }
 
 pub(in crate::iced_ui) fn load_pdf_preview_page_task(
     pane: PaneId,
     path: PathBuf,
     page_index: usize,
+    document: Option<Arc<thumbnail_data::PdfPreviewDocument>>,
+    cancel: Arc<AtomicBool>,
+    registration: iced::futures::future::AbortRegistration,
 ) -> Task<Message> {
-    Task::perform(
-        async move {
-            let rendered = thumbnail_data::render_pdf_preview_page(&path, page_index)
-                .map(|(page_count, image)| (page_count, iced_rgba_from_native(image)));
-            PdfPreviewLoadResult {
-                pane,
-                path,
-                page_index,
-                page_count: rendered.as_ref().map(|(page_count, _)| *page_count),
-                image: rendered.and_then(|(_, image)| image),
+    let operation = async move {
+        let worker_path = path.clone();
+        let worker_cancel = Arc::clone(&cancel);
+        let rendered = run_preview_operation(move || {
+            if worker_cancel.load(AtomicOrdering::Relaxed) {
+                return None;
             }
+            let document = document.or_else(|| thumbnail_data::open_pdf_preview(&worker_path))?;
+            let (count, image) = thumbnail_data::render_pdf_document_page(&document, page_index)?;
+            Some((document, count, iced_rgba_from_native(image)))
+        })
+        .await
+        .ok()
+        .flatten();
+        PdfPreviewLoadResult {
+            pane,
+            path,
+            page_index,
+            page_count: rendered.as_ref().map(|(_, page_count, _)| *page_count),
+            document: rendered
+                .as_ref()
+                .map(|(document, _, _)| Arc::clone(document)),
+            image: rendered.and_then(|(_, _, image)| image),
+            cancel,
+        }
+    };
+    Task::perform(
+        iced::futures::future::Abortable::new(operation, registration),
+        |result| match result {
+            Ok(result) => Message::PdfPreviewPageLoaded(result),
+            Err(_) => Message::Noop,
         },
-        Message::PdfPreviewPageLoaded,
     )
 }
 

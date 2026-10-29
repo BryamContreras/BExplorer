@@ -2,7 +2,7 @@
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Version](https://img.shields.io/badge/version-1.0.5-brightgreen)
+![Version](https://img.shields.io/badge/version-1.0.6-brightgreen)
 ![Status](https://img.shields.io/badge/status-stable-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -20,9 +20,11 @@ platform modules.
 
 ## Status
 
-BExplorer 1.0.5 is the current stable Windows and Linux version. Its desktop
-interface, file-operation engine, archive workflows, platform integrations,
-configuration format, and session format form the supported 1.x baseline.
+BExplorer's source version is 1.0.6 for Windows and Linux. Builds are provided
+through GitHub Actions artifacts; this version update does not create a GitHub
+Release. Its desktop interface, file-operation engine, archive workflows,
+platform integrations, configuration format, and session format preserve the
+supported 1.x baseline.
 Development now prioritizes compatibility fixes, reliability, and focused
 improvements over broad rewrites.
 
@@ -58,7 +60,7 @@ installed.
 - Native Trash views on Windows and Linux with restore, permanent delete, and
   empty-trash actions.
 - Recursive duplicate cleanup for folders and removable storage with grouped,
-  selectable results and native-trash deletion.
+  selectable results, content-verified exact matches, and native-trash deletion.
 - Storage analysis for folders and mounted drives with live category totals
   and a color-coded donut chart.
 - Long-running transfers, deletions, compression, extraction, duplicate scans,
@@ -177,7 +179,7 @@ support.
 
 Supported workflows:
 
-- create ZIP archives natively from Rust;
+- create ZIP/ZIP64 archives natively from Rust with Store or Deflate;
 - create 7z archives through the embedded 7-Zip engine;
 - create password-protected ZIP and 7z archives;
 - choose archive name, ZIP/7z format, and fast, normal, or high compression
@@ -244,24 +246,32 @@ GNOME and KDE Plasma are the primary integration targets; XDG, GVfs, UDisks2,
 and Polkit keep most functionality desktop-neutral. Distribution compatibility
 must distinguish the source code from a prebuilt binary:
 
-| Distribution/environment | Project status | Current locally built `.deb` |
+| Distribution/environment | Project status | Ubuntu 24.04 DEB baseline |
 | --- | --- | --- |
 | Debian 13, GNOME | Manually tested | Compatible |
 | Debian 13, KDE Plasma | Manually tested | Compatible; KIO enrichment available when installed |
 | Ubuntu 26.04, GNOME | Manually tested | Compatible |
 | Ubuntu 24.04 LTS and derivatives with the same or newer ABI | Supported package baseline; clean-machine testing remains recommended | Compatible when the declared packages are available |
-| Debian 12 | Functionally tested from a compatible local build | **Not compatible** with the current artifact (`libc6` is too old) |
-| Ubuntu 22.04 LTS and derivatives | Older baseline; rebuild and test from source there | **Not compatible** with the current artifact (`libc6` is too old) |
+| Debian 12 | Functionally tested from a compatible local build | Requires a separately compatible build and validation |
+| Ubuntu 22.04 LTS and derivatives | Older baseline; rebuild and test from source there | Requires a separately compatible build and validation |
 | Other Debian/Ubuntu derivatives | Expected to run when they provide the declared runtime services and a compatible ABI; not all desktop combinations are tested | Depends on architecture, `libc6`, and package availability |
-| Fedora, Arch, openSUSE, and other families | Source builds only; not currently a packaged/tested release target | The Debian package is not supported |
+| Fedora 44 | Native RPM build and installation checks in Fedora 44 containers; desktop/device checks remain separate | Use the Fedora RPM |
+| Other Fedora versions, Arch, openSUSE, and other families | Build and test on the intended distribution | The Debian package is not supported |
 
-The `.deb` produced in the current build environment is GNU/Linux `amd64` and
-declares `libc6 (>= 2.39)`. That covers the ABI baseline of Ubuntu 24.04 or
-newer and Debian 13, but not Debian 12 or Ubuntu 22.04. This is a property of
-the distributed binary, not an intentional source-code restriction: the
-packaging script detects the highest GLIBC symbol required by the executable.
+The DEB workflow builds GNU/Linux `amd64` on Ubuntu 24.04, whose runtime
+baseline includes GLIBC 2.39. The packaging script uses `dpkg-shlibdeps` to
+derive the actual ELF library and symbol requirements from each executable,
+including the C++ runtime used by embedded 7-Zip. Check the generated package
+metadata before using a binary on an older distribution. CI fixes the build
+image so changing the runner's default cannot silently raise that baseline.
 To support an older distribution, compile and test on that oldest baseline and
 publish the resulting package; do not only weaken the dependency metadata.
+
+The desktop rows above describe existing manual coverage of the 1.x series.
+The 1.0.6 validation pass also includes Windows checks and Debian 13 under WSL.
+WSL and package-container checks validate builds, tests, and runtime
+dependencies; they do not establish GNOME/KDE, Wayland/X11, or physical-device
+coverage for this version.
 
 ## Interface Architecture
 
@@ -366,6 +376,11 @@ BExplorer keeps an opaque readable background.
 - Linux MTP requires either `kio-extras` on KDE or the distribution's GVfs MTP
   backend plus `gvfs-fuse` (`gvfs-backends` on Debian/Ubuntu, `gvfs-mtp` on
   Fedora). BExplorer detects both at runtime and does not link to GTK or Qt.
+- KDE KIO exports retain their originals after a Move because KIO's
+  path-based deletion API cannot safely enforce the exported-object boundary.
+  The completed copy is kept and the operation reports that source removal was
+  skipped. Explicit Delete remains available. An uncertain KIO transfer blocks
+  subsequent KIO operations until its completion or provider reconnection.
 - Copying directly between two folders on the same MTP device is not supported.
 - Extracting selected archive entries directly into an MTP device is blocked;
   extract to a normal folder first.
@@ -414,6 +429,7 @@ Linux source-build requirements:
   wrappers for `cc`, `c++`, `ar`, and `ranlib`.
 - Development headers and runtime libraries required by `iced`/`winit` for
   Wayland/X11 and OpenGL on the build distribution.
+- `dpkg-dev` for Debian packaging and ELF dependency/version detection.
 
 The generated Debian package keeps the following startup and core integration
 groups in `Depends`:
@@ -471,8 +487,8 @@ scripts/windows/package.ps1
 ```
 
 This requires Inno Setup 6 or 7 to be installed. The script creates a versioned
-portable ZIP, a bilingual Inno Setup installer, and SHA-256 checksums under
-`dist/`. The installer:
+portable executable, a bilingual Inno Setup installer, SHA-256 checksums, and
+the combined license notices under `dist/`. The installer:
 
 - lets the user choose English or Spanish;
 - installs BExplorer under Program Files;
@@ -483,14 +499,13 @@ portable ZIP, a bilingual Inno Setup installer, and SHA-256 checksums under
 - identifies the installed application and uninstaller simply as BExplorer,
   without adding the release version to the displayed name.
 
-Use `-SkipInstaller` to create only the portable ZIP. A manual portable
-installation can copy:
+Use `-SkipInstaller` to build the portable executable and its notices/checksum.
+A manual portable installation can copy:
 
 ```text
-BExplorer.exe
-README.md
-LICENSE
-THIRD_PARTY_NOTICES.md
+BExplorer-1.0.6-windows-x86_64-pc-windows-msvc.exe
+BExplorer-1.0.6-windows-x86_64-pc-windows-msvc.exe.sha256.txt
+BExplorer-1.0.6-licenses.txt
 ```
 
 to a stable folder such as:
@@ -516,10 +531,13 @@ Linux packages can be built with:
 scripts/linux/package.sh
 ```
 
-The script creates a versioned tarball and SHA-256 checksum under `dist/`.
-When the corresponding packaging tools are installed, it also creates `.deb`
-and `.rpm` packages with checksums. Their metadata, architecture, installed
-executable, and dependency classification are checked through
+The script creates a standalone versioned executable and SHA-256 checksum
+under `dist/`. `PACKAGE_FORMATS=deb` selects Debian packaging,
+`PACKAGE_FORMATS=rpm` selects a native Fedora RPM build, and
+`PACKAGE_FORMATS=binary` selects only the standalone binary. The default
+`auto` chooses an available native package builder or the standalone binary.
+Package metadata, architecture, installed executable, and dependency
+classification are checked through
 `scripts/linux/validate-deb.sh` and `scripts/linux/validate-rpm.sh`. Both
 packages contain the desktop entry, metainfo, Polkit policy, hicolor icons from
 16 to 512 pixels, license, third-party notices, and the original 7-Zip license
@@ -534,10 +552,11 @@ as the default file manager without silently changing the user's current
 association. If a caller passes a file, BExplorer opens its containing folder.
 
 The control file declares the runtime integrations described under Build
-Requirements. It also derives the minimum `libc6` version from the built
-executable instead of hard-coding a misleading baseline. The package generated
-in the current environment requires `libc6 >= 2.39`; Debian 12 and Ubuntu 22.04
-need a package rebuilt and tested on an older compatible build base.
+Requirements. It also derives versioned ELF dependencies with `dpkg-shlibdeps`,
+covering both `libc6` and C++ `GLIBCXX`/`CXXABI` requirements instead of only
+scanning GLIBC strings. Debian 12 and Ubuntu 22.04 require a compatible build
+and separate validation against their libraries; weakening package dependency
+metadata does not make a newer binary compatible.
 
 Install the generated package and its dependencies with:
 
@@ -547,9 +566,36 @@ scripts/linux/install-deb.sh
 
 Both legacy commands under `tools/` remain as compatibility wrappers.
 
-The `Build installers` GitHub Actions workflow runs for pushes to `master`,
-version tags, and manual dispatches. It publishes the Windows Setup executable,
-Debian package, RPM package, and their SHA-256 checksums as workflow artifacts.
+The `Build executables and installers` GitHub Actions workflow runs for pull
+requests, pushes to `master`, and manual dispatches. It checks formatting,
+Clippy warnings, and tests on Windows and Linux before building installers.
+The DEB job uses the fixed Ubuntu 24.04 image and verifies package dependency
+installation and ELF library resolution in clean Ubuntu 24.04 and Debian 13
+containers. These checks do not replace GNOME/KDE, Wayland/X11, or device tests.
+The workflow builds the Windows portable EXE and Setup, the DEB and standalone
+Linux binary on Ubuntu 24.04, and a native RPM on Fedora 44. Fedora package
+installation, RPM verification, and ELF library resolution are checked in a
+fresh Fedora 44 container. Each downloadable artifact is one original file,
+with its native extension: installers, executables, packages, checksum files,
+and `BExplorer-1.0.6-licenses.txt`. The workflow does not upload portable ZIPs,
+create version tags, or publish a GitHub Release. The vendored Wayland
+clipboard regressions can also be run locally with
+`sh scripts/linux/test-vendored.sh` after fetching/building the locked app
+dependencies; this tests an isolated copy without changing checkout lockfiles.
+
+The 1.0.6 artifact filenames are:
+
+| Artifact | Filename |
+| --- | --- |
+| Windows portable EXE | `BExplorer-1.0.6-windows-x86_64-pc-windows-msvc.exe` |
+| Windows installer | `BExplorer-1.0.6-Setup-x64.exe` |
+| Linux standalone binary, Ubuntu 24.04 baseline | `bexplorer-1.0.6-linux-x86_64-unknown-linux-gnu` |
+| Debian/Ubuntu package | `bexplorer_1.0.6_amd64.deb` |
+| Fedora 44 package | `bexplorer-1.0.6-1.fc44.x86_64.rpm` |
+
+Executable and package checksums are separate `.sha256.txt` files. Keep the
+combined license notices with a standalone binary. `bexplorer --version`
+prints the build version without opening a window.
 
 ## Local Data
 
@@ -617,8 +663,8 @@ vendor/
   7zip-src/
   7zip-ffi/
 scripts/
-  linux/                     # Debian/tar packaging and local .deb install
-  windows/                   # Portable ZIP and Inno Setup installer
+  linux/                     # Debian/Fedora packaging and local .deb install
+  windows/                   # Portable EXE and Inno Setup installer
 ```
 
 ## Tests
@@ -627,6 +673,8 @@ The current test suite covers:
 
 - archive listing and archive-root behavior;
 - ZIP creation and extraction;
+- ZIP64 entry counts/sizes, CRC consistency, archive destination aliases, and
+  extraction protection against existing junctions and symlinks;
 - 7z creation and extraction through FFI;
 - password-protected ZIP and 7z extraction;
 - archive progress reporting;
@@ -635,6 +683,7 @@ The current test suite covers:
 - complete search inside ZIP archives;
 - UNC path handling;
 - duplicate filtering for USB/MTP devices;
+- full-content duplicate verification and deletion revalidation;
 - basic create-folder and create-file operations;
 - transfer conflict policies;
 - synchronized staged replacement and preservation of an existing destination
@@ -649,7 +698,9 @@ The current test suite covers:
 - Linux mountinfo parsing, MIME/file URI clipboard helpers, UDisks parsing,
   GVfs/Samba/Avahi/KIO network helper parsing, and XDG thumbnail/icon metadata;
 - Linux elevated-operation response handling with `fs.protected_regular`;
-- GNOME/KDE blur selection and readable fallbacks.
+- GNOME/KDE blur selection and readable fallbacks;
+- bounded SVG/PDF rendering, preview-cache eviction, cancellable preview
+  workers, and long-filename caret scrolling.
 
 Run:
 

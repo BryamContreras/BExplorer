@@ -49,6 +49,7 @@ mod advanced;
 mod duplicate_cleanup;
 mod file_actions;
 mod helpers;
+mod image_cache;
 mod interaction;
 mod navigation;
 #[cfg(target_os = "linux")]
@@ -59,6 +60,7 @@ mod update;
 mod view;
 
 use helpers::*;
+use image_cache::ImageCache;
 
 const THIS_PC_LABEL: &str = "This PC";
 const TITLE_HEIGHT: f32 = 38.0;
@@ -175,7 +177,7 @@ const DETAIL_ROW_HEIGHT: f32 = 26.0;
 const DETAIL_ICON_SIZE: f32 = 18.0;
 const DETAIL_GROUP_HEIGHT: f32 = 26.0;
 const DETAIL_NAME_MIN_WIDTH: f32 = 180.0;
-const DETAIL_NAME_MAX_WIDTH: f32 = 460.0;
+const DETAIL_NAME_MAX_WIDTH: f32 = 600.0;
 const DETAIL_TYPE_MIN_WIDTH: f32 = 92.0;
 const DETAIL_TYPE_MAX_WIDTH: f32 = 230.0;
 const DETAIL_SIZE_MIN_WIDTH: f32 = 78.0;
@@ -754,6 +756,8 @@ struct BExplorerIced {
     secondary: PaneState,
     sidebar_storage_entries: Vec<FileEntry>,
     storage_refresh_scheduled: bool,
+    storage_refresh_active: bool,
+    storage_refresh_pending: bool,
     trash_has_items: Option<bool>,
     trash_icon_request_id: u64,
     search_mode_menu_open: Option<PaneId>,
@@ -801,12 +805,12 @@ struct BExplorerIced {
     file_clipboard: Option<FileClipboardState>,
     last_undo_action: Option<UndoAction>,
     last_entry_click: Option<EntryClickState>,
-    thumbnail_cache: HashMap<PathBuf, IcedImageState>,
-    small_thumbnail_cache: HashMap<PathBuf, IcedImageState>,
-    preview_cache: HashMap<PathBuf, IcedImageState>,
+    thumbnail_cache: ImageCache,
+    small_thumbnail_cache: ImageCache,
+    preview_cache: ImageCache,
     pdf_previews: HashMap<PaneId, PdfPreviewState>,
-    native_icon_cache: HashMap<PathBuf, IcedImageState>,
-    small_native_icon_cache: HashMap<PathBuf, IcedImageState>,
+    native_icon_cache: ImageCache,
+    small_native_icon_cache: ImageCache,
     transfer_tx: Sender<TransferMessage>,
     transfer_rx: Receiver<TransferMessage>,
     next_transfer_id: u64,
@@ -1377,6 +1381,8 @@ impl BExplorerIced {
             secondary: PaneState::default(),
             sidebar_storage_entries: Vec::new(),
             storage_refresh_scheduled: false,
+            storage_refresh_active: false,
+            storage_refresh_pending: false,
             trash_has_items: None,
             trash_icon_request_id: 0,
             search_mode_menu_open: None,
@@ -1424,12 +1430,12 @@ impl BExplorerIced {
             file_clipboard: None,
             last_undo_action: None,
             last_entry_click: None,
-            thumbnail_cache: HashMap::new(),
-            small_thumbnail_cache: HashMap::new(),
-            preview_cache: HashMap::new(),
+            thumbnail_cache: ImageCache::new(64 * 1024 * 1024),
+            small_thumbnail_cache: ImageCache::new(16 * 1024 * 1024),
+            preview_cache: ImageCache::new(32 * 1024 * 1024),
             pdf_previews: HashMap::new(),
-            native_icon_cache: HashMap::new(),
-            small_native_icon_cache: HashMap::new(),
+            native_icon_cache: ImageCache::new(32 * 1024 * 1024),
+            small_native_icon_cache: ImageCache::new(16 * 1024 * 1024),
             transfer_tx,
             transfer_rx,
             next_transfer_id: 0,
