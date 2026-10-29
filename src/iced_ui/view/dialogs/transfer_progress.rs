@@ -36,12 +36,10 @@ impl BExplorerIced {
         let files = if item.total_files == 0 {
             self.localized("Preparando archivos", "Preparing files")
                 .to_owned()
+        } else if self.is_spanish() {
+            format!("{} de {} elementos", item.files_done, item.total_files)
         } else {
-            if self.is_spanish() {
-                format!("{} de {} elementos", item.files_done, item.total_files)
-            } else {
-                format!("{} of {} items", item.files_done, item.total_files)
-            }
+            format!("{} of {} items", item.files_done, item.total_files)
         };
         let size = if item.total_bytes == 0 {
             self.localized("Calculando tamaño", "Calculating size")

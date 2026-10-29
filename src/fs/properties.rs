@@ -4,8 +4,6 @@
 //! calculation and mutations can therefore run on background workers while
 //! Iced remains responsive.
 
-#![cfg(target_os = "linux")]
-
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;

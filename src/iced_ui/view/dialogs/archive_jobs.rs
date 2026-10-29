@@ -322,22 +322,20 @@ impl BExplorerIced {
                 self.localized("Preparando", "Preparing"),
                 item.format.extension().to_uppercase()
             )
+        } else if self.is_spanish() {
+            format!(
+                "{} archivos  -  {} de {}",
+                item.progress.files,
+                format_size(Some(item.progress.completed)),
+                format_size(Some(item.progress.total))
+            )
         } else {
-            if self.is_spanish() {
-                format!(
-                    "{} archivos  -  {} de {}",
-                    item.progress.files,
-                    format_size(Some(item.progress.completed)),
-                    format_size(Some(item.progress.total))
-                )
-            } else {
-                format!(
-                    "{} files  -  {} of {}",
-                    item.progress.files,
-                    format_size(Some(item.progress.completed)),
-                    format_size(Some(item.progress.total))
-                )
-            }
+            format!(
+                "{} files  -  {} of {}",
+                item.progress.files,
+                format_size(Some(item.progress.completed)),
+                format_size(Some(item.progress.total))
+            )
         };
         let id = item.id;
         let controls: Element<'_, Message> = if item.state == ArchiveState::Running {

@@ -716,18 +716,16 @@ impl BExplorerIced {
                         variant,
                     }));
                 }
-            } else {
-                if !self.thumbnail_cache_for(variant).contains_key(&entry.path) {
-                    self.thumbnail_cache_for_mut(variant)
-                        .insert(entry.path.clone(), IcedImageState::Loading);
-                    tasks.push(self.load_iced_image_task(IcedImageJob::Thumbnail {
-                        path: entry.path.clone(),
-                        max_bytes: self.config.preview_limit_bytes,
-                        allow_default_resource: false,
-                        size: image_size,
-                        variant,
-                    }));
-                }
+            } else if !self.thumbnail_cache_for(variant).contains_key(&entry.path) {
+                self.thumbnail_cache_for_mut(variant)
+                    .insert(entry.path.clone(), IcedImageState::Loading);
+                tasks.push(self.load_iced_image_task(IcedImageJob::Thumbnail {
+                    path: entry.path.clone(),
+                    max_bytes: self.config.preview_limit_bytes,
+                    allow_default_resource: false,
+                    size: image_size,
+                    variant,
+                }));
             }
         }
 
