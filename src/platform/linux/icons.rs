@@ -101,9 +101,9 @@ fn valid_synthetic_icon_name(name: &str) -> bool {
 fn standard_removable_mount_root(path: &Path) -> bool {
     path.strip_prefix("/run/media")
         .is_ok_and(|relative| relative.components().count() == 2)
-        || path.strip_prefix("/media").is_ok_and(|relative| {
-            matches!(relative.components().count(), 1 | 2)
-        })
+        || path
+            .strip_prefix("/media")
+            .is_ok_and(|relative| matches!(relative.components().count(), 1 | 2))
 }
 
 fn user_directory_icon_names(path: &Path) -> Option<Vec<String>> {
@@ -295,9 +295,10 @@ impl IconThemeStore {
         for name in names {
             for directory in &theme.directories {
                 if directory.matches_size(size)
-                    && let Some(path) = self.icon_file_in_directory(theme_name, directory, name) {
-                        return Some(path);
-                    }
+                    && let Some(path) = self.icon_file_in_directory(theme_name, directory, name)
+                {
+                    return Some(path);
+                }
             }
         }
 
@@ -386,14 +387,18 @@ impl IconThemeDirectory {
             IconThemeDirectoryKind::Scalable => {
                 if target < self.min_size {
                     self.min_size - target
-                } else { target.saturating_sub(self.max_size) }
+                } else {
+                    target.saturating_sub(self.max_size)
+                }
             }
             IconThemeDirectoryKind::Threshold => {
                 let min = self.size.saturating_sub(self.threshold);
                 let max = self.size.saturating_add(self.threshold);
                 if target < min {
                     min - target
-                } else { target.saturating_sub(max) }
+                } else {
+                    target.saturating_sub(max)
+                }
             }
         }
     }
@@ -762,23 +767,14 @@ enum ExternalThumbnailKind {
 }
 
 pub fn image_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
-    external_thumbnail_in(
-        path,
-        size,
-        &xdg_cache_home(),
-        ExternalThumbnailKind::Image,
-    )
+    external_thumbnail_in(path, size, &xdg_cache_home(), ExternalThumbnailKind::Image)
 }
 
 pub fn video_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
     video_thumbnail_in(path, size, &xdg_cache_home())
 }
 
-fn video_thumbnail_in(
-    path: &Path,
-    size: u32,
-    cache_home: &Path,
-) -> Option<NativeIconImage> {
+fn video_thumbnail_in(path: &Path, size: u32, cache_home: &Path) -> Option<NativeIconImage> {
     external_thumbnail_in(path, size, cache_home, ExternalThumbnailKind::Video)
 }
 
@@ -788,9 +784,7 @@ fn external_thumbnail_in(
     cache_home: &Path,
     kind: ExternalThumbnailKind,
 ) -> Option<NativeIconImage> {
-    if !path.is_file() {
-        return None;
-    }
+    let source = thumbnail_source_identity(path)?;
 
     if let Some(thumbnail) = cached_desktop_thumbnail_in(cache_home, path, size) {
         return Some(thumbnail);
@@ -826,14 +820,12 @@ fn external_thumbnail_in(
         && run_registered_desktop_thumbnailer(path, &output.path, edge, &mime)
         && let Some(image) = load_generated_thumbnail(&output.path, size)
     {
-        let _ = save_desktop_thumbnail_in(cache_home, path, size, &mime, &image);
-        return Some(image);
+        let _ = save_desktop_thumbnail_checked_in(cache_home, path, size, &mime, &image, source);
+        return (thumbnail_source_identity(path) == Some(source)).then_some(image);
     }
 
-    if has_tumbler
-        && let Some(image) = request_tumbler_thumbnail(path, size, cache_home, &mime)
-    {
-        return Some(image);
+    if has_tumbler && let Some(image) = request_tumbler_thumbnail(path, size, cache_home, &mime) {
+        return (thumbnail_source_identity(path) == Some(source)).then_some(image);
     }
 
     let generated = match kind {
@@ -852,8 +844,9 @@ fn external_thumbnail_in(
     generated
         .then(|| load_generated_thumbnail(&output.path, size))
         .flatten()
+        .filter(|_| thumbnail_source_identity(path) == Some(source))
         .inspect(|image| {
-            let _ = save_desktop_thumbnail_in(cache_home, path, size, &mime, image);
+            let _ = save_desktop_thumbnail_checked_in(cache_home, path, size, &mime, image, source);
         })
 }
 
@@ -864,15 +857,24 @@ fn load_generated_thumbnail(path: &Path, size: u32) -> Option<NativeIconImage> {
         .and_then(|bytes| load_png_icon(bytes, size))
 }
 
-pub fn cache_desktop_thumbnail(
+pub fn cache_desktop_thumbnail_checked(
     path: &Path,
     size: u32,
     image: &NativeIconImage,
+    expected: (u64, std::time::SystemTime),
 ) -> bool {
     let mime = mime_info()
         .mime_for_path(path)
         .unwrap_or_else(|| "application/octet-stream".into());
-    save_desktop_thumbnail_in(&xdg_cache_home(), path, size, &mime, image)
+    save_desktop_thumbnail_checked_in(&xdg_cache_home(), path, size, &mime, image, expected)
+}
+
+fn thumbnail_source_identity(path: &Path) -> Option<(u64, std::time::SystemTime)> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some((metadata.len(), metadata.modified().ok()?))
 }
 
 fn tumbler_thumbnailer_available() -> bool {
@@ -933,8 +935,7 @@ fn request_tumbler_thumbnail(
         "org.freedesktop.thumbnails.Thumbnailer1",
     )
     .ok()?;
-    let (schemes, mime_types): (Vec<String>, Vec<String>) =
-        proxy.call("GetSupported", &()).ok()?;
+    let (schemes, mime_types): (Vec<String>, Vec<String>) = proxy.call("GetSupported", &()).ok()?;
     if !tumbler_supports_file(&schemes, &mime_types, mime) {
         return None;
     }
@@ -943,10 +944,7 @@ fn request_tumbler_thumbnail(
     let uris = vec![uri.as_str()];
     let mime_hints = vec![mime];
     let handle: u32 = proxy
-        .call(
-            "Queue",
-            &(uris, mime_hints, flavor, "default", 0_u32),
-        )
+        .call("Queue", &(uris, mime_hints, flavor, "default", 0_u32))
         .ok()?;
 
     let deadline = std::time::Instant::now() + TUMBLER_TIMEOUT;
@@ -997,9 +995,7 @@ fn tumbler_supports_file(schemes: &[String], mime_types: &[String], mime: &str) 
         return schemes
             .iter()
             .zip(mime_types)
-            .any(|(scheme, supported)| {
-                scheme == "file" && mime_pattern_matches(supported, mime)
-            });
+            .any(|(scheme, supported)| scheme == "file" && mime_pattern_matches(supported, mime));
     }
     schemes.iter().any(|scheme| scheme == "file")
         && mime_types
@@ -1022,9 +1018,9 @@ fn best_tumbler_flavor(flavors: &[String], size: u32) -> Option<&str> {
 fn mime_pattern_matches(pattern: &str, mime: &str) -> bool {
     pattern == mime
         || pattern == "*/*"
-        || pattern
-            .strip_suffix("/*")
-            .is_some_and(|top| mime.starts_with(top) && mime.as_bytes().get(top.len()) == Some(&b'/'))
+        || pattern.strip_suffix("/*").is_some_and(|top| {
+            mime.starts_with(top) && mime.as_bytes().get(top.len()) == Some(&b'/')
+        })
 }
 
 impl DesktopThumbnailer {
@@ -1122,19 +1118,8 @@ fn resolve_executable(program: &str) -> Option<PathBuf> {
     }
 }
 
-fn run_registered_desktop_thumbnailer(
-    input: &Path,
-    output: &Path,
-    edge: u32,
-    mime: &str,
-) -> bool {
-    run_registered_desktop_thumbnailer_from(
-        desktop_thumbnailers(),
-        input,
-        output,
-        edge,
-        mime,
-    )
+fn run_registered_desktop_thumbnailer(input: &Path, output: &Path, edge: u32, mime: &str) -> bool {
+    run_registered_desktop_thumbnailer_from(desktop_thumbnailers(), input, output, edge, mime)
 }
 
 fn run_registered_desktop_thumbnailer_from(
@@ -1209,8 +1194,7 @@ fn expand_thumbnailer_argument(
 
 fn acquire_thumbnailer_permit() -> ThumbnailerPermit {
     static STATE: OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> = OnceLock::new();
-    let state = STATE
-        .get_or_init(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
+    let state = STATE.get_or_init(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()));
     let (active, available) = state;
     let mut active = active
         .lock()
@@ -1229,12 +1213,14 @@ fn run_ffmpegthumbnailer(program: &Path, input: &Path, output: &Path, edge: u32)
     let _ = fs::remove_file(output);
     let edge = edge.to_string();
     let mut command = Command::new(program);
-    command
-        .arg("-i")
-        .arg(input)
-        .arg("-o")
-        .arg(output)
-        .args(["-s", edge.as_str(), "-t", "10", "-q", "8"]);
+    command.arg("-i").arg(input).arg("-o").arg(output).args([
+        "-s",
+        edge.as_str(),
+        "-t",
+        "10",
+        "-q",
+        "8",
+    ]);
     run_bounded_thumbnailer(command) && thumbnail_output_ready(output)
 }
 
@@ -1304,6 +1290,7 @@ fn thumbnail_output_ready(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
+#[cfg(test)]
 fn save_desktop_thumbnail_in(
     cache_home: &Path,
     original: &Path,
@@ -1311,31 +1298,46 @@ fn save_desktop_thumbnail_in(
     mime: &str,
     image: &NativeIconImage,
 ) -> bool {
+    let Some(expected) = thumbnail_source_identity(original) else {
+        return false;
+    };
+    save_desktop_thumbnail_checked_in(cache_home, original, size, mime, image, expected)
+}
+
+fn save_desktop_thumbnail_checked_in(
+    cache_home: &Path,
+    original: &Path,
+    size: u32,
+    mime: &str,
+    image: &NativeIconImage,
+    expected: (u64, std::time::SystemTime),
+) -> bool {
+    if thumbnail_source_identity(original) != Some(expected) {
+        return false;
+    }
     let Some(uri) = canonical_file_uri(original) else {
         return false;
     };
-    let Ok(metadata) = fs::metadata(original) else {
+    let Some(modified) = expected.1.duration_since(UNIX_EPOCH).ok() else {
         return false;
     };
-    let Some(mtime) = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs().to_string())
-    else {
-        return false;
-    };
-    let file_size = metadata.len().to_string();
+    let mtime = modified.as_secs().to_string();
+    let mtime_ns = modified.as_nanos().to_string();
+    let file_size = expected.0.to_string();
     let attributes = [
         ("Thumb::URI", uri.as_str()),
         ("Thumb::MTime", mtime.as_str()),
         ("Thumb::Size", file_size.as_str()),
+        ("BExplorer::MTimeNS", mtime_ns.as_str()),
         ("Thumb::Mimetype", mime),
         ("Software", concat!("BExplorer ", env!("CARGO_PKG_VERSION"))),
     ];
     let Some(png) = encode_xdg_thumbnail_png(image, &attributes) else {
         return false;
     };
+    if thumbnail_source_identity(original) != Some(expected) {
+        return false;
+    }
 
     let directory = cache_home
         .join("thumbnails")
@@ -1370,6 +1372,10 @@ fn save_desktop_thumbnail_in(
         return false;
     }
     drop(file);
+    if thumbnail_source_identity(original) != Some(expected) {
+        let _ = fs::remove_file(temporary);
+        return false;
+    }
     if fs::rename(&temporary, &destination).is_err() {
         let _ = fs::remove_file(temporary);
         return false;
@@ -1405,12 +1411,7 @@ fn encode_xdg_thumbnail_png(
 
     let mut png = Vec::new();
     image::codecs::png::PngEncoder::new(&mut png)
-        .write_image(
-            &image.rgba,
-            width,
-            height,
-            image::ExtendedColorType::Rgba8,
-        )
+        .write_image(&image.rgba, width, height, image::ExtendedColorType::Rgba8)
         .ok()?;
     if png.len() < 12 || &png[png.len() - 8..png.len() - 4] != b"IEND" {
         return None;
@@ -1518,21 +1519,27 @@ fn thumbnail_metadata_is_current(
     if text.get("Thumb::URI").map(String::as_str) != Some(original_uri) {
         return false;
     }
-    let Some(mtime) = original_metadata
+    let Some(modified) = original_metadata
         .modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_secs().to_string())
     else {
         return false;
     };
+    let mtime = modified.as_secs().to_string();
     if text.get("Thumb::MTime") != Some(&mtime) {
         return false;
     }
+    if let Some(mtime_ns) = text.get("BExplorer::MTimeNS")
+        && mtime_ns.parse::<u128>().ok() != Some(modified.as_nanos())
+    {
+        return false;
+    }
     if let Some(size) = text.get("Thumb::Size")
-        && size.parse::<u64>().ok() != Some(original_metadata.len()) {
-            return false;
-        }
+        && size.parse::<u64>().ok() != Some(original_metadata.len())
+    {
+        return false;
+    }
     true
 }
 
@@ -1595,4 +1602,112 @@ fn split_png_itxt(data: &[u8]) -> Option<(String, String)> {
     let translated_end = rest.iter().position(|byte| *byte == 0)?;
     let value = String::from_utf8_lossy(&rest[translated_end + 1..]).to_string();
     Some((key, value))
+}
+
+#[cfg(test)]
+mod thumbnail_source_tests {
+    use super::*;
+
+    fn fixture() -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "bexplorer-xdg-source-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    fn stamp(path: &Path, nanos: u64) {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(
+                UNIX_EPOCH + Duration::from_secs(1_700_000_000) + Duration::from_nanos(nanos),
+            )
+            .unwrap();
+    }
+
+    fn image() -> NativeIconImage {
+        NativeIconImage {
+            width: 2,
+            height: 2,
+            rgba: [10, 20, 30, 255].repeat(4),
+        }
+    }
+
+    #[test]
+    fn own_xdg_thumbnails_reject_same_size_changes_within_the_same_second() {
+        let root = fixture();
+        let source = root.join("source.png");
+        let cache = root.join("cache");
+        fs::write(&source, b"AAAA").unwrap();
+        stamp(&source, 100);
+        let first = thumbnail_source_identity(&source).unwrap();
+        assert!(save_desktop_thumbnail_checked_in(
+            &cache,
+            &source,
+            128,
+            "image/png",
+            &image(),
+            first
+        ));
+        assert!(cached_desktop_thumbnail_in(&cache, &source, 128).is_some());
+
+        fs::write(&source, b"BBBB").unwrap();
+        stamp(&source, 200);
+        let second = thumbnail_source_identity(&source).unwrap();
+        assert_eq!(first.0, second.0);
+        assert_eq!(
+            first.1.duration_since(UNIX_EPOCH).unwrap().as_secs(),
+            second.1.duration_since(UNIX_EPOCH).unwrap().as_secs()
+        );
+        assert!(cached_desktop_thumbnail_in(&cache, &source, 128).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn xdg_save_does_not_relabel_an_image_rendered_from_an_old_source() {
+        let root = fixture();
+        let source = root.join("source.png");
+        let cache = root.join("cache");
+        fs::write(&source, b"first").unwrap();
+        let captured = thumbnail_source_identity(&source).unwrap();
+        fs::write(&source, b"replacement").unwrap();
+        assert!(!save_desktop_thumbnail_checked_in(
+            &cache,
+            &source,
+            128,
+            "image/png",
+            &image(),
+            captured
+        ));
+        assert!(cached_desktop_thumbnail_in(&cache, &source, 128).is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn standard_xdg_thumbnails_without_our_precise_timestamp_remain_compatible() {
+        let root = fixture();
+        let source = root.join("source.png");
+        fs::write(&source, b"original").unwrap();
+        let metadata = fs::metadata(&source).unwrap();
+        let uri = canonical_file_uri(&source).unwrap();
+        let modified = metadata
+            .modified()
+            .unwrap()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string();
+        let png = encode_xdg_thumbnail_png(
+            &image(),
+            &[("Thumb::URI", &uri), ("Thumb::MTime", &modified)],
+        )
+        .unwrap();
+        assert!(thumbnail_metadata_is_current(&png, &metadata, &uri));
+        fs::remove_dir_all(root).unwrap();
+    }
 }

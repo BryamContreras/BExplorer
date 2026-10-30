@@ -94,14 +94,21 @@ impl BExplorerIced {
         mode: GroupMode,
     ) -> String {
         if mode == GroupMode::Type {
-            // Windows can discover the same class of printer through several
-            // providers, each with a different descriptive comment. Keep all
-            // printer entries under one predictable group instead of making
-            // that provider text part of the group name.
-            if entry.drive_kind == Some(DriveKind::NetworkPrinter) {
-                return self
-                    .localized("Impresoras de red", "Network printers")
-                    .into();
+            // Provider comments describe individual devices, not their group.
+            let network_group = match entry.drive_kind {
+                Some(DriveKind::NetworkComputer) => Some(("Equipos de red", "Network computers")),
+                Some(DriveKind::NetworkPrinter) => Some(("Impresoras de red", "Network printers")),
+                Some(DriveKind::NetworkScanner) => Some(("Escáneres de red", "Network scanners")),
+                Some(DriveKind::NetworkMultifunction) => Some((
+                    "Dispositivos multifunción de red",
+                    "Network multifunction devices",
+                )),
+                Some(DriveKind::NetworkDevice) => Some(("Dispositivos de red", "Network devices")),
+                Some(DriveKind::Network) => Some(("Unidades de red", "Network drives")),
+                _ => None,
+            };
+            if let Some((spanish, english)) = network_group {
+                return self.localized(spanish, english).into();
             }
             self.localized_entry_type_label(entry)
         } else {

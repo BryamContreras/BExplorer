@@ -3,102 +3,53 @@ use super::*;
 impl BExplorerIced {
     pub(super) fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::NetworkDiscoveryPoll(pane, request_id) => {
+                self.poll_network_discovery(pane, request_id)
+            }
             Message::NetworkDiscoveryEntries(pane, request_id, entries) => {
-                // Keep the process-wide cache current even if the user has
-                // already navigated away. Returning to Red can then paint the
-                // partial results immediately instead of starting from empty.
-                explorer::merge_network_root_cache(&entries);
+                // The broker records native observations before publishing
+                // them, including results whose original view was canceled.
 
-                let is_current_network_root = self
-                    .tab_for_pane(pane)
-                    .path
-                    .as_deref()
-                    .is_some_and(explorer::is_network_root_path)
-                    && self.pane(pane).request_id == request_id;
-                if !is_current_network_root {
+                if !self.is_current_network_discovery(pane, request_id) {
                     return Task::none();
                 }
 
-                let searching = self
-                    .localized(
-                        "Buscando dispositivos de red…",
-                        "Searching network devices…",
-                    )
-                    .to_owned();
-                let elements = self.localized("elementos", "items");
-                let results = self.localized("resultados", "results");
-                let completed_entries = {
+                {
                     let state = self.pane_mut(pane);
                     explorer::merge_network_entries(&mut state.entries, entries);
                     explorer::sort_entries_by_name(&mut state.entries);
                     state.network_discovery_pending =
                         state.network_discovery_pending.saturating_sub(1);
-                    state.loading = state.network_discovery_pending != 0;
-                    state.status = if state.loading {
-                        format!("{} {results} · {searching}", state.entries.len())
-                    } else {
-                        format!("{} {elements}", state.entries.len())
-                    };
                     state.folder_entries = None;
                     state.has_vertical_overflow = false;
                     state.mark_entries_changed();
-                    (!state.loading).then(|| state.entries.clone())
-                };
-                if let Some(entries) = completed_entries {
-                    let _ = explorer::save_network_cache(&entries);
-                    self.startup.complete_pane_load(pane, request_id);
                 }
+                self.update_network_discovery_status(pane, explorer::network_discovery_pending());
                 self.queue_visible_images(pane)
             }
             Message::NetworkDiscoveryAddresses(pane, request_id, addresses) => {
-                let is_current_network_root = self
-                    .tab_for_pane(pane)
-                    .path
-                    .as_deref()
-                    .is_some_and(explorer::is_network_root_path)
-                    && self.pane(pane).request_id == request_id;
-                if !is_current_network_root {
+                if !self.is_current_network_discovery(pane, request_id) {
                     return Task::none();
                 }
                 let cancel = Arc::clone(&self.pane(pane).network_discovery_cancel);
-                let elements = self.localized("elementos", "items");
-                let results = self.localized("resultados", "results");
-                let searching = self
-                    .localized(
-                        "Buscando dispositivos de red…",
-                        "Searching network devices…",
-                    )
-                    .to_owned();
-                let completed_entries = if is_current_network_root {
+                {
                     let state = self.pane_mut(pane);
                     state.network_discovery_pending = state
                         .network_discovery_pending
                         .saturating_sub(1)
                         .saturating_add(addresses.len());
-                    state.loading = state.network_discovery_pending != 0;
-                    state.status = if state.loading {
-                        format!("{} {results} · {searching}", state.entries.len())
-                    } else {
-                        format!("{} {elements}", state.entries.len())
-                    };
-                    (!state.loading).then(|| state.entries.clone())
-                } else {
-                    None
-                };
-                if let Some(entries) = completed_entries {
-                    let _ = explorer::save_network_cache(&entries);
-                    self.startup.complete_pane_load(pane, request_id);
                 }
+                self.update_network_discovery_status(pane, explorer::network_discovery_pending());
 
                 let tasks = addresses.into_iter().map(|address| {
                     let cancel = Arc::clone(&cancel);
                     Task::perform(
-                        run_blocking_file_operation(move || {
-                            Ok::<_, BExplorerError>(network_probe(
-                                &cancel,
-                                format!("address-{address}"),
-                                || explorer::network_computer_entry_netbios_address_timed(address),
-                            ))
+                        run_network_operation(move || {
+                            Ok::<_, BExplorerError>(
+                                explorer::network_computer_entry_netbios_address_with_cancel(
+                                    address, &cancel,
+                                ),
+                            )
                         }),
                         move |result| {
                             Message::NetworkDiscoveryEntries(
@@ -113,17 +64,6 @@ impl BExplorerIced {
             }
             Message::Loaded(pane, request_id, result) => {
                 let is_storage_root = self.tab_for_pane(pane).path.is_none();
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
-                let loaded_watch_directory = result
-                    .is_ok()
-                    .then(|| self.tab_for_pane(pane).path.clone())
-                    .flatten()
-                    .filter(|path| {
-                        !explorer::is_virtual_path(path)
-                            && !explorer::is_unc_path(path)
-                            && !crate::fs::archive_listing::is_archive_navigation_path(path)
-                            && path.is_dir()
-                    });
                 let is_trash_root = self
                     .tab_for_pane(pane)
                     .path
@@ -147,6 +87,10 @@ impl BExplorerIced {
                     .cloned();
                 if self.pane(pane).request_id != request_id {
                     return Task::none();
+                }
+                self.pane_mut(pane).directory_load = None;
+                if let Ok(entries) = &result {
+                    self.reconcile_image_sources(entries);
                 }
                 self.startup.complete_pane_load(pane, request_id);
                 let state = self.pane_mut(pane);
@@ -185,10 +129,6 @@ impl BExplorerIced {
                 if pending_reveal.is_some() {
                     self.pending_reveal_in_new_tab = None;
                 }
-                #[cfg(any(target_os = "windows", target_os = "linux"))]
-                if let Some(directory) = loaded_watch_directory {
-                    crate::fs::watcher::acknowledge_directories([directory]);
-                }
                 let mut tasks = Vec::new();
                 if let Some(has_items) = loaded_trash_has_items {
                     self.trash_icon_request_id = self.trash_icon_request_id.saturating_add(1);
@@ -201,7 +141,7 @@ impl BExplorerIced {
                         .map(|entry| entry.path.clone())
                         .collect::<HashSet<_>>();
                     self.sidebar_storage_entries = entries.clone();
-                    let _ = explorer::save_storage_cache(&entries);
+                    schedule_storage_cache(entries.clone());
                     for other_pane in [PaneId::Primary, PaneId::Secondary] {
                         if other_pane == pane
                             || (other_pane == PaneId::Secondary && self.split.is_none())
@@ -258,6 +198,7 @@ impl BExplorerIced {
                 // Queue images only after that mutation so every newly
                 // mounted row receives its thumbnail or native icon.
                 tasks.push(self.queue_visible_images(pane));
+                tasks.push(self.start_ready_directory_refreshes());
                 if !self.pane(pane).search_text.trim().is_empty() {
                     tasks.push(self.start_recursive_search(pane));
                 }
@@ -286,8 +227,8 @@ impl BExplorerIced {
                 self.queue_sidebar_trash_icon(has_items)
             }
             Message::DirectoryChanged(change) => self.refresh_watched_directories(change),
-            Message::WatchedDirectoryLoaded(directory, requests, result) => {
-                self.apply_watched_directory_load(directory, requests, result)
+            Message::WatchedDirectoryLoaded(directory, ticket, requests, result) => {
+                self.apply_watched_directory_load(directory, ticket, requests, result)
             }
             Message::SidebarStorageLoaded(result) => {
                 self.storage_refresh_active = false;
@@ -334,7 +275,7 @@ impl BExplorerIced {
                     .map(|entry| entry.path.clone())
                     .collect::<Vec<_>>();
                 self.sidebar_storage_entries = entries.clone();
-                let _ = explorer::save_storage_cache(&entries);
+                schedule_storage_cache(entries.clone());
                 let available_paths = entries
                     .iter()
                     .map(|entry| entry.path.clone())
@@ -1092,6 +1033,12 @@ impl BExplorerIced {
                 }
             }
             Message::Refresh(pane) => {
+                if let Some(path) = self.tab_for_pane(pane).path.clone() {
+                    self.invalidate_directory_images(&path);
+                    if explorer::is_network_root_path(&path) {
+                        explorer::invalidate_network_discovery_cache();
+                    }
+                }
                 let pane_is_storage_root = self.tab_for_pane(pane).path.is_none();
                 if pane_is_storage_root {
                     // Loading This PC already refreshes the shared storage
@@ -1803,28 +1750,27 @@ impl BExplorerIced {
                 match result.key {
                     IcedImageKey::Thumbnail { path, variant } => match variant {
                         IcedImageVariant::Standard => {
-                            self.thumbnail_cache.insert(path, state);
+                            self.thumbnail_cache.complete(&path, &cancel, state);
                         }
                         IcedImageVariant::Small => {
-                            self.small_thumbnail_cache.insert(path, state);
+                            self.small_thumbnail_cache.complete(&path, &cancel, state);
                         }
                     },
                     IcedImageKey::Preview(path) => {
-                        self.preview_cache.insert(path, state);
+                        self.preview_cache.complete(&path, &cancel, state);
                     }
                     IcedImageKey::NativeIcon { path, variant } => match variant {
                         IcedImageVariant::Standard => {
-                            self.native_icon_cache.insert(path, state);
+                            self.native_icon_cache.complete(&path, &cancel, state);
                         }
                         IcedImageVariant::Small => {
-                            self.small_native_icon_cache.insert(path, state);
+                            self.small_native_icon_cache.complete(&path, &cancel, state);
                         }
                     },
                 }
                 Task::none()
             }
             Message::PdfPreviewPageLoaded(result) => {
-                let mut first_page_handle = None;
                 let mut next_page = None;
 
                 if let Some(state) = self.pdf_previews.get_mut(&result.pane).filter(|state| {
@@ -1843,7 +1789,6 @@ impl BExplorerIced {
                         let handle =
                             iced_image::Handle::from_rgba(image.width, image.height, image.rgba);
                         if result.page_index == 0 {
-                            first_page_handle = Some(handle.clone());
                             state.aspect_ratio = aspect_ratio;
                         }
                         if !state
@@ -1862,10 +1807,6 @@ impl BExplorerIced {
                     next_page = state.next_page_to_load();
                 }
 
-                if let Some(handle) = first_page_handle {
-                    self.preview_cache
-                        .insert(result.path.clone(), IcedImageState::Ready(handle));
-                }
                 next_page.map_or_else(Task::none, |page_index| {
                     self.queue_pdf_preview_page(result.pane, result.path, page_index)
                 })
@@ -2946,7 +2887,38 @@ impl BExplorerIced {
                     };
                     Task::batch([pane_task, self.refresh_sidebar_storage()])
                 }
-                Err(error) => self.report_error(pane, error),
+                Err(error) => {
+                    let error = if error.contains("BEXPLORER_EJECT_BUSY|") {
+                        crate::utils::log::error(format!(
+                            "Safe removal of {} was blocked: {error}",
+                            path.display()
+                        ));
+                        self.localized(
+                            "Windows mantiene la unidad en uso. Cierra los archivos o programas que la utilicen y espera a que terminen las transferencias antes de volver a expulsarla.",
+                            "Windows reports that the drive is still in use. Close files or applications using it and wait for transfers to finish before trying to eject it again.",
+                        )
+                        .to_owned()
+                    } else {
+                        error
+                    };
+                    let error_task = self.report_error(pane, error);
+                    let directories = [PaneId::Primary, PaneId::Secondary]
+                        .into_iter()
+                        .filter(|other| *other == PaneId::Primary || self.split.is_some())
+                        .filter_map(|other| self.tab_for_pane(other).path.clone())
+                        .filter(|path| {
+                            !explorer::is_virtual_path(path)
+                                && !explorer::is_unc_path(path)
+                                && !crate::fs::archive_listing::is_archive_navigation_path(path)
+                        })
+                        .collect::<Vec<_>>();
+                    let refresh =
+                        self.refresh_watched_directories(crate::fs::watcher::DirectoryChange {
+                            paths: directories.clone(),
+                            directories,
+                        });
+                    Task::batch([error_task, refresh, self.refresh_sidebar_storage()])
+                }
             },
             Message::OpenWithChooserFinished(pane, result) => match result {
                 Ok(()) => {
@@ -4182,6 +4154,10 @@ impl BExplorerIced {
                 if self.main_window_id == Some(id) {
                     self.save_session();
                     save_config(&self.config);
+                    self.trim_image_memory(true);
+                    self.directory_refreshes.retain(&HashSet::new());
+                    self.primary.directory_load = None;
+                    self.secondary.directory_load = None;
                     self.main_window_id = None;
                     #[cfg(target_os = "windows")]
                     {
@@ -4608,6 +4584,37 @@ impl BExplorerIced {
                 }
                 Task::none()
             }
+            Message::WindowFocused(id) => {
+                if self.main_window_id != Some(id) {
+                    return Task::none();
+                }
+                self.memory_trim_generation = self.memory_trim_generation.wrapping_add(1);
+                self.images_suspended = false;
+                let mut tasks = Vec::new();
+                tasks.push(self.queue_cached_sidebar_icons());
+                for pane in [PaneId::Primary, PaneId::Secondary] {
+                    if pane == PaneId::Secondary && self.split.is_none() {
+                        continue;
+                    }
+                    tasks.push(self.queue_visible_images(pane));
+                    tasks.push(self.queue_selected_preview(pane));
+                }
+                Task::batch(tasks)
+            }
+            Message::TrimMemoryAfterIdle(id, generation) => {
+                if self.main_window_id != Some(id) || self.memory_trim_generation != generation {
+                    return Task::none();
+                }
+                window::is_minimized(id).map(move |minimized| {
+                    Message::TrimMemory(id, generation, minimized.unwrap_or(false))
+                })
+            }
+            Message::TrimMemory(id, generation, minimized) => {
+                if self.main_window_id == Some(id) && self.memory_trim_generation == generation {
+                    self.trim_image_memory(minimized);
+                }
+                Task::none()
+            }
             Message::WindowUnfocused(id) => {
                 if self.main_window_id == Some(id) {
                     // The cached backdrop represents the active window. Do not
@@ -4617,6 +4624,11 @@ impl BExplorerIced {
                     if self.context_menu.is_some() {
                         self.dismiss_context_menu();
                     }
+                    self.memory_trim_generation = self.memory_trim_generation.wrapping_add(1);
+                    let generation = self.memory_trim_generation;
+                    return Task::perform(delay(Duration::from_secs(30)), move |_| {
+                        Message::TrimMemoryAfterIdle(id, generation)
+                    });
                 }
                 Task::none()
             }
@@ -4638,6 +4650,8 @@ impl BExplorerIced {
             }
             Message::WindowMinimize => {
                 if let Some(id) = self.main_window_id {
+                    self.memory_trim_generation = self.memory_trim_generation.wrapping_add(1);
+                    self.trim_image_memory(true);
                     window::minimize(id, true)
                 } else {
                     Task::none()

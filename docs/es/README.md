@@ -105,7 +105,11 @@ La compatibilidad continua se valida especialmente en:
   UDisks2/Polkit en Linux. Linux permite discos externos y discos locales
   secundarios, pero bloquea el disco fisico del sistema, firmware, imagenes
   loop, RAID y almacenamiento por capas antes de desmontar y formatear.
-- Descubrimiento progresivo de red con cache.
+- Descubrimiento progresivo con proveedores de red complementarios, consultas
+  compartidas y hasta ocho consultas NetBIOS de vecinos simultaneas. Actualizar
+  evita la cache de consultas terminadas y reutiliza las que siguen en curso.
+- Vigilancia por eventos con recargas agrupadas, trabajadores limitados,
+  miniaturas validadas contra el archivo y cache de imagenes ajustada a la RAM.
 - Copiar, cortar y pegar compatible con el portapapeles de Windows; en Linux se
   usan helpers MIME nativos cuando existen, con fallback de texto.
 - Arrastrar y soltar dentro de BExplorer y hacia otras aplicaciones compatibles
@@ -238,8 +242,10 @@ independiente de dos tareas simultaneas.
 Si Windows no posee un proveedor para un formato de imagen, BExplorer conserva
 su decodificador interno como respaldo y guarda el resultado en una cache
 persistente propia, invalidada automaticamente cuando cambia la ruta, el tamano
-o la fecha del archivo original. Esta cache se limita a 512 MiB y elimina
-entradas con mas de 90 dias. Los formatos de video disponibles dependen de los
+o la fecha del archivo original. El almacenamiento dividido evita recorrer
+toda la cache en cada guardado. La limpieza tiene como objetivo un presupuesto
+conjunto de 512 MiB y elimina entradas con mas de 90 dias, incluyendo el formato de
+cache anterior. Los formatos de video disponibles dependen de los
 proveedores de miniaturas y codecs instalados en Windows, sin convertir FFmpeg
 en una dependencia obligatoria. Los dispositivos portatiles siguen usando la
 miniatura que expone WPD/MTP.
@@ -292,7 +298,9 @@ Diferencias e integraciones opcionales en Linux:
   disponible la accion Eliminar explicita. Una transferencia KIO incierta
   bloquea nuevas operaciones KIO hasta finalizar o reconectar el proveedor;
 - el descubrimiento de red depende de los servicios disponibles, las
-  credenciales y la configuracion de la red local;
+  credenciales y la configuracion de la red local. En Windows se combinan
+  servidores, dispositivos, impresoras y recursos en una sola lista; ningun
+  proveedor individual se trata como un inventario completo;
 - el enriquecimiento KIO no reemplaza GVfs, Samba o Avahi y solo se usa cuando
   KDE/KIO esta instalado;
 - la busqueda de iconos se hace en proceso y todavia puede no cubrir extensiones

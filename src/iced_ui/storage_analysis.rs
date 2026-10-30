@@ -776,6 +776,7 @@ pub(in crate::iced_ui) fn storage_file_entry(file: &StorageFile) -> FileEntry {
         free_space: None,
         size: Some(file.size),
         percent_full: None,
+        modified_time: file.modified,
         modified: None,
         created: None,
         is_hidden: name.starts_with('.'),

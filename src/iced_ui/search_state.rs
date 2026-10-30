@@ -11,6 +11,7 @@ impl BExplorerIced {
         self.pane_mut(pane).reset_scroll_position();
         tasks.push(self.queue_visible_images(pane));
         tasks.push(scroll_pane_to_top_task(pane));
+        tasks.push(self.start_ready_directory_refreshes());
         Task::batch(tasks)
     }
 
@@ -26,6 +27,9 @@ impl BExplorerIced {
             self.pane_mut(pane).status = "La búsqueda no está disponible en esta ubicación".into();
             return Task::none();
         }
+        // A directory load started before the search must not replace its
+        // result list. Keep one refresh for when the user returns to the folder.
+        defer_watched_directory_for_search(&mut self.directory_refreshes, &root);
 
         let cancelled = Arc::new(AtomicBool::new(false));
         let include_archives = self.pane(pane).search_mode == SearchMode::Complete;
@@ -374,5 +378,48 @@ impl BExplorerIced {
         self.last_undo_action = None;
         self.pane_mut(pane).status = status.into();
         true
+    }
+}
+
+fn defer_watched_directory_for_search(refreshes: &mut DirectoryRefreshes, root: &Path) {
+    if explorer::is_virtual_path(root)
+        || explorer::is_unc_path(root)
+        || crate::fs::archive_listing::is_archive_navigation_path(root)
+    {
+        return;
+    }
+    refreshes.cancel(root);
+    refreshes.queue(root.to_path_buf());
+}
+
+#[cfg(test)]
+mod directory_refresh_search_tests {
+    use super::*;
+
+    #[test]
+    fn entering_search_cancels_the_old_listing_and_preserves_one_refresh_for_return() {
+        let root = std::env::temp_dir().join("bexplorer-search-root");
+        let other = std::env::temp_dir().join("bexplorer-other-pane");
+        let mut refreshes = DirectoryRefreshes::default();
+        let (ticket, cancel, _) = refreshes.start(root.clone()).unwrap();
+        let (_, other_cancel, _) = refreshes.start(other).unwrap();
+        for _ in 0..20 {
+            defer_watched_directory_for_search(&mut refreshes, &root);
+        }
+        assert!(cancel.load(AtomicOrdering::Relaxed));
+        assert!(!other_cancel.load(AtomicOrdering::Relaxed));
+        assert!(!refreshes.finish(&root, ticket));
+        assert_eq!(refreshes.ready(), vec![root.clone()]);
+        let (_, next_cancel, _) = refreshes.start(root).unwrap();
+        assert!(!next_cancel.load(AtomicOrdering::Relaxed));
+        assert!(refreshes.ready().is_empty());
+    }
+
+    #[test]
+    fn searching_virtual_or_unc_locations_does_not_add_directory_watches() {
+        let mut refreshes = DirectoryRefreshes::default();
+        defer_watched_directory_for_search(&mut refreshes, &explorer::network_root_path());
+        defer_watched_directory_for_search(&mut refreshes, Path::new(r"\\server\share"));
+        assert!(refreshes.ready().is_empty());
     }
 }

@@ -139,6 +139,7 @@ where
                         None
                     },
                     percent_full: None,
+                    modified_time: metadata.modified().ok(),
                     modified: metadata.modified().ok().map(format_system_time),
                     created: metadata.created().ok().map(format_system_time),
                     is_hidden: hidden,
@@ -256,6 +257,7 @@ where
             free_space: None,
             size: if entry.is_dir { None } else { entry.size },
             percent_full: None,
+            modified_time: entry.modified,
             modified,
             created: None,
             is_hidden: false,
@@ -544,6 +546,7 @@ mod tests {
                 free_space: None,
                 size: Some(1),
                 percent_full: None,
+                modified_time: None,
                 modified: None,
                 created: None,
                 is_hidden: false,

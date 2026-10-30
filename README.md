@@ -81,7 +81,11 @@ installed.
   on Linux. Linux permits external drives and secondary local disks while
   blocking the physical system disk, firmware, loop, layered, and RAID
   devices, then unmounts and remounts the selected filesystem safely.
-- Progressive network discovery with cached results.
+- Progressive network discovery retains complementary providers, shares
+  repeated queries, and limits simultaneous NetBIOS neighbor lookups to eight.
+  Refresh bypasses completed query caches while reusing requests already in progress.
+- Event-driven folder watching with coalesced reloads, bounded background
+  workers, source-aware thumbnails, and memory-scaled image-cache budgets.
 - Windows Explorer-compatible file clipboard for regular file paths, plus
   native MIME clipboard helpers and a text/URI-list fallback for Linux.
 - Internal and external drag-and-drop support.
@@ -301,9 +305,11 @@ successful result in its shared cache for BExplorer, File Explorer, and other
 Shell clients. Native extraction and internal image decoding are each limited
 to two concurrent jobs. If Windows has no image provider for a format,
 BExplorer's bounded internal decoder remains the fallback and writes its result
-to a persistent, source-metadata-aware cache. That fallback cache is pruned
-after 90 days and capped at 512 MiB. Video coverage follows the thumbnail
-providers and codecs installed in Windows, without a hard FFmpeg dependency.
+to a persistent, source-metadata-aware cache. Sharded directories avoid scanning
+the cache on every save; cleanup targets a shared 512 MiB budget and removes
+entries older than 90 days, including the previous cache layout. Video coverage
+follows the thumbnail providers and codecs installed in Windows, without a hard
+FFmpeg dependency.
 Portable-device thumbnails continue to use the thumbnail resource exposed by
 WPD/MTP.
 
@@ -391,7 +397,9 @@ BExplorer keeps an opaque readable background.
 - Archive extraction conflicts currently keep both files automatically with
   numbered names.
 - Network discovery depends on Windows services, providers, credentials, and
-  the local network. Devices may appear progressively.
+  the local network. Devices may appear progressively. Windows providers for
+  servers, devices, printers, and network resources contribute to one merged
+  list; no individual provider is treated as a complete inventory.
 - Distributed Windows builds may show a SmartScreen warning until a signed
   installer is provided; the portable archive includes a SHA-256 checksum.
 

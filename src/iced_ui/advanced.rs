@@ -155,7 +155,15 @@ impl BExplorerIced {
         self.pane_mut(pane).status = format!("Expulsando {}…", path.display());
         let operation_path = path.clone();
         Task::perform(
-            run_blocking_file_operation(move || operations::eject_drive(&operation_path)),
+            run_blocking_file_operation(move || {
+                #[cfg(target_os = "windows")]
+                let _directory_watch_pauses =
+                    crate::platform::windows::volume_roots_on_same_disk(&operation_path)
+                        .iter()
+                        .map(|root| crate::fs::watcher::pause_directory_watches(root))
+                        .collect::<std::io::Result<Vec<_>>>()?;
+                operations::eject_drive(&operation_path)
+            }),
             move |result| Message::DriveEjected(pane, path, result),
         )
     }

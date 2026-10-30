@@ -335,6 +335,62 @@ pub fn load_desktop_thumbnail_image(path: &Path, max_edge: u32) -> Option<Native
 }
 
 pub fn load_thumbnail_image_with_fallback(path: &Path, max_edge: u32) -> Option<NativeIconImage> {
+    with_stable_thumbnail_source(path, |source| {
+        load_thumbnail_image_for_source(path, max_edge, source)
+    })
+}
+
+type ThumbnailSourceSnapshot = (u64, std::time::SystemTime);
+
+fn thumbnail_source_snapshot(path: &Path) -> Option<ThumbnailSourceSnapshot> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    Some((metadata.len(), metadata.modified().ok()?))
+}
+
+fn with_stable_thumbnail_source<T>(
+    path: &Path,
+    operation: impl FnOnce(Option<ThumbnailSourceSnapshot>) -> Option<T>,
+) -> Option<T> {
+    let expected = thumbnail_source_snapshot(path);
+    let result = operation(expected)?;
+    (expected.is_none() || thumbnail_source_snapshot(path) == expected).then_some(result)
+}
+
+fn cache_thumbnail_for_source(
+    path: &Path,
+    size: u32,
+    image: &NativeIconImage,
+    expected: Option<ThumbnailSourceSnapshot>,
+) -> bool {
+    let Some(expected) = expected else {
+        return false;
+    };
+    if thumbnail_source_snapshot(path) != Some(expected) {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        crate::platform::windows::cache_desktop_thumbnail_checked(path, size, image, expected)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        crate::platform::linux::cache_desktop_thumbnail_checked(path, size, image, expected)
+    }
+    #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
+    {
+        let _ = (path, size, image);
+        false
+    }
+}
+
+fn load_thumbnail_image_for_source(
+    path: &Path,
+    max_edge: u32,
+    source: Option<ThumbnailSourceSnapshot>,
+) -> Option<NativeIconImage> {
     let category = explorer::classify_file_category(path);
     if category == FileCategory::Video {
         return load_desktop_thumbnail_image(path, max_edge)
@@ -355,7 +411,7 @@ pub fn load_thumbnail_image_with_fallback(path: &Path, max_edge: u32) -> Option<
         return render_pdf_first_page(path)
             .and_then(|image| resize_native_image(image, NATIVE_ICON_SIZE))
             .and_then(|image| {
-                let _ = crate::platform::cache_desktop_thumbnail(path, NATIVE_ICON_SIZE, &image);
+                let _ = cache_thumbnail_for_source(path, NATIVE_ICON_SIZE, &image, source);
                 resize_native_image(image, max_edge)
             });
     }
@@ -373,7 +429,7 @@ pub fn load_thumbnail_image_with_fallback(path: &Path, max_edge: u32) -> Option<
         }
 
         if let Some(image) = load_thumbnail_image(path, NATIVE_ICON_SIZE) {
-            let _ = crate::platform::cache_desktop_thumbnail(path, NATIVE_ICON_SIZE, &image);
+            let _ = cache_thumbnail_for_source(path, NATIVE_ICON_SIZE, &image, source);
             return resize_native_image(image, max_edge);
         }
 
@@ -387,6 +443,13 @@ pub fn load_thumbnail_image_with_fallback(path: &Path, max_edge: u32) -> Option<
 /// Rendered only for the selected item in the preview panel. Keeping this separate
 /// from the grid thumbnail loader avoids retaining large images for every entry.
 pub fn load_preview_image(path: &Path) -> Option<NativeIconImage> {
+    with_stable_thumbnail_source(path, |source| load_preview_image_for_source(path, source))
+}
+
+fn load_preview_image_for_source(
+    path: &Path,
+    _source: Option<ThumbnailSourceSnapshot>,
+) -> Option<NativeIconImage> {
     if path
         .extension()
         .and_then(|extension| extension.to_str())
@@ -405,8 +468,7 @@ pub fn load_preview_image(path: &Path) -> Option<NativeIconImage> {
             return Some(image);
         }
         load_thumbnail_image(path, WINDOWS_PREVIEW_CACHE_EDGE).inspect(|image| {
-            let _ =
-                crate::platform::cache_desktop_thumbnail(path, WINDOWS_PREVIEW_CACHE_EDGE, image);
+            let _ = cache_thumbnail_for_source(path, WINDOWS_PREVIEW_CACHE_EDGE, image, _source);
         })
     }
 
@@ -695,6 +757,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_thumbnail_result_is_discarded_when_its_source_changes_during_decode() {
+        let path = std::env::temp_dir().join(format!(
+            "bexplorer-thumbnail-source-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, b"initial").unwrap();
+        assert_eq!(with_stable_thumbnail_source(&path, |_| Some(42)), Some(42));
+        let result = with_stable_thumbnail_source(&path, |_| {
+            std::fs::write(&path, b"changed during decode").unwrap();
+            Some(42)
+        });
+        assert_eq!(result, None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn huge_svg_is_rendered_within_the_requested_pixel_budget() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" width="1000000" height="1000000"><rect width="1000000" height="1000000" fill="red"/></svg>"#;
         let image = render_svg_bytes(svg, 48).expect("bounded SVG render");
@@ -764,6 +846,7 @@ mod tests {
             free_space: None,
             size: Some(128 * 1024 * 1024),
             percent_full: None,
+            modified_time: None,
             modified: None,
             created: None,
             is_hidden: false,
@@ -788,6 +871,7 @@ mod tests {
             free_space: None,
             size: Some(42),
             percent_full: None,
+            modified_time: None,
             modified: Some("/home/example/Videos".into()),
             created: Some("2026-07-26 12:00".into()),
             is_hidden: false,
@@ -828,6 +912,7 @@ mod tests {
             free_space: None,
             size: None,
             percent_full: None,
+            modified_time: None,
             modified: None,
             created: None,
             is_hidden: false,
@@ -869,6 +954,7 @@ mod tests {
             free_space: None,
             size: Some(80 * 1024 * 1024),
             percent_full: None,
+            modified_time: None,
             modified: None,
             created: None,
             is_hidden: false,

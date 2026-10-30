@@ -437,8 +437,11 @@ pub(in crate::iced_ui) fn storage_change_stream() -> impl iced::futures::Stream<
             let receiver = crate::platform::storage_change_receiver();
             let mut output = output;
             while receiver.recv().is_ok() {
-                if let Err(error) = output.try_send(Message::StorageDevicesChanged)
-                    && error.is_disconnected()
+                if iced::futures::executor::block_on(iced::futures::SinkExt::send(
+                    &mut output,
+                    Message::StorageDevicesChanged,
+                ))
+                .is_err()
                 {
                     break;
                 }
@@ -488,8 +491,11 @@ pub(in crate::iced_ui) fn directory_change_stream() -> impl iced::futures::Strea
             let receiver = crate::fs::watcher::directory_change_receiver();
             let mut output = output;
             while let Ok(change) = receiver.recv() {
-                if let Err(error) = output.try_send(Message::DirectoryChanged(change))
-                    && error.is_disconnected()
+                if iced::futures::executor::block_on(iced::futures::SinkExt::send(
+                    &mut output,
+                    Message::DirectoryChanged(change),
+                ))
+                .is_err()
                 {
                     break;
                 }
@@ -503,21 +509,15 @@ fn periodic_message_stream(
     interval: Duration,
     message: Message,
 ) -> impl iced::futures::Stream<Item = Message> {
-    use iced::futures::channel::mpsc;
+    use iced::futures::{SinkExt, channel::mpsc};
 
-    iced::stream::channel(1, move |output: mpsc::Sender<Message>| async move {
-        thread::spawn(move || {
-            let mut output = output;
-            loop {
-                thread::sleep(interval);
-                if let Err(error) = output.try_send(message.clone())
-                    && error.is_disconnected()
-                {
-                    break;
-                }
+    iced::stream::channel(1, move |mut output: mpsc::Sender<Message>| async move {
+        loop {
+            delay(interval).await;
+            if output.send(message.clone()).await.is_err() {
+                break;
             }
-        });
-        iced::futures::future::pending::<()>().await;
+        }
     })
 }
 

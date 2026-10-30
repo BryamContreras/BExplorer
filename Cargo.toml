@@ -19,6 +19,7 @@ crc32fast = "1.5"
 directories = "5"
 flate2 = "1.1"
 fs2 = "0.4"
+futures-timer = "3.0.4"
 getrandom = "0.3"
 hayro = { version = "0.7", features = ["embed-fonts"] }
 iced = { version = "0.14.0", features = ["svg", "image-without-codecs"] }
@@ -110,10 +111,12 @@ windows = { version = "0.58", features = [
     "Win32_Security",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Ioctl",
+    "Win32_System_IO",
     "Win32_System_Memory",
     "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_System_SystemServices",
+    "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Variant",
     "Win32_Storage_FileSystem",

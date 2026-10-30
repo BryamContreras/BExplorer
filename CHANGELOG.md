@@ -13,6 +13,26 @@ All notable user-facing changes to BExplorer are documented here.
 - Improved Windows MTP sessions, per-object deletion, exclusive download
   creation, and safe destination names. Moving from a device removes only
   exported objects, preserving files added while the transfer was running.
+- Recognize USB-connected HDDs and SSDs as external Windows drives even when
+  their media report as fixed, restoring Send to destinations and Eject.
+  Safe removal supports devices without a Shell eject verb, respects Windows
+  removal vetoes, and releases BExplorer's directory watches while ejecting.
+  Shell references are released before PnP removal; busy-volume failures show
+  an actionable message while preserving native diagnostics in the log.
+- Keep complementary Windows network discovery providers while sharing repeated
+  queries, limiting NetBIOS concurrency, and retaining native requests through
+  caller timeouts. Cached devices expire without losing progressive results.
+  Cold Function Discovery queries receive asynchronous device notifications;
+  late results update the first network view without another Refresh, and WNet
+  provider containers no longer appear as computers.
+- Coalesce folder reloads, cancel obsolete queued enumeration, and bound watcher
+  batches so sustained writes and full queues still produce a final refresh.
+- Validate image caches with precise source timestamps, retry them on Refresh,
+  and prioritize selected previews. Sharded disk caching avoids directory scans
+  on every save; memory budgets scale down on smaller systems and trim while
+  inactive or minimized. Shared asynchronous timers replace per-delay threads.
+- Select Linux storage monitors according to available providers and retain an
+  adaptive mount-table fallback without activating optional KIO services.
 - Kept uncertain KDE KIO transfers and their files isolated until the provider
   finishes or reconnects. KIO exports retain their originals after Move when
   the provider cannot safely enforce deletion of only the exported objects.

@@ -208,33 +208,7 @@ impl BExplorerIced {
     }
 
     fn context_storage_send_to_targets(&self, sources: &[PathBuf]) -> Vec<ContextSendToTarget> {
-        if sources.is_empty() {
-            return Vec::new();
-        }
-        let has_virtual_portable_source = sources
-            .iter()
-            .any(|source| explorer::is_portable_path(source));
-        let spanish = self.is_spanish();
-        self.sidebar_storage_entries
-            .iter()
-            .filter(|entry| {
-                matches!(
-                    entry.drive_kind,
-                    Some(DriveKind::External | DriveKind::Usb | DriveKind::Portable)
-                )
-            })
-            // The transfer backend deliberately rejects direct MTP-to-MTP
-            // copies. Mounted GVfs devices are ordinary paths and do not hit
-            // this condition.
-            .filter(|entry| {
-                !(has_virtual_portable_source && entry.drive_kind == Some(DriveKind::Portable))
-            })
-            .map(|entry| ContextSendToTarget::Storage {
-                label: send_to_storage_label(&entry.name, &entry.path, entry.drive_kind, spanish),
-                destination: entry.path.clone(),
-                icon: send_to_storage_icon(entry.drive_kind),
-            })
-            .collect()
+        storage_send_to_targets(&self.sidebar_storage_entries, sources, self.is_spanish())
     }
 
     pub(in crate::iced_ui) fn capture_context_menu_backdrop(
@@ -1152,6 +1126,39 @@ impl BExplorerIced {
     }
 }
 
+fn storage_send_to_targets(
+    storage_entries: &[FileEntry],
+    sources: &[PathBuf],
+    spanish: bool,
+) -> Vec<ContextSendToTarget> {
+    if sources.is_empty() {
+        return Vec::new();
+    }
+    let has_virtual_portable_source = sources
+        .iter()
+        .any(|source| explorer::is_portable_path(source));
+    storage_entries
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.drive_kind,
+                Some(DriveKind::External | DriveKind::Usb | DriveKind::Portable)
+            )
+        })
+        // The transfer backend deliberately rejects direct MTP-to-MTP
+        // copies. Mounted GVfs devices are ordinary paths and do not hit
+        // this condition.
+        .filter(|entry| {
+            !(has_virtual_portable_source && entry.drive_kind == Some(DriveKind::Portable))
+        })
+        .map(|entry| ContextSendToTarget::Storage {
+            label: send_to_storage_label(&entry.name, &entry.path, entry.drive_kind, spanish),
+            destination: entry.path.clone(),
+            icon: send_to_storage_icon(entry.drive_kind),
+        })
+        .collect()
+}
+
 fn send_to_storage_icon(drive_kind: Option<DriveKind>) -> &'static str {
     match drive_kind {
         Some(DriveKind::Portable) => "portable",
@@ -1247,6 +1254,73 @@ fn windows_send_to_icon_request(path: &Path, size: u32) -> (PathBuf, PathBuf, bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn storage_entry(name: &str, path: PathBuf, kind: DriveKind) -> FileEntry {
+        FileEntry {
+            name: name.into(),
+            path,
+            kind: EntryKind::Drive,
+            category: explorer::FileCategory::Other,
+            drive_kind: Some(kind),
+            file_system: String::new(),
+            free_space: None,
+            size: None,
+            percent_full: None,
+            modified_time: None,
+            modified: None,
+            created: None,
+            is_hidden: false,
+        }
+    }
+
+    #[test]
+    fn send_to_includes_external_ssds_and_usb_storage_without_internal_disks() {
+        let entries = [
+            storage_entry("System", PathBuf::from(r"C:\"), DriveKind::Local),
+            storage_entry(
+                "SSD Backup (E:)",
+                PathBuf::from(r"E:\"),
+                DriveKind::External,
+            ),
+            storage_entry("USB (F:)", PathBuf::from(r"F:\"), DriveKind::Usb),
+        ];
+        let targets = storage_send_to_targets(&entries, &[PathBuf::from("archive.zip")], false);
+        assert_eq!(
+            targets,
+            [
+                ContextSendToTarget::Storage {
+                    label: "SSD Backup (E:)".into(),
+                    destination: PathBuf::from(r"E:\"),
+                    icon: "external-drive",
+                },
+                ContextSendToTarget::Storage {
+                    label: "USB (F:)".into(),
+                    destination: PathBuf::from(r"F:\"),
+                    icon: "usb",
+                },
+            ]
+        );
+        assert!(storage_send_to_targets(&entries, &[], false).is_empty());
+    }
+
+    #[test]
+    fn send_to_from_a_phone_keeps_external_disks_and_omits_other_mtp_devices() {
+        let phone = explorer::portable_device_path("phone", "Phone");
+        let entries = [
+            storage_entry("SSD Backup", PathBuf::from(r"E:\"), DriveKind::External),
+            storage_entry("Phone", phone.clone(), DriveKind::Portable),
+        ];
+        let targets = storage_send_to_targets(&entries, &[phone], false);
+        assert_eq!(targets.len(), 1);
+        assert!(matches!(
+            &targets[0],
+            ContextSendToTarget::Storage { destination, .. } if destination == Path::new(r"E:\")
+        ));
+        assert_eq!(
+            storage_send_to_targets(&entries, &[PathBuf::from("archive.zip")], false).len(),
+            2
+        );
+    }
 
     #[test]
     fn send_to_uses_an_icon_matching_each_removable_destination() {

@@ -8,13 +8,16 @@ mod storage_watch;
 mod util;
 mod window;
 
+pub(crate) use network::is_windows_network_provider;
+
 #[allow(unused_imports)]
 pub use drag_out::{release_mouse_capture, send_files_to_shell_target, start_file_drag};
+pub(crate) use drives::volume_roots_on_same_disk;
 #[allow(unused_imports)]
 pub use drives::{WindowsDriveInfo, WindowsDriveKind, drive_info, set_volume_label};
 #[allow(unused_imports)]
 pub use icons::{
-    cache_desktop_thumbnail, cached_desktop_thumbnail, image_thumbnail, native_file_icon,
+    cache_desktop_thumbnail_checked, cached_desktop_thumbnail, image_thumbnail, native_file_icon,
     native_file_icon_highres, video_thumbnail,
 };
 #[allow(unused_imports)]

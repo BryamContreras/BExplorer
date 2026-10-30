@@ -174,6 +174,7 @@ pub fn list_archive_contents(path: &Path) -> Result<Vec<FileEntry>> {
             free_space: None,
             size: if is_dir { None } else { entry.size },
             percent_full: None,
+            modified_time: entry.modified,
             modified,
             created: None,
             is_hidden: false,

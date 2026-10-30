@@ -177,51 +177,35 @@ pub(super) fn suppress_file_explorer_windows_at(path: &Path) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 pub(super) fn eject_drive(path: &Path) -> Result<()> {
-    let output = Command::new("powershell.exe")
+    let drive_root = windows_eject_drive_root(path)
+        .ok_or_else(|| BExplorerError::Shell("Safe removal requires a drive-letter root".into()))?;
+    let mut command = Command::new("powershell.exe");
+    command
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            r#"
-& {
-    $DriveRoot = $env:BEXPLORER_DRIVE_ROOT
-    if ([string]::IsNullOrWhiteSpace($DriveRoot)) { exit 2 }
-
-    $DriveRoot = $DriveRoot.Replace('/', '\').TrimEnd([char]92) + '\'
-    $drive = $DriveRoot.TrimEnd([char]92)
-    $shell = New-Object -ComObject Shell.Application
-    $item = $shell.Namespace(17).ParseName($drive)
-    if (-not $item) { $item = $shell.Namespace(17).ParseName($DriveRoot) }
-    if (-not $item) { throw "Drive not found: $DriveRoot" }
-
-    # Shell verbs are localized. Invoking the English text directly succeeds
-    # on some systems without doing anything on Spanish Windows, so find the
-    # real Eject verb exposed by this volume and invoke that COM verb itself.
-    $ejectVerb = @($item.Verbs()) | Where-Object {
-        $name = (([string]$_.Name).Replace('&', '').Replace('…', '').Trim())
-        $name -match '^(?i:eject|expulsar|quitar|safely remove)$'
-    } | Select-Object -First 1
-    if (-not $ejectVerb) {
-        throw "This drive does not expose an eject command in Windows"
-    }
-    $ejectVerb.DoIt()
-
-    # The Shell call is asynchronous. Report success only after Windows has
-    # actually removed the drive letter, instead of showing a false success.
-    for ($attempt = 0; $attempt -lt 32; $attempt++) {
-        Start-Sleep -Milliseconds 250
-        if (-not (Test-Path -LiteralPath $DriveRoot)) { exit 0 }
-    }
-    throw "Windows did not remove $DriveRoot after requesting eject"
-}
-"#,
+            concat!(
+                "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)\n",
+                include_str!("windows_eject.ps1"),
+                "\ntry { Invoke-BExplorerDriveEject $env:BEXPLORER_DRIVE_ROOT; exit 0 } ",
+                "catch { Write-BExplorerEjectError $_.Exception; exit 1 }"
+            ),
         ])
-        .env("BEXPLORER_DRIVE_ROOT", path)
-        .creation_flags(0x0800_0000)
-        .output()
-        .map_err(|error| BExplorerError::Shell(error.to_string()))?;
+        .env("BEXPLORER_DRIVE_ROOT", drive_root)
+        .creation_flags(0x0800_0000);
+    let output = crate::utils::process::command_output_with_timeout(
+        &mut command,
+        std::time::Duration::from_secs(45),
+    )
+    .ok_or_else(|| {
+        BExplorerError::Shell(format!(
+            "Windows did not finish the safe-removal request for {}; check whether the drive is still connected before retrying",
+            path.display()
+        ))
+    })?;
 
     if output.status.success() {
         Ok(())
@@ -238,6 +222,21 @@ pub(super) fn eject_drive(path: &Path) -> Result<()> {
             format!("Could not eject drive {}: {detail}", path.display())
         };
         Err(BExplorerError::Shell(message))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_eject_drive_root(path: &Path) -> Option<String> {
+    let text = path.to_str()?.replace('/', "\\");
+    let bytes = text.as_bytes();
+    if matches!(bytes.len(), 2 | 3)
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'\\')
+    {
+        Some(format!("{}:\\", (bytes[0] as char).to_ascii_uppercase()))
+    } else {
+        None
     }
 }
 
@@ -873,6 +872,311 @@ fn decode_mountinfo_field(value: &str) -> String {
         index += 1;
     }
     output
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_eject_tests {
+    use super::*;
+
+    fn check_discovery_script(checks: &str) -> std::process::Output {
+        // The embedded helper defines functions only. These tests call its
+        // discovery functions with fake providers, never the removal action.
+        let script = format!(
+            "$ErrorActionPreference = 'Stop'\n{}\n{checks}",
+            include_str!("windows_eject.ps1")
+        );
+        let mut command = Command::new("powershell.exe");
+        command
+            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+            .creation_flags(0x0800_0000);
+        let output = crate::utils::process::command_output_with_timeout(
+            &mut command,
+            std::time::Duration::from_secs(20),
+        )
+        .expect("PowerShell discovery check should finish within its deadline");
+        assert!(
+            output.status.success(),
+            "Discovery check failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    #[test]
+    fn windows_eject_accepts_only_drive_letter_roots() {
+        for (path, expected) in [("E:", "E:\\"), ("e:/", "E:\\"), ("F:\\", "F:\\")] {
+            assert_eq!(
+                windows_eject_drive_root(Path::new(path)).as_deref(),
+                Some(expected)
+            );
+        }
+        for path in ["", "C:\\folder", "\\\\server\\share", "C:\\..\\", "1:\\"] {
+            assert_eq!(windows_eject_drive_root(Path::new(path)), None);
+        }
+    }
+
+    #[test]
+    fn windows_eject_selects_the_removable_parent_and_never_a_usb_hub() {
+        check_discovery_script(
+            r#"
+$script:nodes = @{
+    'USBSTOR\DISK' = @{ Capabilities = 16; Parent = 'USB\VID_BRIDGE'; Service = 'disk' }
+    'USB\VID_BRIDGE' = @{ Capabilities = 148; Parent = 'USB\VID_HUB'; Service = 'USBSTOR' }
+    'USB\VID_HUB' = @{ Capabilities = 148; Parent = 'PCI\CONTROLLER'; Service = 'USBHUB3' }
+}
+function Get-PnpDeviceProperty {
+    param($InstanceId, $KeyName, $ErrorAction)
+    $node = $script:nodes[$InstanceId]
+    if ($null -eq $node) { throw 'Unexpected device inspection' }
+    [pscustomobject]@{ KeyName = 'DEVPKEY_Device_Capabilities'; Data = $node.Capabilities }
+    [pscustomobject]@{ KeyName = 'DEVPKEY_Device_Parent'; Data = $node.Parent }
+    [pscustomobject]@{ KeyName = 'DEVPKEY_Device_Service'; Data = $node.Service }
+}
+if ((Get-BExplorerPnpRemovalTarget 'USBSTOR\DISK') -ne 'USB\VID_BRIDGE') { throw 'Wrong removable parent' }
+$script:nodes['USB\VID_BRIDGE'].Capabilities = 16
+$blocked = $false
+try { Get-BExplorerPnpRemovalTarget 'USBSTOR\DISK' | Out-Null } catch { $blocked = $_.Exception.Message -like '*hub or host controller*' }
+if (-not $blocked) { throw 'Hub removal was not blocked' }
+$script:nodes['USBSTOR\DISK'].Parent = 'USBSTOR\DISK'
+$blocked = $false
+try { Get-BExplorerPnpRemovalTarget 'USBSTOR\DISK' | Out-Null } catch { $blocked = $true }
+if (-not $blocked) { throw 'Parent cycle was not blocked' }
+# Compile the native declarations, without invoking any device-removal API.
+Initialize-BExplorerDeviceRemoval
+"#,
+        );
+    }
+
+    #[test]
+    fn windows_eject_discovery_rejects_system_disks_and_internal_buses() {
+        check_discovery_script(
+            r#"
+function Get-Partition { param($DriveLetter, $ErrorAction) [pscustomobject]@{ DiskNumber = 3 } }
+function Get-Disk { param($ErrorAction) process { $script:disk } }
+function Get-CimInstance { throw 'Physical lookup must not run for an unsafe disk' }
+foreach ($disk in @(
+    @{ IsBoot = $true; IsSystem = $false; BusType = 'USB'; Number = 3 },
+    @{ IsBoot = $false; IsSystem = $true; BusType = 'USB'; Number = 3 },
+    @{ IsBoot = $false; IsSystem = $false; BusType = 'SATA'; Number = 3 },
+    @{ IsBoot = $false; IsSystem = $false; BusType = 'NVMe'; Number = 3 }
+)) {
+    $script:disk = [pscustomobject]$disk
+    $blocked = $false
+    try { Resolve-BExplorerUsbRemovalTarget 'E:\' | Out-Null } catch {
+        $blocked = $_.Exception.Message -like '*boot or system*' -or $_.Exception.Message -like '*not on an external*'
+    }
+    if (-not $blocked) { throw 'Unsafe disk reached physical-device lookup' }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn windows_eject_resolves_the_physical_usb_parent_instead_of_a_volume_child() {
+        check_discovery_script(
+            r#"
+function Get-Partition { param($DriveLetter, $ErrorAction) if ($DriveLetter -ne 'E') { throw 'Wrong letter' }; [pscustomobject]@{ DiskNumber = 2 } }
+function Get-Disk { param($ErrorAction) process { [pscustomobject]@{ Number = 2; IsBoot = $false; IsSystem = $false; BusType = 'USB' } } }
+function Get-CimInstance {
+    param($ClassName, $Filter, $ErrorAction)
+    if ($ClassName -ne 'Win32_DiskDrive' -or $Filter -ne 'Index = 2') { throw 'Wrong physical lookup' }
+    [pscustomobject]@{ PNPDeviceID = 'USBSTOR\DISK_PHYSICAL' }
+}
+function Get-PnpDeviceProperty {
+    param($InstanceId, $KeyName, $ErrorAction)
+    if ($InstanceId -eq 'USBSTOR\DISK_PHYSICAL') { $capabilities = 16; $parent = 'USB\VID_ENCLOSURE'; $service = 'disk' }
+    elseif ($InstanceId -eq 'USB\VID_ENCLOSURE') { $capabilities = 148; $parent = 'USB\ROOT_HUB30'; $service = 'USBSTOR' }
+    else { throw 'Discovery reached a volume child or host controller' }
+    [pscustomobject]@{ KeyName = 'DEVPKEY_Device_Capabilities'; Data = $capabilities }
+    [pscustomobject]@{ KeyName = 'DEVPKEY_Device_Parent'; Data = $parent }
+    [pscustomobject]@{ KeyName = 'DEVPKEY_Device_Service'; Data = $service }
+}
+if ((Resolve-BExplorerUsbRemovalTarget 'E:\') -ne 'USB\VID_ENCLOSURE') { throw 'The USB physical parent was not selected' }
+"#,
+        );
+    }
+
+    #[test]
+    fn windows_eject_veto_reports_utf8_underlying_error_without_invocation_wrapper() {
+        let output = check_discovery_script(
+            r#"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+Initialize-BExplorerDeviceRemoval
+$message = [BExplorerDeviceRemoval]::DescribeFailure(23, 5, 'STORAGE\Volume\CHILD')
+if ($message -ne 'BEXPLORER_EJECT_BUSY|PnP=23|Veto=5|Device=STORAGE\Volume\CHILD') { throw 'Missing veto diagnostics' }
+$inner = [System.InvalidOperationException]::new($message + ' ' + [char]0x00f3 + [char]0x00f1)
+$outer = [System.Reflection.TargetInvocationException]::new('Invocation wrapper must be removed', $inner)
+Write-BExplorerEjectError $outer
+"#,
+        );
+        let message = String::from_utf8(output.stderr).expect("Eject errors must use UTF-8");
+        assert!(
+            message.contains("BEXPLORER_EJECT_BUSY|PnP=23|Veto=5|Device=STORAGE\\Volume\\CHILD")
+        );
+        assert!(message.contains("óñ"));
+        assert!(!message.contains("Invocation wrapper"));
+    }
+
+    #[test]
+    fn windows_eject_retries_only_outstanding_opens_with_a_fixed_identity_and_limit() {
+        check_discovery_script(
+            r#"
+Initialize-BExplorerDeviceRemoval
+$script:attempts = 0
+$script:waits = 0
+$script:succeed = $true
+$script:veto = 5
+function Invoke-BExplorerPnpRemovalAttempt {
+    param($InstanceId)
+    if ($InstanceId -ne 'USB\ORIGINAL_ID') { throw 'Retry changed the device identity' }
+    $script:attempts++
+    if ($script:succeed -and $script:attempts -eq 3) { return [pscustomobject]@{ Result = 0; Veto = 0; Name = '' } }
+    [pscustomobject]@{ Result = 23; Veto = $script:veto; Name = 'STORAGE\Volume\CHILD' }
+}
+function Start-Sleep {
+    param($Milliseconds)
+    if ($Milliseconds -ne 300) { throw 'Unexpected retry delay' }
+    $script:waits++
+}
+Request-BExplorerPnpRemoval 'USB\ORIGINAL_ID'
+if ($script:attempts -ne 3 -or $script:waits -ne 2) { throw 'A transient outstanding open was not retried within bounds' }
+
+$script:succeed = $false
+$script:attempts = 0
+$script:waits = 0
+$blocked = $false
+try { Request-BExplorerPnpRemoval 'USB\ORIGINAL_ID' } catch { $blocked = $_.Exception.Message -like 'BEXPLORER_EJECT_BUSY|PnP=23|Veto=5|Device=*' }
+if (-not $blocked -or $script:attempts -ne 3 -or $script:waits -ne 2) { throw 'A persistent open veto exceeded the retry bound or lost its diagnostics' }
+
+foreach ($veto in @(3, 7, 12)) {
+    $script:veto = $veto
+    $script:attempts = 0
+    $script:waits = 0
+    $blocked = $false
+    try { Request-BExplorerPnpRemoval 'USB\ORIGINAL_ID' } catch { $blocked = $_.Exception.Message -like 'BEXPLORER_EJECT_*' }
+    if (-not $blocked -or $script:attempts -ne 1 -or $script:waits -ne 0) { throw 'A different veto was retried or swallowed' }
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn windows_eject_releases_shell_objects_before_pnp_and_preserves_a_rejected_request() {
+        check_discovery_script(
+            r#"
+$script:item = [pscustomobject]@{ Kind = 'item' }
+$script:item | Add-Member ScriptMethod Verbs { @() }
+$script:folder = [pscustomobject]@{ Kind = 'folder' }
+$script:folder | Add-Member ScriptMethod ParseName { param($Path) $script:item }
+$script:shell = [pscustomobject]@{ Kind = 'shell' }
+$script:shell | Add-Member ScriptMethod Namespace { param($Id) $script:folder }
+function New-Object { param($ComObject) if ($ComObject -ne 'Shell.Application') { throw 'Unexpected COM class' }; $script:shell }
+$script:released = @()
+function Release-BExplorerComObject { param($Object) if ($null -ne $Object) { $script:released += $Object.Kind } }
+function Resolve-BExplorerUsbRemovalTarget {
+    param($DriveRoot)
+    if (($script:released -join ',') -ne 'item,folder,shell') { throw 'Shell objects were retained during physical discovery' }
+    'USB\VID_PHYSICAL'
+}
+$script:requests = 0
+function Request-BExplorerPnpRemoval {
+    param($InstanceId)
+    if ($InstanceId -ne 'USB\VID_PHYSICAL') { throw 'Wrong removal target' }
+    $script:requests++
+    throw 'OutstandingOpen veto from STORAGE\Volume\CHILD'
+}
+function Start-Sleep { throw 'A rejected request must not enter the completion wait' }
+function Test-BExplorerDrivePresent { throw 'A rejected request must not be reported as completed' }
+$blocked = $false
+try { Invoke-BExplorerDriveEject 'E:\' } catch { $blocked = $_.Exception.Message -like '*OutstandingOpen veto*' }
+if (-not $blocked -or $script:requests -ne 1) { throw 'The veto was swallowed or retried' }
+"#,
+        );
+    }
+
+    #[test]
+    fn windows_eject_fallback_waits_for_the_drive_letter_to_disappear() {
+        check_discovery_script(
+            r#"
+$script:item = [pscustomobject]@{}
+$script:item | Add-Member ScriptMethod Verbs { @() }
+$script:folder = [pscustomobject]@{}
+$script:folder | Add-Member ScriptMethod ParseName { param($Path) $script:item }
+$script:shell = [pscustomobject]@{}
+$script:shell | Add-Member ScriptMethod Namespace { param($Id) $script:folder }
+function New-Object { param($ComObject) if ($ComObject -ne 'Shell.Application') { throw 'Unexpected COM class' }; $script:shell }
+function Resolve-BExplorerUsbRemovalTarget { param($DriveRoot) if ($DriveRoot -ne 'E:\') { throw 'Wrong drive' }; 'USB\VID_TARGET' }
+$script:requests = 0
+function Request-BExplorerPnpRemoval { param($InstanceId) if ($InstanceId -ne 'USB\VID_TARGET') { throw 'Wrong device' }; $script:requests++ }
+function Start-Sleep { param($Milliseconds) }
+$script:presenceChecks = 0
+function Test-BExplorerDrivePresent { param($DriveRoot) $script:presenceChecks++; $script:presenceChecks -le 2 }
+Invoke-BExplorerDriveEject 'E:\'
+if ($script:requests -ne 1 -or $script:presenceChecks -ne 3) { throw 'Removal was not requested exactly once and observed through completion' }
+$script:presenceChecks = 0
+function Test-BExplorerDrivePresent { param($DriveRoot) $script:presenceChecks++; $true }
+$blocked = $false
+try { Invoke-BExplorerDriveEject 'E:\' } catch { $blocked = $_.Exception.Message -like '*did not remove*' }
+if (-not $blocked -or $script:requests -ne 2 -or $script:presenceChecks -ne 40) { throw 'A still-assigned letter was incorrectly reported as removed' }
+"#,
+        );
+    }
+
+    #[test]
+    fn windows_eject_accepts_removed_optical_media_but_not_an_unready_usb_disk() {
+        check_discovery_script(
+            r#"
+$script:verb = [pscustomobject]@{ Name = '&Eject' }
+$script:verb | Add-Member ScriptMethod DoIt { $script:mediaReady = $false; $script:requests++ }
+$script:item = [pscustomobject]@{}
+$script:item | Add-Member ScriptMethod Verbs { @($script:verb) }
+$script:folder = [pscustomobject]@{}
+$script:folder | Add-Member ScriptMethod ParseName { param($Path) $script:item }
+$script:shell = [pscustomobject]@{}
+$script:shell | Add-Member ScriptMethod Namespace { param($Id) $script:folder }
+function New-Object { param($ComObject) if ($ComObject -ne 'Shell.Application') { throw 'Unexpected COM class' }; $script:shell }
+function Resolve-BExplorerUsbRemovalTarget { throw 'A Shell eject verb must not trigger the USB fallback' }
+function Request-BExplorerPnpRemoval { throw 'A Shell eject verb must not request PnP removal' }
+function Start-Sleep { param($Milliseconds) }
+$script:presenceChecks = 0
+function Test-BExplorerDrivePresent { param($DriveRoot) $script:presenceChecks++; $true }
+$script:infoChecks = 0
+function Get-BExplorerDriveInfo {
+    param($DriveRoot)
+    $script:infoChecks++
+    [pscustomobject]@{ DriveType = $script:driveType; IsReady = $script:mediaReady }
+}
+$script:driveType = [System.IO.DriveType]::CDRom
+$script:mediaReady = $true
+$script:requests = 0
+Invoke-BExplorerDriveEject 'G:\'
+if ($script:requests -ne 1 -or $script:presenceChecks -ne 1 -or $script:infoChecks -ne 2) { throw 'An optical disc was not observed becoming empty while its drive letter remained assigned' }
+
+# An unready USB volume with a retained letter must still fail removal.
+$script:driveType = [System.IO.DriveType]::Fixed
+$script:mediaReady = $false
+$script:presenceChecks = 0
+$blocked = $false
+try { Invoke-BExplorerDriveEject 'E:\' } catch { $blocked = $_.Exception.Message -like '*did not remove*' }
+if (-not $blocked -or $script:presenceChecks -ne 40 -or $script:requests -ne 2) { throw 'An unready USB disk was incorrectly treated as ejected optical media' }
+
+# Once the letter disappears, do not query a stale DriveInfo handle again.
+$script:driveType = [System.IO.DriveType]::CDRom
+$script:mediaReady = $true
+$script:infoChecks = 0
+function Test-BExplorerDrivePresent { param($DriveRoot) $false }
+function Get-BExplorerDriveInfo {
+    param($DriveRoot)
+    $script:infoChecks++
+    if ($script:infoChecks -gt 1) { throw 'The drive was already removed' }
+    [pscustomobject]@{ DriveType = $script:driveType; IsReady = $script:mediaReady }
+}
+Invoke-BExplorerDriveEject 'G:\'
+if ($script:infoChecks -ne 1 -or $script:requests -ne 3) { throw 'A removed drive was queried after its letter disappeared' }
+"#,
+        );
+    }
 }
 
 #[cfg(all(test, unix, not(target_os = "macos")))]

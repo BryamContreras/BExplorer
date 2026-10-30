@@ -1,6 +1,9 @@
 use super::*;
 use iced::gradient;
 use iced::widget::text_editor;
+mod persistence;
+mod workers;
+pub(super) use persistence::{schedule_network_cache, schedule_storage_cache};
 
 pub(super) struct LoadResult {
     pub(super) pane: PaneId,
@@ -13,11 +16,15 @@ pub(super) async fn load_entries(
     request_id: u64,
     path: Option<PathBuf>,
     show_hidden: bool,
+    cancel: Arc<AtomicBool>,
+    isolated_provider: bool,
 ) -> LoadResult {
     let portable =
         cfg!(target_os = "windows") && path.as_deref().is_some_and(explorer::is_portable_path);
-    let operation =
-        run_blocking_file_operation(move || explorer::list_entries(path.as_deref(), show_hidden));
+    let worker_path = path.clone();
+    let operation = run_directory_operation(path.as_deref(), isolated_provider, move || {
+        explorer::list_entries_cancellable(worker_path.as_deref(), show_hidden, &cancel)
+    });
     let entries = if portable {
         with_file_operation_timeout(
             operation,
@@ -41,23 +48,15 @@ async fn with_file_operation_timeout<T>(
 ) -> Result<T, String> {
     use iced::futures::future::{Either, select};
 
-    let (stop_timer, stopped) = mpsc::channel::<()>();
-    let (expired, timer) = iced::futures::channel::oneshot::channel();
-    thread::spawn(move || {
-        if matches!(
-            stopped.recv_timeout(timeout),
-            Err(mpsc::RecvTimeoutError::Timeout)
-        ) {
-            let _ = expired.send(());
-        }
-    });
-    let result = match select(Box::pin(operation), timer).await {
+    match select(
+        Box::pin(operation),
+        Box::pin(futures_timer::Delay::new(timeout)),
+    )
+    .await
+    {
         Either::Left((result, _)) => result,
         Either::Right((_, _)) => Err(message.into()),
-    };
-    // Cancel the timer immediately when a folder load finishes normally.
-    drop(stop_timer);
-    result
+    }
 }
 
 #[cfg(test)]
@@ -94,70 +93,6 @@ mod file_operation_timeout_tests {
             Ok(42)
         );
     }
-
-    #[test]
-    fn canceled_and_overlapping_network_probes_do_not_run_again() {
-        let cancel = AtomicBool::new(true);
-        let result: Vec<u8> = network_probe(&cancel, "canceled-test".into(), || panic!("canceled"));
-        assert!(result.is_empty());
-        let result = network_probe(&AtomicBool::new(false), "overlapping-test".into(), || {
-            let nested: Vec<u8> =
-                network_probe(&AtomicBool::new(false), "overlapping-test".into(), || {
-                    panic!("duplicate")
-                });
-            assert!(nested.is_empty());
-            vec![7]
-        });
-        assert_eq!(result, vec![7]);
-        assert_eq!(
-            network_probe(&AtomicBool::new(false), "overlapping-test".into(), || vec![
-                8
-            ]),
-            vec![8]
-        );
-    }
-
-    #[test]
-    fn overlapping_network_requests_share_the_result_instead_of_showing_an_empty_list() {
-        let (entered_tx, entered_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let owner = thread::spawn(move || {
-            network_probe(&AtomicBool::new(false), "shared-result-test".into(), || {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                vec![42_u8]
-            })
-        });
-        entered_rx.recv().unwrap();
-        let waiter = thread::spawn(|| {
-            network_probe(
-                &AtomicBool::new(false),
-                "shared-result-test".into(),
-                Vec::<u8>::new,
-            )
-        });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let coalesced = loop {
-            let waiting = ACTIVE_NETWORK_PROBES
-                .get()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .get("shared-result-test")
-                .is_some_and(|entry| Arc::strong_count(entry) >= 3);
-            if waiting {
-                break true;
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-            thread::yield_now();
-        };
-        release_tx.send(()).unwrap();
-        assert_eq!(owner.join().unwrap(), vec![42]);
-        assert_eq!(waiter.join().unwrap(), vec![42]);
-        assert!(coalesced);
-    }
 }
 
 pub(super) async fn run_blocking_file_operation<T, F>(operation: F) -> Result<T, String>
@@ -165,17 +100,47 @@ where
     T: Send + 'static,
     F: FnOnce() -> crate::utils::errors::Result<T> + Send + 'static,
 {
-    let (sender, receiver) = iced::futures::channel::oneshot::channel();
-    thread::spawn(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
-            .map_err(|_| String::from("File operation worker panicked"))
-            .and_then(|result| result.map_err(|error| error.to_string()));
-        let _ = sender.send(result);
-    });
-
-    receiver
+    static POOL: std::sync::OnceLock<workers::BlockingPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| workers::BlockingPool::new("file-operation", 4, 64))
+        .run(move || operation().map_err(|error| error.to_string()))
         .await
-        .unwrap_or_else(|_| Err(String::from("File operation worker stopped unexpectedly")))
+}
+
+pub(super) async fn run_network_operation<T, F>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> crate::utils::errors::Result<T> + Send + 'static,
+{
+    static POOL: std::sync::OnceLock<workers::BlockingPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| workers::BlockingPool::new("network-result", 8, 128))
+        .run(move || operation().map_err(|error| error.to_string()))
+        .await
+}
+
+pub(super) async fn run_directory_operation<T, F>(
+    path: Option<&Path>,
+    isolated_provider: bool,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> crate::utils::errors::Result<T> + Send + 'static,
+{
+    static LOCAL: std::sync::OnceLock<workers::BlockingPool> = std::sync::OnceLock::new();
+    static REMOTE: std::sync::OnceLock<workers::BlockingPool> = std::sync::OnceLock::new();
+    let remote = isolated_provider
+        || path.is_some_and(|path| {
+            explorer::is_portable_path(path)
+                || explorer::is_unc_path(path)
+                || path.components().any(|part| part.as_os_str() == "gvfs")
+        });
+    let pool = if remote {
+        REMOTE.get_or_init(|| workers::BlockingPool::new("remote-directory", 2, 32))
+    } else {
+        LOCAL.get_or_init(|| workers::BlockingPool::new("directory", 4, 32))
+    };
+    pool.run(move || operation().map_err(|error| error.to_string()))
+        .await
 }
 
 /// Keep decoding and slow preview I/O off the async executor, with a fixed
@@ -226,79 +191,18 @@ pub(super) async fn run_preview_operation<T: Send + 'static>(
         .unwrap_or_else(|_| Err("Preview worker stopped".to_owned()))
 }
 
+/// Selected content must not wait behind a scrolling view's icon backlog.
+pub(super) async fn run_selected_preview_operation<T: Send + 'static>(
+    operation: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    static POOL: std::sync::OnceLock<workers::BlockingPool> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| workers::BlockingPool::new("selected-preview", 2, 16))
+        .run(move || Ok(operation()))
+        .await
+}
+
 pub(super) async fn delay(duration: Duration) {
-    let (sender, receiver) = iced::futures::channel::oneshot::channel();
-    thread::spawn(move || {
-        thread::sleep(duration);
-        let _ = sender.send(());
-    });
-    let _ = receiver.await;
-}
-
-struct SharedNetworkProbe {
-    owner: thread::ThreadId,
-    result: std::sync::Mutex<Option<Box<dyn std::any::Any + Send>>>,
-    ready: std::sync::Condvar,
-}
-static ACTIVE_NETWORK_PROBES: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<String, Arc<SharedNetworkProbe>>>,
-> = std::sync::OnceLock::new();
-
-pub(super) fn network_probe<T: Default + Clone + Send + 'static>(
-    cancel: &AtomicBool,
-    key: String,
-    probe: impl FnOnce() -> T,
-) -> T {
-    let active = ACTIVE_NETWORK_PROBES.get_or_init(Default::default);
-    if cancel.load(AtomicOrdering::Relaxed) {
-        return T::default();
-    }
-    let mut keys = active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(shared) = keys.get(&key).cloned() {
-        drop(keys);
-        // Avoid recursive waits while allowing a newer request to reuse the
-        // result of a probe that an older request has already started.
-        if shared.owner == thread::current().id() {
-            return T::default();
-        }
-        let mut result = shared
-            .result
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        loop {
-            if cancel.load(AtomicOrdering::Relaxed) {
-                return T::default();
-            }
-            if let Some(result) = &*result {
-                return result.downcast_ref::<T>().cloned().unwrap_or_default();
-            }
-            result = shared
-                .ready
-                .wait_timeout(result, Duration::from_millis(50))
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .0;
-        }
-    }
-    let shared = Arc::new(SharedNetworkProbe {
-        owner: thread::current().id(),
-        result: std::sync::Mutex::new(None),
-        ready: std::sync::Condvar::new(),
-    });
-    keys.insert(key.clone(), Arc::clone(&shared));
-    drop(keys);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(probe)).unwrap_or_default();
-    *shared
-        .result
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(result.clone()));
-    shared.ready.notify_all();
-    active
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&key);
-    result
+    futures_timer::Delay::new(duration).await;
 }
 
 pub(super) fn is_mountable_disk_image_entry(entry: &FileEntry) -> bool {
@@ -400,6 +304,7 @@ mod tests {
             free_space: None,
             size,
             percent_full: None,
+            modified_time: None,
             modified: None,
             created: None,
             is_hidden: false,
@@ -696,6 +601,25 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_external_ssds_and_usb_drives_keep_their_eject_targets_after_sorting() {
+        let mut external = test_entry("SSD Backup (E:)", EntryKind::Drive, None);
+        external.path = PathBuf::from(r"E:\");
+        external.drive_kind = Some(DriveKind::External);
+        let mut system = test_entry("System", EntryKind::Drive, None);
+        system.path = filesystem_root_path();
+        system.drive_kind = Some(DriveKind::Local);
+        let mut usb = test_entry("USB (F:)", EntryKind::Drive, None);
+        usb.path = PathBuf::from(r"F:\");
+        usb.drive_kind = Some(DriveKind::Usb);
+
+        let items = sidebar_storage_items(&[external, system, usb], true);
+        let find = |label| items.iter().find(|item| item.label == label).unwrap();
+        assert_eq!(find("SSD Backup (E:)").context_drive_index, Some(0));
+        assert_eq!(find("USB (F:)").context_drive_index, Some(2));
+        assert_eq!(find("System").context_drive_index, None);
+    }
+
+    #[test]
     fn sidebar_separates_portable_devices_from_storage_and_keeps_drive_order() {
         assert!(sidebar_portable_items(&[]).is_empty());
 
@@ -789,6 +713,12 @@ mod tests {
         printer.drive_kind = Some(DriveKind::NetworkPrinter);
         assert_eq!(fallback_icon_label(&printer), "printer");
 
+        printer.drive_kind = Some(DriveKind::NetworkMultifunction);
+        assert_eq!(fallback_icon_label(&printer), "printer");
+
+        printer.drive_kind = Some(DriveKind::NetworkScanner);
+        assert_eq!(fallback_icon_label(&printer), "scanner");
+
         printer.drive_kind = Some(DriveKind::NetworkComputer);
         assert_eq!(fallback_icon_label(&printer), "pc");
 
@@ -799,16 +729,18 @@ mod tests {
     #[test]
     fn printer_fallback_icon_is_renderable() {
         let options = resvg::usvg::Options::default();
-        let tree = resvg::usvg::Tree::from_data(icon_svg("printer"), &options)
-            .expect("printer fallback should be a valid SVG");
-        let mut pixmap = resvg::tiny_skia::Pixmap::new(24, 24).expect("printer icon pixmap");
-        resvg::render(
-            &tree,
-            resvg::tiny_skia::Transform::identity(),
-            &mut pixmap.as_mut(),
-        );
+        for label in ["printer", "scanner"] {
+            let tree = resvg::usvg::Tree::from_data(icon_svg(label), &options)
+                .expect("network device fallback should be a valid SVG");
+            let mut pixmap = resvg::tiny_skia::Pixmap::new(24, 24).expect("printer icon pixmap");
+            resvg::render(
+                &tree,
+                resvg::tiny_skia::Transform::identity(),
+                &mut pixmap.as_mut(),
+            );
 
-        assert!(pixmap.data().chunks_exact(4).any(|pixel| pixel[3] > 0));
+            assert!(pixmap.data().chunks_exact(4).any(|pixel| pixel[3] > 0));
+        }
     }
 
     #[test]

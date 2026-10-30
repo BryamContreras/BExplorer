@@ -487,7 +487,7 @@ pub(in crate::iced_ui) fn inline_icon<'a>(
     let size = rendered_inline_icon_size(size);
     let preserves_native_colors = matches!(
         label,
-        "pc" | "printer" | "portable" | "usb" | "external-drive"
+        "pc" | "printer" | "scanner" | "portable" | "usb" | "external-drive"
     );
     let icon = svg::Svg::new(svg::Handle::from_memory(icon_svg(label)))
         .width(Length::Fixed(size))
@@ -529,11 +529,15 @@ pub(in crate::iced_ui) fn load_iced_image_task(
 ) -> Task<Message> {
     let operation = async move {
         let key = iced_image_job_key(&job);
+        let selected_preview = matches!(job, IcedImageJob::Preview { .. });
         let worker_cancel = Arc::clone(&cancel);
-        let result = run_preview_operation(move || {
-            (!worker_cancel.load(AtomicOrdering::Relaxed)).then(|| load_iced_image(job))
-        })
-        .await
+        let operation =
+            move || (!worker_cancel.load(AtomicOrdering::Relaxed)).then(|| load_iced_image(job));
+        let result = if selected_preview {
+            run_selected_preview_operation(operation).await
+        } else {
+            run_preview_operation(operation).await
+        }
         .ok()
         .flatten()
         .unwrap_or(IcedImageLoadResult { key, image: None });
@@ -559,7 +563,7 @@ pub(in crate::iced_ui) fn load_pdf_preview_page_task(
     let operation = async move {
         let worker_path = path.clone();
         let worker_cancel = Arc::clone(&cancel);
-        let rendered = run_preview_operation(move || {
+        let rendered = run_selected_preview_operation(move || {
             if worker_cancel.load(AtomicOrdering::Relaxed) {
                 return None;
             }
@@ -743,7 +747,15 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
 
 pub(in crate::iced_ui) fn fallback_icon_label(entry: &FileEntry) -> &'static str {
     match &entry.kind {
-        EntryKind::Drive if entry.drive_kind == Some(DriveKind::NetworkPrinter) => "printer",
+        EntryKind::Drive
+            if matches!(
+                entry.drive_kind,
+                Some(DriveKind::NetworkPrinter | DriveKind::NetworkMultifunction)
+            ) =>
+        {
+            "printer"
+        }
+        EntryKind::Drive if entry.drive_kind == Some(DriveKind::NetworkScanner) => "scanner",
         EntryKind::Drive if entry.drive_kind == Some(DriveKind::Portable) => "portable",
         EntryKind::Drive => "pc",
         EntryKind::Folder => "folder",
@@ -792,6 +804,7 @@ pub(in crate::iced_ui) fn icon_svg(label: &'static str) -> &'static [u8] {
         "file" => ICON_FILE,
         "pc" => ICON_PC,
         "printer" => ICON_PRINTER,
+        "scanner" => ICON_SCANNER,
         "lnk" => ICON_LINK,
         "rec" => ICON_RECENT,
         "net" => ICON_NETWORK,
@@ -860,6 +873,21 @@ const ICON_FORMAT: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.or
 const ICON_FILE: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 3.5h7l4 4V20a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4.5a1 1 0 0 1 1-1z" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/><path d="M14 3.5V8h4" fill="none" stroke="#000" stroke-width="1.6" stroke-linejoin="round"/></svg>"##;
 const ICON_PLAY: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M7 4.8 20 12 7 19.2z" fill="#000" stroke="#000" stroke-width=".55" stroke-linejoin="round"/></svg>"##;
 const ICON_PC: &[u8] = br##"<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><rect x="1.1" y="2.15" width="21.8" height="15.35" rx="1.55" fill="#294b55" stroke="#f7fcff" stroke-width=".42" stroke-opacity=".72"/><rect x="1.5" y="2.55" width="21" height="14.55" rx="1.2" fill="none" stroke="#132f38" stroke-width=".72"/><rect x="2.85" y="3.65" width="18.3" height="11.75" rx=".38" fill="#08bfe8"/><path d="M2.85 3.65h18.3V15.4z" fill="#087fa7" opacity=".2"/><path d="M10.45 17.4h3.1v2.3h3.4c.6 0 1.1.48 1.1 1.08v.47H5.95v-.47c0-.6.5-1.08 1.1-1.08h3.4z" fill="#294b55" stroke="#f7fcff" stroke-width=".35" stroke-opacity=".6"/><path d="M5.95 21.25h12.1" fill="none" stroke="#132f38" stroke-width=".75" stroke-linecap="round"/></svg>"##;
+const ICON_SCANNER: &[u8] = br##"
+<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="scanner-body" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#71828e"/><stop offset="1" stop-color="#293b48"/></linearGradient>
+    <linearGradient id="scanner-lid" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#f1f6fa"/><stop offset="1" stop-color="#a8bac6"/></linearGradient>
+    <linearGradient id="scanner-glass" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#bbf0f8"/><stop offset="1" stop-color="#3199ba"/></linearGradient>
+  </defs>
+  <path d="M3.1 10.4h17.8l1.4 6.7v2.2c0 .7-.6 1.3-1.3 1.3H3c-.7 0-1.3-.6-1.3-1.3v-2.2z" fill="url(#scanner-body)" stroke="#182e3d" stroke-width=".45"/>
+  <path d="M3.5 9.5h17l.9 7.2H2.6z" fill="url(#scanner-glass)" stroke="#d8e8ee" stroke-width=".4"/>
+  <path d="m4.4 10 1-6.6h13.2l1 6.6z" fill="url(#scanner-lid)" stroke="#e4edf2" stroke-width=".5"/>
+  <path d="M6.3 4.6h11.4l.6 4.2H5.7z" fill="#fff" opacity=".66"/>
+  <path d="m4.7 11.2 13.4 4.2H4z" fill="#e3faff" opacity=".36"/>
+  <path d="M2.3 17.5h19.4" stroke="#94a9b7" stroke-width=".45"/>
+  <circle cx="19.3" cy="18.8" r=".5" fill="#57e6c0"/><path d="M4.1 20.7v.8m15.8-.8v.8" stroke="#172f3e" stroke-width="1.2" stroke-linecap="round"/>
+</svg>"##;
 const ICON_PRINTER: &[u8] = br##"
 <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
   <defs>

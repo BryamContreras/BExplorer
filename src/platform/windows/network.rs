@@ -1,11 +1,21 @@
 use super::util::{pwstr_to_string, wide_null};
 
+mod function_discovery;
+
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NetworkComputerInfo {
     pub name: String,
     pub comment: String,
     pub kind: crate::platform::NetworkDeviceKind,
+}
+
+fn publish_network_computer(device: NetworkComputerInfo) {
+    crate::fs::explorer::merge_discovered_network_computer(crate::platform::NetworkComputerInfo {
+        name: device.name,
+        comment: device.comment,
+        kind: device.kind,
+    });
 }
 
 #[cfg(target_os = "windows")]
@@ -74,6 +84,9 @@ pub fn network_computers_fast() -> Vec<NetworkComputerInfo> {
                         comment: pwstr_to_string(entry.sv101_comment),
                         kind: crate::platform::NetworkDeviceKind::Computer,
                     });
+                    if let Some(computer) = computers.last() {
+                        publish_network_computer(computer.clone());
+                    }
                 }
             }
 
@@ -151,78 +164,7 @@ pub fn network_shell_devices() -> Vec<NetworkComputerInfo> {
 
 #[cfg(target_os = "windows")]
 fn function_discovery_network_devices() -> Vec<NetworkComputerInfo> {
-    use windows::Win32::Devices::FunctionDiscovery::{
-        FCTN_CATEGORY_NETBIOS, FCTN_CATEGORY_NETWORKDEVICES, FunctionDiscovery, IFunctionDiscovery,
-        PKEY_DeviceDisplay_Category_Desc_Singular, PKEY_DeviceDisplay_DeviceDescription1,
-        PKEY_DeviceDisplay_FriendlyName,
-    };
-    use windows::Win32::Foundation::{BOOL, S_OK};
-    use windows::Win32::System::Com::{
-        CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoCreateInstance,
-        CoInitializeEx, CoUninitialize, STGM_READ,
-    };
-
-    unsafe {
-        let hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-        let should_uninitialize = hr == S_OK || hr.0 == 1;
-
-        let result = (|| -> windows::core::Result<Vec<NetworkComputerInfo>> {
-            let discovery: IFunctionDiscovery =
-                CoCreateInstance(&FunctionDiscovery, None, CLSCTX_INPROC_SERVER)?;
-            let mut computers = Vec::new();
-            for category in [FCTN_CATEGORY_NETWORKDEVICES, FCTN_CATEGORY_NETBIOS] {
-                let collection = discovery.GetInstanceCollection(category, None, BOOL(1))?;
-                let count = collection.GetCount()?;
-                for index in 0..count.min(256) {
-                    let Ok(instance) = collection.Item(index) else {
-                        continue;
-                    };
-                    let Ok(store) = instance.OpenPropertyStore(STGM_READ) else {
-                        continue;
-                    };
-
-                    let Some(name) =
-                        property_store_string(&store, &PKEY_DeviceDisplay_FriendlyName)
-                            .or_else(|| {
-                                property_store_string(
-                                    &store,
-                                    &PKEY_DeviceDisplay_DeviceDescription1,
-                                )
-                            })
-                            .or_else(|| function_instance_id(&instance))
-                    else {
-                        continue;
-                    };
-                    let name = clean_network_device_name(&name);
-                    if name.is_empty() || is_windows_network_provider(&name) {
-                        continue;
-                    }
-
-                    let comment =
-                        property_store_string(&store, &PKEY_DeviceDisplay_Category_Desc_Singular)
-                            .unwrap_or_else(|| "Dispositivo de red".into());
-                    computers.push(NetworkComputerInfo {
-                        kind: classify_network_device_kind(&name, &comment),
-                        name,
-                        comment,
-                    });
-                }
-            }
-
-            computers.sort_by_key(|computer| computer.name.to_lowercase());
-            computers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
-            Ok(computers)
-        })()
-        .unwrap_or_else(|error| {
-            crate::utils::log::error(format!("Network device discovery failed: {error}"));
-            Vec::new()
-        });
-
-        if should_uninitialize {
-            CoUninitialize();
-        }
-        result
-    }
+    function_discovery::network_devices()
 }
 
 #[cfg(target_os = "windows")]
@@ -230,51 +172,59 @@ fn netbios_network_devices() -> Vec<NetworkComputerInfo> {
     use std::process::Command;
     use std::sync::mpsc;
     use std::thread;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     const QUERY_TIMEOUT: Duration = Duration::from_millis(6500);
-    const COLLECT_TIMEOUT: Duration = Duration::from_millis(8000);
     const MAX_NEIGHBORS: usize = 64;
 
-    let Ok(output) = Command::new("arp")
-        .arg("-a")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    else {
+    let Some(output) = crate::utils::process::command_output_with_timeout(
+        Command::new("arp")
+            .arg("-a")
+            .creation_flags(CREATE_NO_WINDOW),
+        Duration::from_secs(3),
+    ) else {
         return Vec::new();
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let neighbors = parse_arp_neighbors(&stdout);
 
-    let (tx, rx) = mpsc::channel();
-    for (local_ip, remote_ip) in neighbors.into_iter().take(MAX_NEIGHBORS) {
-        let tx = tx.clone();
-        thread::spawn(move || {
-            if let Some(name) = query_netbios_node_name(local_ip, remote_ip, QUERY_TIMEOUT) {
-                let _ = tx.send(NetworkComputerInfo {
-                    kind: classify_network_device_kind(&name, "PC de red"),
-                    name,
-                    comment: "PC de red".into(),
-                });
-            }
-        });
-    }
-    drop(tx);
-
-    let deadline = Instant::now() + COLLECT_TIMEOUT;
-    let mut computers = Vec::new();
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(remaining.min(Duration::from_millis(150))) {
-            Ok(computer) => computers.push(computer),
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+    let neighbors = std::sync::Arc::new(std::sync::Mutex::new(
+        neighbors.into_iter().take(MAX_NEIGHBORS),
+    ));
+    // Scope the aggregate's workers to its real lifetime. A UI timeout must
+    // not detach these workers and allow a second aggregate to multiply them.
+    let mut computers = thread::scope(|scope| {
+        let (tx, rx) = mpsc::channel();
+        for _ in 0..8 {
+            let tx = tx.clone();
+            let neighbors = std::sync::Arc::clone(&neighbors);
+            scope.spawn(move || {
+                loop {
+                    let neighbor = neighbors
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .next();
+                    let Some((local_ip, remote_ip)) = neighbor else {
+                        break;
+                    };
+                    if let Some(name) = query_netbios_node_name(local_ip, remote_ip, QUERY_TIMEOUT)
+                    {
+                        let _ = tx.send(NetworkComputerInfo {
+                            kind: classify_network_device_kind(&name, "PC de red"),
+                            name,
+                            comment: "PC de red".into(),
+                        });
+                    }
+                }
+            });
         }
-    }
+        drop(tx);
+        rx.into_iter().collect::<Vec<_>>()
+    });
 
     computers.sort_by_key(|computer| computer.name.to_lowercase());
     computers.dedup_by(|left, right| left.name.eq_ignore_ascii_case(&right.name));
@@ -288,11 +238,12 @@ fn netbios_cached_devices() -> Vec<NetworkComputerInfo> {
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let Ok(output) = Command::new("nbtstat")
-        .arg("-c")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    else {
+    let Some(output) = crate::utils::process::command_output_with_timeout(
+        Command::new("nbtstat")
+            .arg("-c")
+            .creation_flags(CREATE_NO_WINDOW),
+        std::time::Duration::from_secs(3),
+    ) else {
         return Vec::new();
     };
 
@@ -317,11 +268,12 @@ fn netbios_neighbor_addresses() -> Vec<std::net::Ipv4Addr> {
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let Ok(output) = Command::new("arp")
-        .arg("-a")
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-    else {
+    let Some(output) = crate::utils::process::command_output_with_timeout(
+        Command::new("arp")
+            .arg("-a")
+            .creation_flags(CREATE_NO_WINDOW),
+        std::time::Duration::from_secs(3),
+    ) else {
         return Vec::new();
     };
 
@@ -440,23 +392,23 @@ fn is_builtin_printer_name(name: &str) -> bool {
 #[cfg(target_os = "windows")]
 fn classify_network_device_kind(name: &str, comment: &str) -> crate::platform::NetworkDeviceKind {
     let lower = format!("{} {}", name, comment).to_ascii_lowercase();
+    let printer = lower.contains("printer") || lower.contains("impresora");
+    let scanner = lower.contains("scanner")
+        || lower.contains("scan")
+        || lower.contains("escaner")
+        || lower.contains("escáner");
     if lower.contains("multifunc")
         || lower.contains("mfp")
         || lower.contains("all-in-one")
         || lower.contains("todo en uno")
+        || (printer && scanner)
     {
         crate::platform::NetworkDeviceKind::Multifunction
-    } else if lower.contains("scanner")
-        || lower.contains("scan")
-        || lower.contains("escaner")
-        || lower.contains("escÃ¡ner")
-    {
+    } else if scanner {
         crate::platform::NetworkDeviceKind::Scanner
     } else if lower.contains("printer")
         || lower.contains("impresora")
         || lower.contains("laserjet")
-        || lower.contains("epson")
-        || lower.contains("canon")
         || lower.contains("ir-adv")
         || lower.contains("ir adv")
         || lower.contains("imagerunner")
@@ -477,6 +429,90 @@ fn classify_network_device_kind(name: &str, comment: &str) -> crate::platform::N
     } else {
         crate::platform::NetworkDeviceKind::Other
     }
+}
+
+#[cfg(target_os = "windows")]
+fn network_device_from_store(
+    name: &str,
+    store: Option<&windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore>,
+) -> Option<NetworkComputerInfo> {
+    use windows::Win32::Devices::FunctionDiscovery::{
+        PKEY_DeviceDisplay_Category, PKEY_DeviceDisplay_Category_Desc_Singular,
+        PKEY_DeviceDisplay_DeviceDescription1, PKEY_DeviceDisplay_DeviceDescription2,
+        PKEY_PNPX_DeviceCategory, PKEY_PNPX_Types,
+    };
+
+    let name = clean_network_device_name(name);
+    if name.is_empty() || is_windows_network_provider(&name) {
+        return None;
+    }
+    let property = |key| store.and_then(|store| property_store_string(store, key));
+    let categories = [
+        PKEY_DeviceDisplay_Category,
+        PKEY_PNPX_DeviceCategory,
+        PKEY_PNPX_Types,
+    ]
+    .iter()
+    .filter_map(property)
+    .collect::<Vec<_>>()
+    .join(" ");
+    let descriptions = [
+        PKEY_DeviceDisplay_Category_Desc_Singular,
+        PKEY_DeviceDisplay_DeviceDescription1,
+        PKEY_DeviceDisplay_DeviceDescription2,
+    ]
+    .iter()
+    .filter_map(property)
+    .collect::<Vec<_>>();
+    let description = descriptions.join(" ");
+    let kind = network_kind_with_metadata(&name, &categories, &description);
+    Some(NetworkComputerInfo {
+        name,
+        kind,
+        comment: descriptions.into_iter().next().unwrap_or_else(|| {
+            match kind {
+                crate::platform::NetworkDeviceKind::Computer => "PC de red",
+                crate::platform::NetworkDeviceKind::Printer => "Impresora de red",
+                crate::platform::NetworkDeviceKind::Scanner => "Escáner de red",
+                crate::platform::NetworkDeviceKind::Multifunction => "Dispositivo multifunción",
+                crate::platform::NetworkDeviceKind::Other => "Dispositivo de red",
+            }
+            .into()
+        }),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn network_kind_with_metadata(
+    name: &str,
+    categories: &str,
+    description: &str,
+) -> crate::platform::NetworkDeviceKind {
+    // DeviceCategory/PNPX Types describe the function. A manufacturer's name
+    // alone must not turn an explicitly classified scanner into a printer.
+    let category_kind = classify_network_device_kind("", categories);
+    if category_kind != crate::platform::NetworkDeviceKind::Other {
+        category_kind
+    } else {
+        classify_network_device_kind(name, description)
+    }
+}
+
+fn apply_network_computer_hint(device: &mut NetworkComputerInfo, computer_resource: bool) {
+    if computer_resource && device.kind == crate::platform::NetworkDeviceKind::Other {
+        device.kind = crate::platform::NetworkDeviceKind::Computer;
+        if device.comment == "Dispositivo de red" {
+            device.comment = "PC de red".into();
+        }
+    }
+}
+
+fn shell_parsing_name_is_computer(name: &str) -> bool {
+    let parts = unc_parts(name);
+    name.trim().starts_with(r"\\")
+        && parts.len() == 1
+        && !matches!(parts[0], "." | "?")
+        && !is_windows_network_provider(parts[0])
 }
 
 #[cfg(target_os = "windows")]
@@ -502,45 +538,69 @@ fn is_candidate_network_neighbor(ip: std::net::Ipv4Addr) -> bool {
 }
 
 #[cfg(target_os = "windows")]
+struct NetBiosPermit;
+
+#[cfg(target_os = "windows")]
+fn netbios_slots() -> &'static (std::sync::Mutex<usize>, std::sync::Condvar) {
+    static SLOTS: std::sync::OnceLock<(std::sync::Mutex<usize>, std::sync::Condvar)> =
+        std::sync::OnceLock::new();
+    SLOTS.get_or_init(|| (std::sync::Mutex::new(0), std::sync::Condvar::new()))
+}
+
+#[cfg(target_os = "windows")]
+impl NetBiosPermit {
+    fn acquire() -> Self {
+        let (mutex, ready) = netbios_slots();
+        let mut active = mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while *active >= 8 {
+            active = ready
+                .wait(active)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        *active += 1;
+        Self
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for NetBiosPermit {
+    fn drop(&mut self) {
+        let (mutex, ready) = netbios_slots();
+        let mut active = mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *active -= 1;
+        ready.notify_one();
+    }
+}
+
+#[cfg(target_os = "windows")]
 fn query_netbios_node_name(
     _local_ip: std::net::Ipv4Addr,
     remote_ip: std::net::Ipv4Addr,
     timeout: std::time::Duration,
 ) -> Option<String> {
-    use std::io::Read;
     use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-    use std::thread;
-    use std::time::{Duration, Instant};
+    use std::process::Command;
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let mut child = Command::new("nbtstat")
-        .arg("-A")
-        .arg(remote_ip.to_string())
-        .creation_flags(CREATE_NO_WINDOW)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-
-    let deadline = Instant::now() + timeout;
-    loop {
-        if child.try_wait().ok()?.is_some() {
-            break;
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        thread::sleep(Duration::from_millis(25));
+    // Applies to both incremental discovery and the legacy aggregate API.
+    // A second caller cannot multiply the native-process concurrency.
+    let _permit = NetBiosPermit::acquire();
+    let output = crate::utils::process::command_output_with_timeout(
+        Command::new("nbtstat")
+            .arg("-A")
+            .arg(remote_ip.to_string())
+            .creation_flags(CREATE_NO_WINDOW),
+        timeout,
+    )?;
+    if !output.status.success() {
+        return None;
     }
-
-    let mut output = Vec::new();
-    child.stdout.as_mut()?.read_to_end(&mut output).ok()?;
-    let _ = child.wait();
-    let output = String::from_utf8_lossy(&output);
+    let output = String::from_utf8_lossy(&output.stdout);
 
     parse_nbtstat_name(&output)
         .map(|name| clean_network_device_name(&name))
@@ -604,7 +664,7 @@ fn shell_network_devices() -> Vec<NetworkComputerInfo> {
     };
     use windows::Win32::UI::Shell::{
         FOLDERID_NetworkFolder, ILCombine, IShellFolder, SHCONTF_FOLDERS, SHCONTF_INCLUDEHIDDEN,
-        SHCONTF_NETPRINTERSRCH, SHCONTF_NONFOLDERS, SHGDN_INFOLDER, SHGDN_NORMAL,
+        SHCONTF_NETPRINTERSRCH, SHCONTF_NONFOLDERS, SHGDN_FORPARSING, SHGDN_INFOLDER, SHGDN_NORMAL,
         SHGetDesktopFolder, SHGetKnownFolderIDList,
     };
 
@@ -664,11 +724,24 @@ fn shell_network_devices() -> Vec<NetworkComputerInfo> {
                     continue;
                 }
 
-                devices.push(NetworkComputerInfo {
-                    kind: classify_network_device_kind(&name, "Dispositivo de red"),
-                    name,
-                    comment: "Dispositivo de red".into(),
-                });
+                use windows::Win32::UI::Shell::PropertiesSystem::{
+                    GPS_FASTPROPERTIESONLY, IPropertyStore,
+                };
+                use windows::Win32::UI::Shell::{IShellItem2, SHCreateItemFromIDList};
+                let store = SHCreateItemFromIDList::<IShellItem2>(absolute.as_ptr())
+                    .ok()
+                    .and_then(|item| {
+                        item.GetPropertyStore::<IPropertyStore>(GPS_FASTPROPERTIESONLY)
+                            .ok()
+                    });
+                if let Some(mut device) = network_device_from_store(&name, store.as_ref()) {
+                    let computer_resource =
+                        shell_folder_child_name(&network_folder, child.as_ptr(), SHGDN_FORPARSING)
+                            .is_some_and(|name| shell_parsing_name_is_computer(&name));
+                    apply_network_computer_hint(&mut device, computer_resource);
+                    publish_network_computer(device.clone());
+                    merge_network_computers(&mut devices, vec![device]);
+                }
             }
 
             devices.sort_by_key(|device| device.name.to_lowercase());
@@ -941,11 +1014,24 @@ fn merge_network_computers(
     mut extra: Vec<NetworkComputerInfo>,
 ) {
     let mut merged = std::mem::take(target);
-    for computer in extra.drain(..) {
+    for mut computer in extra.drain(..) {
         if let Some(existing) = merged
             .iter_mut()
             .find(|existing| existing.name.eq_ignore_ascii_case(&computer.name))
         {
+            if matches!(
+                (existing.kind, computer.kind),
+                (
+                    crate::platform::NetworkDeviceKind::Printer,
+                    crate::platform::NetworkDeviceKind::Scanner
+                ) | (
+                    crate::platform::NetworkDeviceKind::Scanner,
+                    crate::platform::NetworkDeviceKind::Printer
+                )
+            ) {
+                computer.kind = crate::platform::NetworkDeviceKind::Multifunction;
+                computer.comment = "Dispositivo multifunción".into();
+            }
             if network_device_kind_priority(computer.kind)
                 > network_device_kind_priority(existing.kind)
                 || existing.comment.trim().is_empty()
@@ -993,24 +1079,15 @@ fn collect_wnet_computers(
         return;
     }
 
-    let resources = wnet_enumerate(parent);
+    let resources = wnet_enumerate(parent, true);
     for resource in resources {
         *visited = visited.saturating_add(1);
         if *visited > max_nodes {
             break;
         }
 
-        if let Some(host) = wnet_host_name(&resource) {
-            let comment = if resource.comment.trim().is_empty() {
-                "PC de red".into()
-            } else {
-                resource.comment.clone()
-            };
-            computers.push(NetworkComputerInfo {
-                name: host,
-                kind: classify_network_device_kind(&resource.remote_name, &comment),
-                comment,
-            });
+        if let Some(computer) = wnet_computer(&resource) {
+            computers.push(computer);
             continue;
         }
 
@@ -1066,12 +1143,34 @@ fn should_descend_wnet_resource(resource: &WNetResourceInfo, depth: usize) -> bo
 
 #[cfg(target_os = "windows")]
 fn wnet_host_name(resource: &WNetResourceInfo) -> Option<String> {
-    let parts = unc_parts(&resource.remote_name);
-    if parts.len() == 1 && !is_windows_network_provider(parts[0]) {
-        Some(parts[0].to_string())
-    } else {
-        None
+    // The top-level namespace contains installed network providers, domains
+    // and other containers. A display label is never proof of a computer.
+    // Winnetwk.h: GENERIC=0, SERVER=2, SHARE=3; SDK metadata puts these in the
+    // unrelated WinSock feature, so keep their documented values local.
+    if !matches!(resource.display_type, 0 | 2 | 3)
+        || !resource.remote_name.trim().starts_with(r"\\")
+    {
+        return None;
     }
+    let parts = unc_parts(&resource.remote_name);
+    parts
+        .first()
+        .filter(|host| !is_windows_network_provider(host))
+        .map(|host| (*host).to_string())
+}
+
+fn wnet_computer(resource: &WNetResourceInfo) -> Option<NetworkComputerInfo> {
+    let name = wnet_host_name(resource)?;
+    let comment = if resource.comment.trim().is_empty() {
+        "PC de red".into()
+    } else {
+        resource.comment.clone()
+    };
+    Some(NetworkComputerInfo {
+        name,
+        kind: classify_network_device_kind(&resource.remote_name, &comment),
+        comment,
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -1160,7 +1259,7 @@ fn property_store_string(
 ) -> Option<String> {
     use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::System::Com::StructuredStorage::{
-        PropVariantClear, PropVariantToStringAlloc,
+        PropVariantClear, PropVariantToStringAlloc, PropVariantToStringVectorAlloc,
     };
 
     unsafe {
@@ -1169,16 +1268,40 @@ fn property_store_string(
             return None;
         }
 
-        let string = PropVariantToStringAlloc(&value)
-            .ok()
-            .map(|text| {
-                let value = pwstr_to_string(text);
-                if !text.is_null() {
-                    CoTaskMemFree(Some(text.0 as *const _));
-                }
-                value
-            })
-            .unwrap_or_default();
+        let mut strings = std::ptr::null_mut();
+        let mut count = 0;
+        let vector = if PropVariantToStringVectorAlloc(&value, &mut strings, &mut count).is_ok()
+            && !strings.is_null()
+        {
+            let values = std::slice::from_raw_parts(strings, count as usize);
+            let result = values
+                .iter()
+                .take(256)
+                .map(|text| pwstr_to_string(*text))
+                .collect::<Vec<_>>()
+                .join(" ");
+            for text in values {
+                CoTaskMemFree(Some(text.0 as *const _));
+            }
+            CoTaskMemFree(Some(strings as *const _));
+            result
+        } else {
+            String::new()
+        };
+        let string = if vector.is_empty() {
+            PropVariantToStringAlloc(&value)
+                .ok()
+                .map(|text| {
+                    let value = pwstr_to_string(text);
+                    if !text.is_null() {
+                        CoTaskMemFree(Some(text.0 as *const _));
+                    }
+                    value
+                })
+                .unwrap_or_default()
+        } else {
+            vector
+        };
         let _ = PropVariantClear(&mut value);
 
         let string = string.trim().to_string();
@@ -1187,27 +1310,6 @@ fn property_store_string(
         } else {
             Some(string)
         }
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn function_instance_id(
-    instance: &windows::Win32::Devices::FunctionDiscovery::IFunctionInstance,
-) -> Option<String> {
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::core::PWSTR;
-
-    unsafe {
-        let id = instance
-            .GetProviderInstanceID()
-            .or_else(|_| instance.GetID())
-            .ok()?;
-        let value = pwstr_to_string(PWSTR(id));
-        if !id.is_null() {
-            CoTaskMemFree(Some(id as *const _));
-        }
-        let value = clean_network_device_name(&value);
-        if value.is_empty() { None } else { Some(value) }
     }
 }
 
@@ -1225,7 +1327,7 @@ fn clean_network_device_name(name: &str) -> String {
 
     let candidate = candidate.trim();
     if candidate.is_empty()
-        || candidate.contains("Provider\\")
+        || candidate.to_ascii_lowercase().contains("provider\\")
         || candidate.starts_with('{')
         || candidate.eq_ignore_ascii_case("network")
     {
@@ -1248,7 +1350,7 @@ fn wnet_network_shares(host: &str) -> Vec<NetworkShareInfo> {
         lpProvider: windows::core::PWSTR::null(),
     };
 
-    wnet_enumerate(Some(&parent))
+    wnet_enumerate(Some(&parent), false)
         .into_iter()
         .filter(|resource| {
             resource.resource_type == windows::Win32::NetworkManagement::WNet::RESOURCETYPE_DISK
@@ -1266,6 +1368,7 @@ fn wnet_network_shares(host: &str) -> Vec<NetworkShareInfo> {
 #[cfg(target_os = "windows")]
 fn wnet_enumerate(
     parent: Option<&windows::Win32::NetworkManagement::WNet::NETRESOURCEW>,
+    publish: bool,
 ) -> Vec<WNetResourceInfo> {
     use windows::Win32::Foundation::{ERROR_NO_MORE_ITEMS, HANDLE, WIN32_ERROR};
     use windows::Win32::NetworkManagement::WNet::{
@@ -1316,6 +1419,9 @@ fn wnet_enumerate(
                     display_type: resource.dwDisplayType,
                     resource_type: resource.dwType,
                 });
+                if publish && let Some(computer) = output.last().and_then(wnet_computer) {
+                    publish_network_computer(computer);
+                }
             }
         }
 
@@ -1325,11 +1431,26 @@ fn wnet_enumerate(
 }
 
 #[cfg(target_os = "windows")]
-fn is_windows_network_provider(value: &str) -> bool {
-    value
-        .trim()
-        .trim_start_matches('\\')
-        .eq_ignore_ascii_case("Microsoft Windows Network")
+pub(crate) fn is_windows_network_provider(value: &str) -> bool {
+    if value.contains("::") {
+        return value.split("::").any(is_windows_network_provider);
+    }
+    let normalized: String = value
+        .chars()
+        .filter(char::is_ascii_alphanumeric)
+        .flat_map(char::to_lowercase)
+        .collect();
+    matches!(
+        normalized.as_str(),
+        "microsoftwindowsnetwork"
+            | "microsoftterminalservices"
+            | "microsoftremotedesktopservices"
+            | "microsoftremotedesktopnetwork"
+            | "plan9networkprovider"
+            | "webclientnetwork"
+            | "webclientnetworkprovider"
+            | "microsoftpublicationservicedevicehost"
+    )
 }
 
 #[cfg(target_os = "windows")]
@@ -1396,5 +1517,147 @@ mod tests {
             classify_network_device_kind("iR-ADV 529", "Dispositivo de red"),
             crate::platform::NetworkDeviceKind::Printer
         );
+    }
+
+    fn wnet_resource(name: &str, display_type: u32) -> WNetResourceInfo {
+        WNetResourceInfo {
+            remote_name: name.into(),
+            provider_name: "Microsoft Windows Network".into(),
+            comment: String::new(),
+            usage: windows::Win32::NetworkManagement::WNet::RESOURCEUSAGE_CONTAINER.0,
+            display_type,
+            resource_type: windows::Win32::NetworkManagement::WNet::RESOURCETYPE_ANY,
+        }
+    }
+
+    #[test]
+    fn wnet_provider_and_domain_containers_are_not_computers() {
+        for name in [
+            "Microsoft Terminal Services",
+            "Plan9NetworkProvider",
+            "WebClientNetwork",
+            "Microsoft Windows Network",
+        ] {
+            assert_eq!(wnet_host_name(&wnet_resource(name, 6)), None, "{name}");
+            assert_eq!(wnet_host_name(&wnet_resource(name, 0)), None, "{name}");
+            assert!(is_windows_network_provider(name));
+        }
+        assert_eq!(wnet_host_name(&wnet_resource(r"\\WORKGROUP", 1)), None);
+        assert_eq!(wnet_host_name(&wnet_resource("WORKGROUP", 0)), None);
+        assert_eq!(
+            wnet_host_name(&wnet_resource(r"\\MARTHAOPORTA", 2)).as_deref(),
+            Some("MARTHAOPORTA")
+        );
+        assert_eq!(
+            wnet_host_name(&wnet_resource(r"\\NAS\Documents", 3)).as_deref(),
+            Some("NAS")
+        );
+        assert_eq!(
+            wnet_host_name(&wnet_resource(r"\\NAS", 0)).as_deref(),
+            Some("NAS")
+        );
+        assert!(!is_windows_network_provider("SERVER-PLAN9"));
+        assert!(!is_windows_network_provider("WEBCLIENT-PC"));
+    }
+
+    #[test]
+    fn device_categories_take_precedence_over_manufacturer_or_model_guesses() {
+        use crate::platform::NetworkDeviceKind::{
+            Computer, Multifunction, Other, Printer, Scanner,
+        };
+        assert_eq!(
+            network_kind_with_metadata("Canon iR-ADV 529", "Imaging.Scanner", "Device"),
+            Scanner
+        );
+        assert_eq!(
+            network_kind_with_metadata(
+                "EPSON device",
+                "PrintFax.Printer Imaging.Scanner",
+                "Device"
+            ),
+            Multifunction
+        );
+        assert_eq!(
+            network_kind_with_metadata(
+                "Canon iR-ADV 529",
+                "Imaging.MultifunctionPrinter",
+                "Device"
+            ),
+            Multifunction
+        );
+        assert_eq!(
+            network_kind_with_metadata("Printer Support", "Computer.Desktop", "Device"),
+            Computer
+        );
+        assert_eq!(
+            network_kind_with_metadata("Canon Camera", "", "Device"),
+            Other
+        );
+        assert_eq!(
+            network_kind_with_metadata("Network scanner", "", "Device"),
+            Scanner
+        );
+        assert_eq!(
+            network_kind_with_metadata("HP LaserJet", "", "Device"),
+            Printer
+        );
+    }
+
+    #[test]
+    fn printer_and_scanner_functions_of_the_same_device_enrich_as_multifunction() {
+        use crate::platform::NetworkDeviceKind::{Multifunction, Printer, Scanner};
+        let mut devices = vec![NetworkComputerInfo {
+            name: "Office MFD".into(),
+            comment: "Printer".into(),
+            kind: Printer,
+        }];
+        merge_network_computers(
+            &mut devices,
+            vec![NetworkComputerInfo {
+                name: "office mfd".into(),
+                comment: "Scanner".into(),
+                kind: Scanner,
+            }],
+        );
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].kind, Multifunction);
+    }
+
+    #[test]
+    fn shell_unc_identity_classifies_computers_without_model_name_guesses() {
+        use crate::platform::NetworkDeviceKind::{Computer, Multifunction, Other};
+        for name in [
+            "DIRPROYECTO",
+            "GRAFICO2",
+            "MARTHAOPORTA",
+            "SECRETARIA-MUNI",
+            "TECPROYECTO",
+        ] {
+            let parsing_name = format!(r"\\{name}");
+            assert!(shell_parsing_name_is_computer(&parsing_name));
+            let mut device = NetworkComputerInfo {
+                name: name.into(),
+                comment: "Dispositivo de red".into(),
+                kind: Other,
+            };
+            apply_network_computer_hint(&mut device, shell_parsing_name_is_computer(&parsing_name));
+            assert_eq!(device.kind, Computer);
+        }
+        for parsing_name in [
+            "MARTHAOPORTA",
+            "Web Client Network",
+            r"\\?\SWD\PRINT",
+            r"\\.\DEVICE",
+            "::{network}\\device",
+        ] {
+            assert!(!shell_parsing_name_is_computer(parsing_name));
+        }
+        let mut multifunction = NetworkComputerInfo {
+            name: "EPSONDF2594".into(),
+            comment: "Multifunction".into(),
+            kind: Multifunction,
+        };
+        apply_network_computer_hint(&mut multifunction, true);
+        assert_eq!(multifunction.kind, Multifunction);
     }
 }

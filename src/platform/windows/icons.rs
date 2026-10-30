@@ -168,8 +168,13 @@ pub fn cached_desktop_thumbnail(path: &std::path::Path, size: u32) -> Option<Nat
         .or_else(|| crate::platform::thumbnail_fallback_cache::load(path, size))
 }
 
-pub fn cache_desktop_thumbnail(path: &std::path::Path, size: u32, image: &NativeIconImage) -> bool {
-    crate::platform::thumbnail_fallback_cache::save(path, size, image)
+pub fn cache_desktop_thumbnail_checked(
+    path: &std::path::Path,
+    size: u32,
+    image: &NativeIconImage,
+    expected: (u64, std::time::SystemTime),
+) -> bool {
+    crate::platform::thumbnail_fallback_cache::save_checked(path, size, image, expected)
 }
 
 pub fn image_thumbnail(path: &std::path::Path, size: u32) -> Option<NativeIconImage> {

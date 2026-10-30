@@ -1,16 +1,16 @@
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 use std::io::{self, Read};
 use std::process::Child;
 #[cfg(unix)]
 use std::process::ExitStatus;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 use std::process::{Command, Output, Stdio};
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 use std::thread;
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 use std::time::{Duration, Instant};
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 const MAX_CAPTURE_BYTES: usize = 8 * 1024 * 1024;
 
 /// Scope a Linux monitor to its spawning thread, including abrupt app exit.
@@ -40,7 +40,7 @@ pub(crate) fn terminate_with_parent(command: &mut Command) {
 
 /// One deadline covers both execution and output. Nonblocking pipes avoid
 /// reader threads that could outlive a timed-out helper and its descendants.
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 pub fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Option<Output> {
     #[cfg(unix)]
     {
@@ -84,9 +84,9 @@ pub fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> 
     }
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 struct ReapedChild(Child);
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 impl Drop for ReapedChild {
     fn drop(&mut self) {
         let _ = self.0.kill();
@@ -114,7 +114,7 @@ fn make_nonblocking(pipe: &impl std::os::fd::AsRawFd) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 fn make_nonblocking(_pipe: &impl std::os::windows::io::AsRawHandle) -> io::Result<()> {
     Ok(())
 }
@@ -133,7 +133,7 @@ fn drain_available(pipe: &mut impl Read, bytes: &mut Vec<u8>) -> io::Result<bool
     }
 }
 
-#[cfg(all(windows, test))]
+#[cfg(windows)]
 fn drain_available<R: Read + std::os::windows::io::AsRawHandle>(
     pipe: &mut R,
     bytes: &mut Vec<u8>,
@@ -171,7 +171,7 @@ fn drain_available<R: Read + std::os::windows::io::AsRawHandle>(
     }
 }
 
-#[cfg(any(unix, test))]
+#[cfg(any(unix, windows))]
 fn append_output(bytes: &mut Vec<u8>, chunk: &[u8]) -> io::Result<()> {
     if bytes.len().saturating_add(chunk.len()) > MAX_CAPTURE_BYTES {
         return Err(io::Error::other("Desktop helper output exceeded its limit"));

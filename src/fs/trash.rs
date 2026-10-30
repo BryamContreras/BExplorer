@@ -176,6 +176,7 @@ fn trash_item_entry(item: ::trash::TrashItem) -> FileEntry {
         percent_full: None,
         // In the Recycle Bin these two detail columns intentionally represent
         // the original location and deletion date.
+        modified_time: None,
         modified: Some(item.original_parent.to_string_lossy().into_owned()),
         created: deleted_at,
         is_hidden: false,

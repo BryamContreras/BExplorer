@@ -130,10 +130,11 @@ enum Message {
     Loaded(PaneId, u64, Result<Vec<FileEntry>, String>),
     NetworkDiscoveryEntries(PaneId, u64, Vec<FileEntry>),
     NetworkDiscoveryAddresses(PaneId, u64, Vec<String>),
+    NetworkDiscoveryPoll(PaneId, u64),
     SidebarStorageLoaded(Result<Vec<FileEntry>, String>),
     TrashIconStatusLoaded(u64, Result<bool, String>),
     DirectoryChanged(crate::fs::watcher::DirectoryChange),
-    WatchedDirectoryLoaded(PathBuf, Vec<(PaneId, u64)>, Result<Vec<FileEntry>, String>),
+    WatchedDirectoryLoaded(PathBuf, u64, Vec<(PaneId, u64)>, Result<Vec<FileEntry>, String>),
     StorageDevicesChanged,
     RefreshStorageAfterDeviceChange,
     CloseTab(PaneId, usize),
@@ -507,6 +508,9 @@ enum Message {
     FlushExternalFileDrops,
     ClearFileDragClickSuppression,
     WindowUnfocused(window::Id),
+    WindowFocused(window::Id),
+    TrimMemoryAfterIdle(window::Id, u64),
+    TrimMemory(window::Id, u64, bool),
     WindowResized(window::Id, Size),
     MainWindowSizeObserved(window::Id, Size, bool),
     #[cfg(debug_assertions)]
@@ -1270,6 +1274,7 @@ struct PdfPreviewPage {
 
 struct PdfPreviewState {
     path: PathBuf,
+    source_stamp: PreviewSourceStamp,
     page_count: Option<usize>,
     pages: Vec<PdfPreviewPage>,
     current_page: usize,
@@ -1312,7 +1317,7 @@ mod pdf_preview_tests {
     #[test]
     fn scrolling_large_documents_keeps_only_nearby_pages_and_does_not_retry_failures() {
         let mut state = PdfPreviewState {
-            path: "document.pdf".into(), page_count: Some(10_000),
+            path: "document.pdf".into(), source_stamp: (None, None), page_count: Some(10_000),
             pages: vec![PdfPreviewPage { index: 0, handle: iced_image::Handle::from_rgba(1, 1, vec![0; 4]) }],
             current_page: 5_000, visible_pages: 3, loading: false, document: None, aspect_ratio: 0.707,
             failed_pages: HashSet::new(),
@@ -1342,7 +1347,7 @@ mod pdf_preview_tests {
     fn leaving_a_text_preview_aborts_its_pending_read() {
         let cancel = Arc::new(AtomicBool::new(false));
         let (abort, registration) = iced::futures::future::AbortHandle::new_pair();
-        let preview = TextPreviewState { path: "document.txt".into(), content: text_editor::Content::with_text("…"), cancel: Arc::clone(&cancel), abort };
+        let preview = TextPreviewState { path: "document.txt".into(), source_stamp: (None, None), content: text_editor::Content::with_text("…"), cancel: Arc::clone(&cancel), abort };
         drop(preview);
         assert!(cancel.load(AtomicOrdering::Relaxed));
         assert!(iced::futures::executor::block_on(iced::futures::future::Abortable::new(
@@ -1356,6 +1361,7 @@ mod pdf_preview_tests {
 /// available without allowing the source file to be edited.
 struct TextPreviewState {
     path: PathBuf,
+    source_stamp: PreviewSourceStamp,
     content: text_editor::Content,
     cancel: Arc<AtomicBool>,
     abort: iced::futures::future::AbortHandle,
@@ -1590,6 +1596,8 @@ struct PaneState {
     status: String,
     request_id: u64,
     network_discovery_pending: usize,
+    network_refresh: Option<network_refresh::NetworkRefresh>,
+    directory_load: Option<DirectoryLoadToken>,
     network_discovery_cancel: Arc<AtomicBool>,
     search_cancel: Option<Arc<AtomicBool>>,
     search_receiver: Option<Receiver<crate::fs::search::SearchEvent>>,
@@ -1635,6 +1643,8 @@ impl Default for PaneState {
             status: String::from("0 elements"),
             request_id: 0,
             network_discovery_pending: 0,
+            network_refresh: None,
+            directory_load: None,
             network_discovery_cancel: Arc::new(AtomicBool::new(false)),
             search_cancel: None,
             search_receiver: None,

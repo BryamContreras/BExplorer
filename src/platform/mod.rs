@@ -39,6 +39,7 @@ pub enum DriveKind {
     NoRootDir,
     Removable,
     Fixed,
+    External,
     Remote,
     CdRom,
     RamDisk,
@@ -461,6 +462,7 @@ pub fn drive_info(path: &Path) -> DriveInfo {
             windows::WindowsDriveKind::NoRootDir => DriveKind::NoRootDir,
             windows::WindowsDriveKind::Removable => DriveKind::Removable,
             windows::WindowsDriveKind::Fixed => DriveKind::Fixed,
+            windows::WindowsDriveKind::External => DriveKind::External,
             windows::WindowsDriveKind::Remote => DriveKind::Remote,
             windows::WindowsDriveKind::CdRom => DriveKind::CdRom,
             windows::WindowsDriveKind::RamDisk => DriveKind::RamDisk,
@@ -919,21 +921,6 @@ pub fn cached_desktop_thumbnail(path: &Path, size: u32) -> Option<NativeIconImag
 #[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 pub fn cached_desktop_thumbnail(_path: &Path, _size: u32) -> Option<NativeIconImage> {
     None
-}
-
-#[cfg(target_os = "windows")]
-pub fn cache_desktop_thumbnail(path: &Path, size: u32, image: &NativeIconImage) -> bool {
-    windows::cache_desktop_thumbnail(path, size, image)
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-pub fn cache_desktop_thumbnail(path: &Path, size: u32, image: &NativeIconImage) -> bool {
-    linux::cache_desktop_thumbnail(path, size, image)
-}
-
-#[cfg(not(any(target_os = "windows", all(unix, not(target_os = "macos")))))]
-pub fn cache_desktop_thumbnail(_path: &Path, _size: u32, _image: &NativeIconImage) -> bool {
-    false
 }
 
 #[cfg(target_os = "windows")]

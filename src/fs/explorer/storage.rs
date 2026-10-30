@@ -26,6 +26,7 @@ fn windows_storage_device(path: PathBuf) -> StorageDevice {
     let info = crate::platform::drive_info(&path);
     let drive_kind = match info.kind {
         crate::platform::DriveKind::Removable => DriveKind::Usb,
+        crate::platform::DriveKind::External => DriveKind::External,
         crate::platform::DriveKind::Remote => DriveKind::Network,
         crate::platform::DriveKind::CdRom => DriveKind::Optical,
         crate::platform::DriveKind::RamDisk => DriveKind::RamDisk,

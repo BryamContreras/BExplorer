@@ -46,12 +46,15 @@ use crate::utils::errors::BExplorerError;
 use crate::utils::paths;
 
 mod advanced;
+mod directory_refresh;
 mod duplicate_cleanup;
 mod file_actions;
 mod helpers;
 mod image_cache;
 mod interaction;
+mod memory;
 mod navigation;
+mod network_refresh;
 #[cfg(target_os = "linux")]
 mod properties;
 mod search_state;
@@ -59,8 +62,14 @@ mod storage_analysis;
 mod update;
 mod view;
 
+use directory_refresh::{DirectoryLoadToken, DirectoryRefreshes};
 use helpers::*;
 use image_cache::ImageCache;
+type PreviewSourceStamp = (Option<u64>, Option<std::time::SystemTime>);
+
+fn preview_source_stamp(entry: &FileEntry) -> PreviewSourceStamp {
+    (entry.size, entry.modified_time)
+}
 
 const THIS_PC_LABEL: &str = "This PC";
 const TITLE_HEIGHT: f32 = 38.0;
@@ -758,6 +767,7 @@ struct BExplorerIced {
     storage_refresh_scheduled: bool,
     storage_refresh_active: bool,
     storage_refresh_pending: bool,
+    directory_refreshes: DirectoryRefreshes,
     trash_has_items: Option<bool>,
     trash_icon_request_id: u64,
     search_mode_menu_open: Option<PaneId>,
@@ -811,6 +821,10 @@ struct BExplorerIced {
     pdf_previews: HashMap<PaneId, PdfPreviewState>,
     native_icon_cache: ImageCache,
     small_native_icon_cache: ImageCache,
+    image_cache_budget: usize,
+    memory_trim_generation: u64,
+    visible_image_keys: HashMap<PaneId, HashSet<PathBuf>>,
+    images_suspended: bool,
     transfer_tx: Sender<TransferMessage>,
     transfer_rx: Receiver<TransferMessage>,
     next_transfer_id: u64,
@@ -962,6 +976,7 @@ fn input_event_message(event: Event, status: event::Status, window: window::Id) 
             Some(Message::CheckAddressFocus(window))
         }
         Event::Window(window::Event::Unfocused) => Some(Message::WindowUnfocused(window)),
+        Event::Window(window::Event::Focused) => Some(Message::WindowFocused(window)),
         Event::Window(window::Event::FileDropped(path)) => Some(Message::ExternalFileDropped(path)),
         _ => None,
     }
@@ -1364,6 +1379,7 @@ impl BExplorerIced {
         let color_rgb_inputs = accent_rgb_strings(config.accent_color);
         let preview_panel_pane = config.show_preview_panel.then_some(PaneId::Primary);
         let preview_panel_progress = if config.show_preview_panel { 1.0 } else { 0.0 };
+        let image_cache_budget = memory::image_cache_budget();
         let mut app = Self {
             sidebar_visible: config.sidebar_visible,
             sidebar_pointer_inside: false,
@@ -1383,6 +1399,7 @@ impl BExplorerIced {
             storage_refresh_scheduled: false,
             storage_refresh_active: false,
             storage_refresh_pending: false,
+            directory_refreshes: DirectoryRefreshes::default(),
             trash_has_items: None,
             trash_icon_request_id: 0,
             search_mode_menu_open: None,
@@ -1430,12 +1447,16 @@ impl BExplorerIced {
             file_clipboard: None,
             last_undo_action: None,
             last_entry_click: None,
-            thumbnail_cache: ImageCache::new(64 * 1024 * 1024),
-            small_thumbnail_cache: ImageCache::new(16 * 1024 * 1024),
-            preview_cache: ImageCache::new(32 * 1024 * 1024),
+            thumbnail_cache: ImageCache::new(image_cache_budget * 64 / 160),
+            small_thumbnail_cache: ImageCache::new(image_cache_budget * 16 / 160),
+            preview_cache: ImageCache::new(image_cache_budget * 32 / 160),
             pdf_previews: HashMap::new(),
-            native_icon_cache: ImageCache::new(32 * 1024 * 1024),
-            small_native_icon_cache: ImageCache::new(16 * 1024 * 1024),
+            native_icon_cache: ImageCache::new(image_cache_budget * 32 / 160),
+            small_native_icon_cache: ImageCache::new(image_cache_budget * 16 / 160),
+            image_cache_budget,
+            memory_trim_generation: 0,
+            visible_image_keys: HashMap::new(),
+            images_suspended: false,
             transfer_tx,
             transfer_rx,
             next_transfer_id: 0,
@@ -2248,22 +2269,27 @@ impl BExplorerIced {
         } else {
             Subscription::none()
         };
-        let animation_frame = if self.startup.waiting_for_first_frame()
-            || self.sidebar_animation_active()
-            || self.preview_panel_animation_active()
-            || self.popup_fade_animation_active()
-            || self.file_drag_fade_animation_active()
+        let animation_frame = if !self.images_suspended
+            && (self.startup.waiting_for_first_frame()
+                || self.sidebar_animation_active()
+                || self.preview_panel_animation_active()
+                || self.popup_fade_animation_active()
+                || self.file_drag_fade_animation_active())
         {
             window::frames().map(Message::AnimationFrame)
         } else {
             Subscription::none()
         };
-        let scrollbar_tick = if self.scrollbar_animation_active() {
+        let scrollbar_tick = if !self.images_suspended && self.scrollbar_animation_active() {
             Subscription::run(scrollbar_animation_tick_stream)
         } else {
             Subscription::none()
         };
-        let async_progress_tick = if self.async_progress_animation_active() {
+        let async_progress_tick = if (!self.images_suspended
+            || self.duplicate_window_id.is_some()
+            || self.storage_analysis_window_id.is_some())
+            && self.async_progress_animation_active()
+        {
             Subscription::run(async_progress_tick_stream)
         } else {
             Subscription::none()

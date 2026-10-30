@@ -348,6 +348,7 @@ pub(in crate::iced_ui) fn duplicate_file_entry(file: &DuplicateFile) -> FileEntr
         free_space: None,
         size: Some(file.size),
         percent_full: None,
+        modified_time: file.modified,
         modified: None,
         created: None,
         is_hidden: file.name.starts_with('.'),
