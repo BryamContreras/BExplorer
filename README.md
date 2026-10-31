@@ -86,13 +86,14 @@ installed.
   Refresh bypasses completed query caches while reusing requests already in progress.
 - Event-driven folder watching with coalesced reloads, bounded background
   workers, source-aware thumbnails, and memory-scaled image-cache budgets.
-- Windows Explorer-compatible file clipboard for regular file paths, plus
-  native MIME clipboard helpers and a text/URI-list fallback for Linux.
+- Windows Explorer-compatible file clipboard for regular file paths and
+  streamed virtual files received through RDP, plus native MIME clipboard
+  helpers and a text/URI-list fallback for Linux.
 - Internal and external drag-and-drop support.
 - Drag polling sleeps until a drag is prepared or active instead of waking the
   application continuously while idle.
-- Transfer queue with progress, pause, cancel, cleanup of partial files, and
-  conflict handling.
+- Transfer queue with progress, recent speed beside the item count, pause,
+  cancel, cleanup of partial files, and conflict handling.
 - Per-pane search and transfer progress in split view; closing one pane keeps
   its operations running and transfers progress ownership to the remaining pane.
 - One-level undo for completed copies, moves, and moves to trash.
@@ -130,6 +131,11 @@ explorer:
 - drag files inside BExplorer, accept desktop file drops on Windows/Linux, and
   drag out through the documented platform integrations;
 - copy from and to Windows Explorer through the system clipboard;
+- receive redirected RDP clipboard files as streams, including folders, with
+  progress, pause, and cancel; sending local files uses Windows clipboard
+  redirection. The RDP session must allow file clipboard redirection. Incoming
+  virtual copies keep both on name collisions and preserve partial files after
+  cancellation or failure;
 - exchange Linux file clipboard MIME data through Wayland/X11 helpers;
 - show pending cut entries with reduced opacity until the clipboard operation
   changes or completes;

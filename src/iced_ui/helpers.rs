@@ -407,10 +407,14 @@ mod tests {
         let cut = FileClipboardState {
             paths: vec![path.clone()],
             cut: true,
+            #[cfg(target_os = "windows")]
+            sequence: 0,
         };
         let copied = FileClipboardState {
             paths: vec![path.clone()],
             cut: false,
+            #[cfg(target_os = "windows")]
+            sequence: 0,
         };
 
         assert!(crate::iced_ui::navigation::clipboard_path_is_pending_cut(

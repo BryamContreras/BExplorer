@@ -82,6 +82,8 @@ impl BExplorerIced {
             // Archive entries are virtual. A cut cannot remove an item from an
             // archive, so pasting these entries always means extraction.
             cut: cut && !contains_archive_entries,
+            #[cfg(target_os = "windows")]
+            sequence: shell::clipboard_sequence(),
         });
         if contains_archive_entries {
             self.pane_mut(pane).status = format!(
@@ -91,6 +93,12 @@ impl BExplorerIced {
             return Task::none();
         }
         let system_sync_failed = shell::copy_files(&paths, cut).err();
+        #[cfg(target_os = "windows")]
+        if system_sync_failed.is_none()
+            && let Some(clipboard) = self.file_clipboard.as_mut()
+        {
+            clipboard.sequence = shell::clipboard_sequence();
+        }
         self.pane_mut(pane).status = match (cut, system_sync_failed) {
             (true, Some(_)) => format!("Cut {} item(s) in BExplorer", paths.len()),
             (false, Some(_)) => format!("Copied {} item(s) in BExplorer", paths.len()),
@@ -113,11 +121,19 @@ impl BExplorerIced {
         // system clipboard. Prefer our local clipboard in that one case;
         // ordinary files still use the native clipboard as the source of truth.
         let local_archive_clipboard = self.file_clipboard.clone().filter(|clipboard| {
-            clipboard
-                .paths
-                .iter()
-                .any(|path| crate::fs::archive_listing::is_inside_archive(path))
+            clipboard.matches_system_clipboard()
+                && clipboard
+                    .paths
+                    .iter()
+                    .any(|path| crate::fs::archive_listing::is_inside_archive(path))
         });
+        #[cfg(target_os = "windows")]
+        if local_archive_clipboard.is_none() && shell::virtual_clipboard_files_available() {
+            // Remote clipboard files have streams rather than readable local
+            // paths. Do not fall back to an older local file selection.
+            self.file_clipboard = None;
+            return self.queue_virtual_clipboard_transfer(pane, destination);
+        }
         let clipboard = match local_archive_clipboard {
             Some(clipboard) => Ok(clipboard),
             None => match shell::read_files() {
@@ -125,11 +141,17 @@ impl BExplorerIced {
                     let clipboard = FileClipboardState {
                         paths: system_clipboard.paths,
                         cut: system_clipboard.cut,
+                        #[cfg(target_os = "windows")]
+                        sequence: shell::clipboard_sequence(),
                     };
                     self.file_clipboard = Some(clipboard.clone());
                     Ok(clipboard)
                 }
-                Err(system_error) => self.file_clipboard.clone().ok_or(system_error),
+                Err(system_error) => self
+                    .file_clipboard
+                    .clone()
+                    .filter(FileClipboardState::matches_system_clipboard)
+                    .ok_or(system_error),
             },
         };
 
@@ -291,8 +313,12 @@ impl BExplorerIced {
 
         self.transfer_progress
             .insert(job.id, TransferProgress::pending(&job));
-        self.transfer_queue
-            .push_back(QueuedTransferState { job, pane });
+        self.transfer_queue.push_back(QueuedTransferState {
+            job,
+            pane,
+            #[cfg(target_os = "windows")]
+            virtual_clipboard_sequence: None,
+        });
 
         if clear_clipboard {
             self.file_clipboard = None;
@@ -305,6 +331,52 @@ impl BExplorerIced {
         };
         self.start_next_transfers();
         Ok(())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn queue_virtual_clipboard_transfer(
+        &mut self,
+        pane: PaneId,
+        destination: PathBuf,
+    ) -> Task<Message> {
+        if explorer::is_portable_path(&destination)
+            || crate::fs::archive_listing::is_inside_archive(&destination)
+        {
+            let error = self.localized(
+                "Pega los archivos remotos en una carpeta local antes de enviarlos a este destino.",
+                "Paste remote files into a local folder before sending them to this destination.",
+            );
+            return self.report_error(pane, error.to_owned());
+        }
+        if self.active_transfers.is_empty() && self.transfer_queue.is_empty() {
+            self.transfer_batch_totals.clear();
+        } else if !self.transfer_in_progress_for(pane) {
+            self.transfer_batch_totals.remove(&pane);
+        }
+        self.next_transfer_id = self.next_transfer_id.saturating_add(1);
+        self.last_undo_action = None;
+        let job = TransferJob {
+            id: self.next_transfer_id,
+            sources: Vec::new(),
+            destination,
+            kind: TransferKind::Copy,
+            conflict_policy: ConflictPolicy::KeepBoth,
+        };
+        self.transfer_progress
+            .insert(job.id, TransferProgress::pending(&job));
+        self.transfer_queue.push_back(QueuedTransferState {
+            job,
+            pane,
+            virtual_clipboard_sequence: Some(shell::clipboard_sequence()),
+        });
+        self.pane_mut(pane).status = self
+            .localized(
+                "Copia desde el portapapeles remoto en cola",
+                "Remote clipboard copy queued",
+            )
+            .to_owned();
+        self.start_next_transfers();
+        self.ensure_transfer_window_task()
     }
 
     pub(super) fn queue_archive_entry_extraction(
@@ -423,6 +495,8 @@ impl BExplorerIced {
             let control = TransferControl::new();
             let worker_control = control.clone();
             let worker_job = queued.job.clone();
+            #[cfg(target_os = "windows")]
+            let virtual_clipboard_sequence = queued.virtual_clipboard_sequence;
             let tx = self.transfer_tx.clone();
             self.transfer_progress
                 .insert(queued.job.id, TransferProgress::pending(&queued.job));
@@ -443,6 +517,16 @@ impl BExplorerIced {
                 let job_id = worker_job.id;
                 let failure_tx = tx.clone();
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    #[cfg(target_os = "windows")]
+                    if let Some(sequence) = virtual_clipboard_sequence {
+                        shell::run_virtual_clipboard_transfer(
+                            worker_job,
+                            tx,
+                            worker_control,
+                            sequence,
+                        );
+                        return;
+                    }
                     transfer_queue::run_transfer(worker_job, tx, worker_control);
                 }))
                 .is_err()
@@ -581,6 +665,22 @@ impl BExplorerIced {
             }
         }
 
+        let now = Instant::now();
+        self.transfer_rates.retain(|id, _| {
+            self.active_transfers.contains_key(id)
+                || self.active_elevated_transfers.contains_key(id)
+        });
+        for (id, progress) in &self.transfer_progress {
+            if self.active_transfers.contains_key(id)
+                || self.active_elevated_transfers.contains_key(id)
+            {
+                self.transfer_rates.entry(*id).or_default().sample(
+                    now,
+                    progress.copied_bytes,
+                    progress.state,
+                );
+            }
+        }
         self.prune_transfer_history();
         Task::batch(tasks)
     }
@@ -603,7 +703,12 @@ impl BExplorerIced {
                 .get(&active.job.id)
                 .cloned()
                 .unwrap_or_else(|| TransferProgress::pending(&active.job));
-            items.push(TransferDisplayState::from_progress(progress));
+            let mut item = TransferDisplayState::from_progress(progress);
+            item.bytes_per_second = self
+                .transfer_rates
+                .get(&active.job.id)
+                .map_or(0.0, TransferRate::bytes_per_second);
+            items.push(item);
         }
         for queued in &self.transfer_queue {
             items.push(TransferDisplayState::from_progress(
@@ -612,9 +717,12 @@ impl BExplorerIced {
         }
         for job_id in self.active_elevated_transfers.keys() {
             if let Some(progress) = self.transfer_progress.get(job_id) {
-                items.push(TransferDisplayState::from_elevated_progress(
-                    progress.clone(),
-                ));
+                let mut item = TransferDisplayState::from_elevated_progress(progress.clone());
+                item.bytes_per_second = self
+                    .transfer_rates
+                    .get(job_id)
+                    .map_or(0.0, TransferRate::bytes_per_second);
+                items.push(item);
             }
         }
         for history in self.transfer_history.iter().rev().take(3) {

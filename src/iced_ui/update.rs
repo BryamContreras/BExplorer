@@ -2990,8 +2990,18 @@ impl BExplorerIced {
                         self.file_clipboard = Some(FileClipboardState {
                             paths: paths.clone(),
                             cut: false,
+                            #[cfg(target_os = "windows")]
+                            sequence: shell::clipboard_sequence(),
                         });
-                        let _ = shell::copy_files(&paths, false);
+                        let clipboard_sync_result = shell::copy_files(&paths, false);
+                        #[cfg(target_os = "windows")]
+                        if clipboard_sync_result.is_ok()
+                            && let Some(clipboard) = self.file_clipboard.as_mut()
+                        {
+                            clipboard.sequence = shell::clipboard_sequence();
+                        }
+                        #[cfg(not(target_os = "windows"))]
+                        let _ = clipboard_sync_result;
                         self.pane_mut(pane).status =
                             format!("{} elemento(s) MTP preparados", paths.len());
                     }

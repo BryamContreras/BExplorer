@@ -1140,6 +1140,21 @@ enum ActiveDeleteKind {
 struct FileClipboardState {
     paths: Vec<PathBuf>,
     cut: bool,
+    #[cfg(target_os = "windows")]
+    sequence: u32,
+}
+
+impl FileClipboardState {
+    fn matches_system_clipboard(&self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            self.sequence != 0 && self.sequence == shell::clipboard_sequence()
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            true
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1402,6 +1417,8 @@ fn pdf_preview_page_height(panel_width: f32, aspect_ratio: f32) -> f32 {
 struct QueuedTransferState {
     job: TransferJob,
     pane: PaneId,
+    #[cfg(target_os = "windows")]
+    virtual_clipboard_sequence: Option<u32>,
 }
 
 struct ActiveTransferState {

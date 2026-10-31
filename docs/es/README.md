@@ -112,10 +112,15 @@ La compatibilidad continua se valida especialmente en:
   miniaturas validadas contra el archivo y cache de imagenes ajustada a la RAM.
 - Copiar, cortar y pegar compatible con el portapapeles de Windows; en Linux se
   usan helpers MIME nativos cuando existen, con fallback de texto.
+- Recepcion de archivos y carpetas del portapapeles RDP mediante flujos, con
+  progreso, pausa y cancelacion. El envio de archivos locales aprovecha la
+  redireccion de Windows; la sesion debe permitir archivos por portapapeles.
+  Al recibir se conservan ambas copias ante nombres repetidos y los archivos
+  parciales se mantienen si hay un error o se cancela.
 - Arrastrar y soltar dentro de BExplorer y hacia otras aplicaciones compatibles
   en Windows y Linux.
-- Cola de transferencias con progreso, pausa, cancelacion y manejo de
-  conflictos.
+- Cola de transferencias con progreso, velocidad reciente junto a la cantidad
+  de elementos, pausa, cancelacion y manejo de conflictos.
 - Deshacer de un nivel para la ultima copia, movimiento o envio a la papelera
   completado.
 - Reemplazos locales preparados: primero se copia y sincroniza el archivo o

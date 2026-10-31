@@ -59,12 +59,14 @@ mod network_refresh;
 mod properties;
 mod search_state;
 mod storage_analysis;
+mod transfer_rate;
 mod update;
 mod view;
 
 use directory_refresh::{DirectoryLoadToken, DirectoryRefreshes};
 use helpers::*;
 use image_cache::ImageCache;
+use transfer_rate::{TransferRate, format_transfer_speed};
 type PreviewSourceStamp = (Option<u64>, Option<std::time::SystemTime>);
 
 fn preview_source_stamp(entry: &FileEntry) -> PreviewSourceStamp {
@@ -833,6 +835,7 @@ struct BExplorerIced {
     active_transfers: HashMap<u64, ActiveTransferState>,
     active_elevated_transfers: HashMap<u64, PaneId>,
     transfer_progress: HashMap<u64, TransferProgress>,
+    transfer_rates: HashMap<u64, TransferRate>,
     transfer_batch_totals: HashMap<PaneId, (u64, u64)>,
     transfer_history: VecDeque<TransferHistoryState>,
     active_deletes: HashMap<u64, ActiveDeleteState>,
@@ -1465,6 +1468,7 @@ impl BExplorerIced {
             active_transfers: HashMap::new(),
             active_elevated_transfers: HashMap::new(),
             transfer_progress: HashMap::new(),
+            transfer_rates: HashMap::new(),
             transfer_batch_totals: HashMap::new(),
             transfer_history: VecDeque::new(),
             active_deletes: HashMap::new(),

@@ -4,6 +4,16 @@ All notable user-facing changes to BExplorer are documented here.
 
 ## 1.0.6 - Unreleased
 
+- Show a phone icon for portable MTP devices in Windows instead of the
+  generic folder returned for their virtual paths.
+- Show recent transfer speed immediately after the item count, with localized
+  decimal separators and automatic units. The existing progress timer samples
+  a two-second window so stalled disk writes fall to zero instead of retaining
+  an old average speed.
+- Receive Windows virtual clipboard files, including redirected RDP files,
+  through bounded streams in the normal transfer queue. Metadata is validated
+  before writing, collisions keep both copies, and failed or cancelled remote
+  imports retain their partial files without removing remote originals.
 - Increased the maximum name-column width in Details and made the rename
   editor follow the caret through long filenames with arrows, Shift+arrows,
   Home, and End.

@@ -20,6 +20,8 @@ mod disk;
 mod elevation;
 mod format;
 mod send_to;
+#[cfg(target_os = "windows")]
+mod windows_virtual_clipboard;
 
 pub use send_to::{NativeSendToTarget, invoke_native_send_to, native_send_to_targets};
 
@@ -85,6 +87,43 @@ pub fn copy_files(paths: &[PathBuf], cut: bool) -> Result<()> {
 
 pub fn read_files() -> Result<ClipboardFiles> {
     read_files_platform()
+}
+
+/// Inspect advertised formats without requesting file contents. In particular,
+/// opening a context menu must not download a redirected RDP clipboard.
+pub fn clipboard_files_available() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::DataExchange::IsClipboardFormatAvailable;
+        use windows::Win32::System::Ole::CF_HDROP;
+
+        let local_files = unsafe { IsClipboardFormatAvailable(CF_HDROP.0 as u32).is_ok() };
+        local_files || windows_virtual_clipboard::virtual_files_available()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        read_files().is_ok_and(|clipboard| !clipboard.paths.is_empty())
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn virtual_clipboard_files_available() -> bool {
+    windows_virtual_clipboard::virtual_files_available()
+}
+
+#[cfg(target_os = "windows")]
+pub fn clipboard_sequence() -> u32 {
+    unsafe { windows::Win32::System::DataExchange::GetClipboardSequenceNumber() }
+}
+
+#[cfg(target_os = "windows")]
+pub fn run_virtual_clipboard_transfer(
+    job: crate::fs::transfer_queue::TransferJob,
+    tx: std::sync::mpsc::Sender<crate::fs::transfer_queue::TransferMessage>,
+    control: crate::fs::transfer_queue::TransferControl,
+    expected_sequence: u32,
+) {
+    windows_virtual_clipboard::run_virtual_transfer(job, tx, control, expected_sequence);
 }
 
 pub fn clear_clipboard() -> Result<()> {

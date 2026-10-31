@@ -52,10 +52,13 @@ impl BExplorerIced {
                 format_size(Some(item.total_bytes))
             )
         };
-        let speed = if item.bytes_per_second > 0.0
-            && matches!(item.state, TransferState::Copying | TransferState::Paused)
-        {
-            format!("{} / s", format_size(Some(item.bytes_per_second as u64)))
+        let speed = if matches!(item.state, TransferState::Copying | TransferState::Paused) {
+            let bytes_per_second = if item.state == TransferState::Paused {
+                0.0
+            } else {
+                item.bytes_per_second
+            };
+            format_transfer_speed(bytes_per_second, self.is_spanish())
         } else {
             String::new()
         };
@@ -75,7 +78,7 @@ impl BExplorerIced {
         } else if speed.is_empty() {
             format!("{files}  -  {size}")
         } else {
-            format!("{files}  -  {size}  -  {speed}")
+            format!("{files}  -  {speed}  -  {size}")
         };
         let state = self.localized_transfer_state(&item);
         let title = self.localized_transfer_title(&item);

@@ -711,6 +711,12 @@ pub(in crate::iced_ui) fn native_icon_request_for_entry(
     size: u32,
 ) -> Option<(PathBuf, PathBuf, bool)> {
     if entry.kind == EntryKind::Drive && entry.drive_kind == Some(DriveKind::Portable) {
+        // Windows interprets our synthetic device lookup path as a directory,
+        // returning a folder icon. Use the existing scalable phone illustration
+        // instead; Linux continues to use the device's native theme icon.
+        #[cfg(target_os = "windows")]
+        return None;
+        #[cfg(not(target_os = "windows"))]
         return Some(thumbnail_data::portable_device_native_icon_request(
             entry, size,
         ));
@@ -1304,4 +1310,45 @@ pub(in crate::iced_ui) fn maximized_acrylic_frame_tint_alpha(primary_alpha: f32)
     // client area. Keep only a light root tint while maximized so those nested
     // surfaces do not hide most of Desktop Acrylic on a full-screen canvas.
     ((1.0 - primary_alpha.clamp(0.0, 1.0)) * 0.12).clamp(0.0, 1.0)
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod portable_device_icon_tests {
+    use super::*;
+
+    #[test]
+    fn portable_devices_use_phone_illustration_without_changing_drives_or_folders() {
+        let mut entry = FileEntry {
+            name: "Phone".into(),
+            path: explorer::portable_device_path("test-device", "Phone"),
+            kind: EntryKind::Drive,
+            category: FileCategory::Other,
+            drive_kind: Some(DriveKind::Portable),
+            file_system: "MTP".into(),
+            free_space: None,
+            size: None,
+            percent_full: None,
+            modified_time: None,
+            modified: None,
+            created: None,
+            is_hidden: false,
+        };
+        for size in [
+            thumbnail_data::SMALL_ENTRY_IMAGE_SIZE,
+            thumbnail_data::NATIVE_ICON_SIZE,
+        ] {
+            assert!(native_icon_request_for_entry(&entry, size).is_none());
+            assert_eq!(fallback_icon_label(&entry), "portable");
+        }
+        // A device with an ordinary-looking mount path is still portable.
+        entry.path = PathBuf::from(r"E:\");
+        assert!(native_icon_request_for_entry(&entry, thumbnail_data::NATIVE_ICON_SIZE).is_none());
+        entry.drive_kind = Some(DriveKind::Local);
+        assert!(native_icon_request_for_entry(&entry, thumbnail_data::NATIVE_ICON_SIZE).is_some());
+        entry.kind = EntryKind::Folder;
+        entry.drive_kind = None;
+        entry.path = explorer::portable_device_path("test-device", "Folder");
+        assert!(native_icon_request_for_entry(&entry, thumbnail_data::NATIVE_ICON_SIZE).is_some());
+        assert_eq!(fallback_icon_label(&entry), "folder");
+    }
 }

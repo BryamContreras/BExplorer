@@ -165,10 +165,9 @@ impl BExplorerIced {
         if matches!(target, ContextTarget::SidebarDrive(_)) || self.is_trash_pane(pane) {
             return Task::batch([self.capture_context_menu_backdrop(menu), send_to_icon_tasks]);
         }
-        let local_paste_available = self
-            .file_clipboard
-            .as_ref()
-            .is_some_and(|clipboard| !clipboard.paths.is_empty());
+        let local_paste_available = self.file_clipboard.as_ref().is_some_and(|clipboard| {
+            !clipboard.paths.is_empty() && clipboard.matches_system_clipboard()
+        });
         let open_with_path = self
             .context_entry(pane, target)
             .filter(|entry| entry.kind != EntryKind::Drive)
@@ -178,8 +177,7 @@ impl BExplorerIced {
         let menu_data = Task::perform(
             async move {
                 run_blocking_file_operation(move || {
-                    let native_paste_available =
-                        shell::read_files().is_ok_and(|clipboard| !clipboard.paths.is_empty());
+                    let native_paste_available = shell::clipboard_files_available();
                     let applications = open_with_path
                         .as_deref()
                         .and_then(|path| shell::open_with_applications(path).ok())
