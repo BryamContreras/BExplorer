@@ -8,6 +8,22 @@ El proyecto esta organizado para que la logica especifica de cada sistema
 operativo quede separada. Windows y Linux son plataformas soportadas con
 integraciones nativas propias; macOS sigue siendo un objetivo experimental.
 
+## Inicio rápido
+
+1. Abre [GitHub Releases](https://github.com/BryamContreras/BExplorer/releases/latest)
+   y elige Setup x64 para Windows o el paquete disponible para tu distribución
+   Linux. En Windows también puedes usar el ejecutable portátil.
+2. Abre una carpeta, añade una pestaña con `Ctrl+T` y activa el segundo panel
+   desde la barra de título. Selecciona varios elementos y pulsa `F2` para
+   ver una vista previa del renombrado en lote.
+3. Elige el modo junto al campo de búsqueda. La búsqueda completa incluye
+   nombres dentro de comprimidos compatibles. **Buscar en el texto** encuentra
+   frases en archivos de texto UTF-8 y UTF-16 con BOM de hasta 1 MiB.
+
+El renombrado en lote y la búsqueda por contenido se incorporan en la 1.0.6.
+
+![Vista previa de renombrado en lote con los nombres actuales y propuestos](../screenshots/bulk-rename.png)
+
 ## Estado
 
 Las compilaciones 1.0.6 se distribuyen como artefactos de GitHub Actions; la
@@ -27,8 +43,8 @@ La interfaz ya se ha migrado de `egui` a `iced` y se ha eliminado la
 implementacion visual sustituida. Cubre navegacion local, pestanas, panel
 dividido, vistas, filtrado, agrupacion y ordenacion por columnas, renombrado,
 eliminacion en segundo plano y transferencias en cola. Los cambios de sesion se
-guardan al producirse y las carpetas grandes se renderizan incrementalmente en
-lotes de 500 elementos, sin ocultar permanentemente los elementos restantes.
+guardan al producirse. Las vistas de carpetas grandes construyen los elementos
+visibles y cercanos mientras conservan disponible la lista completa.
 La busqueda completa, vistas previas, comprimidos, Defender, MTP, montaje de
 imagenes, red, arrastrar y soltar nativo, enlaces simbolicos, propiedades y
 seleccion de aplicaciones estan conectados a la interfaz.
@@ -377,6 +393,16 @@ retira solamente su propia entrada del `PATH`, y el desinstalador aparece
 simplemente como BExplorer, sin la version en su nombre. Los comandos antiguos
 de `tools/` se conservan como wrappers compatibles.
 
+Para firmar el EXE y el instalador, usa el SDK de Windows, un certificado con
+clave privada en `Cert:\CurrentUser\My` y el servidor de sellado RFC 3161 de
+la autoridad de certificación.
+
+```powershell
+./scripts/windows/package.ps1 -SigningThumbprint $Huella -TimestampServer $UrlDeSellado
+```
+
+El empaquetado verifica las firmas antes de calcular los SHA-256.
+
 El flujo `Build executables and installers` de GitHub Actions se ejecuta en
 pull requests, pushes a `master` y ejecuciones manuales.
 Compila Windows, DEB/binario en Ubuntu 24.04 y RPM nativo en Fedora 44.
@@ -419,6 +445,8 @@ Flujos soportados:
 
 En Windows y Linux el motor 7-Zip se compila desde `vendor/7zip-src` y se enlaza
 con `vendor/7zip-ffi`, sin depender de un ejecutable externo `7zr`.
+Los flujos XZ simples se extraen. Para navegar por los nombres internos usa
+un contenedor que los conserve, como ZIP o 7z.
 
 ## Licencia
 
@@ -430,14 +458,45 @@ Consulta `THIRD_PARTY_NOTICES.md` y los archivos originales en
 
 ## Fiabilidad de datos
 
+Si una carpeta local está protegida, **Autorizar listado** solicita la
+confirmación de Windows (UAC) o la del agente gráfico de Polkit en Linux.
+La autorización permite ver el listado actual y conserva los permisos de la
+carpeta. Abrir archivos, entrar en subcarpetas y hacer transferencias se rige
+por los permisos de cada operación. Los recursos de red usan sus propias
+credenciales.
+
 La configuracion y la sesion se escriben en archivos temporales hermanos, se
 sincronizan y se reemplazan atomicamente. Las copias con conflicto `Reemplazar`
 tambien usan una copia preparada y sincronizada antes de modificar el destino.
-La suite incluye una regresion que fuerza un fallo durante un reemplazo y
-verifica que el destino original se conserva, ademas de protecciones para el
-formateo de almacenamiento en Linux.
+Si se interrumpe el reemplazo de una carpeta, el siguiente inicio puede
+restaurar el original. Si quedaron las dos versiones, se conservan ambas y
+la ubicación retenida queda en el registro.
 
-Los paquetes portables de Windows incluyen checksum, pero pueden mostrar una
-advertencia de SmartScreen hasta que exista un instalador firmado. Consulta
-`CHANGELOG.md` para el historial de versiones y `SECURITY.md` para reportar
-vulnerabilidades de forma privada.
+Deshacer comprueba que los archivos y carpetas de una copia o movimiento
+siguen siendo los mismos. Una copia intacta va a la papelera. Si cambió el
+destino, se conserva. Las transferencias entre volúmenes preservan fechas y
+los atributos admitidos por el sistema de archivos. La propiedad y las ACL
+de Windows se rigen por el destino. Los enlaces duros se copian como archivos
+independientes.
+
+## Validación de la próxima publicación
+
+1. Ejecuta las pruebas y Clippy del mismo commit en Windows y Linux. Comprueba
+   los paquetes en las distribuciones que declara la matriz de compatibilidad.
+2. Prueba con archivos desechables el portapapeles, el teclado, el arrastre y
+   las operaciones sobre SMB, USB y MTP en Windows, GNOME y KDE. Registra la
+   cobertura de Narrador y Orca por separado.
+3. Ejecuta el benchmark de listados y búsqueda con 10.000 y 100.000 archivos.
+   Repite con `BEXPLORER_BENCH_DIRECTORY` para un recurso montado y
+   `BEXPLORER_BENCH_LIST_ONLY=1` para medir solo su listado.
+
+   ```bash
+   cargo test --locked benchmark_listing_and_search -- --ignored --nocapture
+   ```
+
+4. Verifica los SHA-256 y las firmas de los archivos finales. Adjunta los
+   paquetes, los avisos de licencia y los resultados a un borrador de GitHub
+   Releases para la etiqueta de la misma versión.
+
+Consulta `CHANGELOG.md` para el historial de versiones y `SECURITY.md` para
+reportar vulnerabilidades de forma privada.

@@ -1,6 +1,6 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub(crate) struct FileIdentity(u64, u64);
 
 pub(crate) fn opened_file_identity(file: &fs::File) -> std::io::Result<FileIdentity> {
@@ -43,7 +43,7 @@ pub(crate) fn path_identity(path: &Path) -> std::io::Result<FileIdentity> {
 }
 
 #[cfg(windows)]
-fn open_metadata_handle(path: &Path) -> std::io::Result<fs::File> {
+pub(crate) fn open_metadata_handle(path: &Path) -> std::io::Result<fs::File> {
     use std::os::windows::fs::OpenOptionsExt;
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
@@ -75,7 +75,7 @@ pub(super) fn is_directory_reparse_point(metadata: &fs::Metadata) -> bool {
     }
 }
 
-pub(super) fn ensure_supported(path: &Path, metadata: &fs::Metadata) -> Result<()> {
+pub(crate) fn ensure_supported(path: &Path, metadata: &fs::Metadata) -> Result<()> {
     #[cfg(windows)]
     let reparse_point = {
         use std::os::windows::fs::MetadataExt;
@@ -260,6 +260,10 @@ pub(super) struct SourceSnapshot {
     identity: FileIdentity,
     size: u64,
     modified: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    changed: (i64, i64),
+    #[cfg(unix)]
+    owner_and_mode: (u32, u32, u32),
     directory: bool,
     link: Option<PathBuf>,
 }
@@ -267,7 +271,12 @@ pub(super) struct SourceSnapshot {
 impl SourceSnapshot {
     pub(super) fn capture(path: &Path) -> Result<Self> {
         let metadata = fs::symlink_metadata(path)?;
-        ensure_supported(path, &metadata)?;
+        Self::capture_with_metadata(path, &metadata)
+    }
+    pub(super) fn capture_with_metadata(path: &Path, metadata: &fs::Metadata) -> Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        ensure_supported(path, metadata)?;
         let link = metadata
             .file_type()
             .is_symlink()
@@ -275,27 +284,44 @@ impl SourceSnapshot {
             .transpose()?;
         Ok(Self {
             path: path.into(),
+            #[cfg(unix)]
+            identity: FileIdentity(metadata.dev(), metadata.ino()),
+            #[cfg(not(unix))]
             identity: path_identity(path)?,
             size: metadata.len(),
             modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+            #[cfg(unix)]
+            owner_and_mode: (metadata.uid(), metadata.gid(), metadata.mode()),
             directory: metadata.is_dir() && link.is_none(),
             link,
         })
     }
     pub(super) fn unchanged(&self) -> bool {
+        self.unchanged_after_link_removal(false)
+    }
+
+    fn unchanged_after_link_removal(&self, removed_link: bool) -> bool {
         let Ok(current) = Self::capture(&self.path) else {
             return false;
+        };
+        #[cfg(unix)]
+        let attributes_unchanged = self.owner_and_mode == current.owner_and_mode
+            && (self.directory || removed_link || self.changed == current.changed);
+        #[cfg(not(unix))]
+        let attributes_unchanged = {
+            let _ = removed_link;
+            true
         };
         self.identity == current.identity
             && self.directory == current.directory
             && self.link == current.link
+            && attributes_unchanged
             && (self.directory || self.size == current.size && self.modified == current.modified)
     }
     pub(super) fn size(&self) -> u64 {
         self.size
-    }
-    pub(super) fn modified(&self) -> Option<std::time::SystemTime> {
-        self.modified
     }
     pub(super) fn matches_open_file(&self, file: &fs::File) -> Result<bool> {
         Ok(opened_file_identity(file)? == self.identity && file.metadata()?.len() == self.size)
@@ -307,13 +333,17 @@ pub(super) fn remove_copied_source(
     snapshots: &[SourceSnapshot],
     control: &TransferControl,
 ) -> Result<()> {
+    let mut removed_links = HashSet::new();
     for snapshot in snapshots
         .iter()
         .rev()
         .filter(|snapshot| snapshot.path.starts_with(root))
     {
         check_cancelled(control)?;
-        if !snapshot.unchanged() {
+        // Removing one hard-linked name updates ctime for the remaining
+        // names of that file. Our own unlink must not look like an edit.
+        let removed_link = removed_links.contains(&snapshot.identity);
+        if !snapshot.unchanged_after_link_removal(removed_link) {
             return Err(BExplorerError::Operation(format!(
                 "The source changed after copying; it was preserved at {}",
                 snapshot.path.display()
@@ -325,6 +355,9 @@ pub(super) fn remove_copied_source(
             remove_link(&snapshot.path)?;
         } else {
             fs::remove_file(&snapshot.path)?;
+        }
+        if !snapshot.directory {
+            removed_links.insert(snapshot.identity);
         }
     }
     Ok(())

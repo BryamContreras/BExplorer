@@ -6,7 +6,7 @@ use crate::utils::errors::{BExplorerError, Result};
 pub(super) fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
     use std::mem::size_of;
 
-    use windows::Win32::Foundation::{CloseHandle, HWND};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_CANCELLED, HWND};
     use windows::Win32::System::Threading::{GetExitCodeProcess, INFINITE, WaitForSingleObject};
     use windows::Win32::UI::Shell::{SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW};
     use windows::Win32::UI::WindowsAndMessaging::SW_HIDE;
@@ -30,7 +30,15 @@ pub(super) fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
 
     unsafe {
         ShellExecuteExW(&mut info).map_err(|error| {
-            BExplorerError::Shell(format!("Could not request administrator access: {error}"))
+            if error.code() == ERROR_CANCELLED.to_hresult() {
+                std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "Administrator access was canceled",
+                )
+                .into()
+            } else {
+                BExplorerError::Shell(format!("Could not request administrator access: {error}"))
+            }
         })?;
         if info.hProcess.is_invalid() {
             return Err(BExplorerError::Shell(
@@ -132,6 +140,7 @@ pub(super) fn run_elevated_current_exe(args: &[OsString]) -> Result<i32> {
 pub(super) fn run_elevated_current_exe_with_input(
     args: &[OsString],
     input: &[u8],
+    require_graphical_agent: bool,
 ) -> Result<std::process::Output> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -147,6 +156,9 @@ pub(super) fn run_elevated_current_exe_with_input(
     if pkexec_supports_keep_cwd() {
         command.arg("--keep-cwd");
     }
+    if require_graphical_agent {
+        command.arg("--disable-internal-agent");
+    }
     let mut child = command
         .arg(exe)
         .args(args)
@@ -159,16 +171,24 @@ pub(super) fn run_elevated_current_exe_with_input(
     let write_result = child
         .stdin
         .take()
-        .ok_or_else(|| BExplorerError::Shell("Could not open elevated helper input".into()))
-        .and_then(|mut stdin| {
-            stdin
-                .write_all(input)
-                .map_err(|error| BExplorerError::Shell(error.to_string()))
-        });
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "Could not open elevated helper input",
+            )
+        })
+        .and_then(|mut stdin| stdin.write_all(input));
     if let Err(error) = write_result {
+        if require_graphical_agent && error.kind() == std::io::ErrorKind::BrokenPipe {
+            // A dismissed/denied dialog can close the input before we write
+            // it. Preserve pkexec's exit code for the caller to interpret.
+            return child
+                .wait_with_output()
+                .map_err(|error| BExplorerError::Shell(error.to_string()));
+        }
         let _ = child.kill();
         let _ = child.wait();
-        return Err(error);
+        return Err(BExplorerError::Shell(error.to_string()));
     }
 
     child

@@ -250,7 +250,15 @@ pub fn run_elevated_current_exe_with_input(
     args: &[OsString],
     input: &[u8],
 ) -> Result<std::process::Output> {
-    elevation::run_elevated_current_exe_with_input(args, input)
+    elevation::run_elevated_current_exe_with_input(args, input, false)
+}
+
+#[cfg(target_os = "linux")]
+pub fn run_elevated_current_exe_with_graphical_agent(
+    args: &[OsString],
+    input: &[u8],
+) -> Result<std::process::Output> {
+    elevation::run_elevated_current_exe_with_input(args, input, true)
 }
 
 #[cfg(target_os = "windows")]

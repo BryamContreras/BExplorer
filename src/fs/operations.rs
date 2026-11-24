@@ -595,34 +595,6 @@ pub fn restore_from_trash(records: &[TrashUndoRecord]) -> Result<usize> {
     }
 }
 
-/// Revert a completed move without replacing a file that appeared at the
-/// original location after the move.
-pub fn move_paths_back(moves: &[(PathBuf, PathBuf)]) -> Result<usize> {
-    if moves.is_empty() {
-        return Err(BExplorerError::Operation(
-            "No hay elementos movidos para devolver".into(),
-        ));
-    }
-    for (moved_path, original_path) in moves {
-        if !moved_path.exists() {
-            return Err(BExplorerError::InvalidPath(moved_path.clone()));
-        }
-        if original_path.exists() {
-            return Err(BExplorerError::Operation(format!(
-                "No se puede deshacer porque ya existe {}",
-                original_path.display()
-            )));
-        }
-    }
-    for (moved_path, original_path) in moves {
-        if let Some(parent) = original_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        move_recursively(moved_path, original_path)?;
-    }
-    Ok(moves.len())
-}
-
 pub fn delete_permanently(paths: &[PathBuf]) -> Result<usize> {
     Ok(delete_permanently_with_control(paths, &DeleteControl::new())?.count)
 }
@@ -762,11 +734,18 @@ pub fn rename_path(path: &Path, new_name: &str) -> Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
 
+    if !crate::fs::bulk_rename::valid_name(new_name) {
+        return Err(BExplorerError::Operation("Invalid filename".into()));
+    }
     let parent = path
         .parent()
         .ok_or_else(|| BExplorerError::InvalidPath(path.to_path_buf()))?;
     let target = parent.join(new_name);
-    fs::rename(path, &target)?;
+    if path.file_name() == Some(OsStr::new(new_name)) {
+        fs::symlink_metadata(path)?;
+    } else if let Err(error) = crate::fs::transfer_queue::rename_without_replace(path, &target) {
+        crate::fs::bulk_rename::rename_case_variant(path, &target, error)?;
+    }
     Ok(target)
 }
 
@@ -964,24 +943,29 @@ mod tests {
         fs::remove_dir_all(dir).expect("cleanup temp test dir");
     }
 
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     #[test]
-    fn moves_items_back_to_their_exact_original_location() {
-        let root = temp_test_dir("undo-move");
-        let original_parent = root.join("original");
-        let moved_parent = root.join("moved");
-        fs::create_dir_all(&original_parent).expect("create original parent");
-        fs::create_dir_all(&moved_parent).expect("create moved parent");
-        let original = original_parent.join("document.txt");
-        let moved = moved_parent.join("document.txt");
-        fs::write(&original, b"undo me").expect("write source");
-        fs::rename(&original, &moved).expect("simulate move");
+    fn rename_path_keeps_existing_content_and_supports_case_only_changes() {
+        let dir = temp_test_dir("rename-no-replace");
+        let source = dir.join("source.txt");
+        let existing = dir.join("existing.txt");
+        fs::write(&source, b"source").expect("write original source");
+        fs::write(&existing, b"existing").expect("write existing destination");
 
-        let restored = move_paths_back(&[(moved.clone(), original.clone())]).expect("undo move");
+        assert!(rename_path(&source, "existing.txt").is_err());
+        assert!(rename_path(&source, "../outside.txt").is_err());
+        assert_eq!(fs::read(&source).unwrap(), b"source");
+        assert_eq!(fs::read(&existing).unwrap(), b"existing");
 
-        assert_eq!(restored, 1);
-        assert_eq!(fs::read(&original).expect("read restored"), b"undo me");
-        assert!(!moved.exists());
-        fs::remove_dir_all(root).expect("cleanup temp dir");
+        let renamed = rename_path(&source, "Source.txt").expect("rename changing case");
+        assert_eq!(fs::read(&renamed).unwrap(), b"source");
+        assert!(
+            fs::read_dir(&dir)
+                .unwrap()
+                .any(|entry| { entry.unwrap().file_name() == OsStr::new("Source.txt") })
+        );
+
+        fs::remove_dir_all(dir).expect("cleanup temp test dir");
     }
 
     #[test]

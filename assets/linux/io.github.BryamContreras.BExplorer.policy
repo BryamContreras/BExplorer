@@ -7,10 +7,10 @@
   <icon_name>bexplorer</icon_name>
 
   <action id="io.github.BryamContreras.BExplorer.elevated-helper">
-    <description>Run privileged BExplorer file operations</description>
-    <description xml:lang="es">Ejecutar operaciones de archivos privilegiadas de BExplorer</description>
-    <message>Authentication is required to let BExplorer modify protected files.</message>
-    <message xml:lang="es">Se requiere autenticacion para que BExplorer modifique archivos protegidos.</message>
+    <description>Authorize BExplorer to access protected files and folders</description>
+    <description xml:lang="es">Autorizar a BExplorer a acceder a archivos y carpetas protegidos</description>
+    <message>Authentication is required for BExplorer to access protected files or folders.</message>
+    <message xml:lang="es">Se requiere autenticación para que BExplorer acceda a archivos o carpetas protegidos.</message>
     <defaults>
       <allow_any>auth_admin</allow_any>
       <allow_inactive>auth_admin</allow_inactive>

@@ -62,6 +62,12 @@ impl BExplorerIced {
                 });
                 Task::batch(tasks)
             }
+            Message::AuthorizeDirectoryListing(pane, request_id) => {
+                self.authorize_directory_listing(pane, request_id)
+            }
+            Message::AuthorizedDirectoryLoaded(pane, request_id, path, result) => {
+                self.finish_authorized_directory_listing(pane, request_id, &path, result)
+            }
             Message::Loaded(pane, request_id, result) => {
                 let is_storage_root = self.tab_for_pane(pane).path.is_none();
                 let is_trash_root = self
@@ -93,6 +99,12 @@ impl BExplorerIced {
                     self.reconcile_image_sources(entries);
                 }
                 self.startup.complete_pane_load(pane, request_id);
+                let denied_status = self.localized(
+                    "El listado requiere autorización",
+                    "Listing requires authorization",
+                );
+                let authorized_status = self.localized("Listado autorizado", "Authorized listing");
+                let spanish = self.is_spanish();
                 let state = self.pane_mut(pane);
                 state.loading = false;
                 state.search_progress_phase = 0.0;
@@ -103,7 +115,15 @@ impl BExplorerIced {
                 let load_error = result.as_ref().err().cloned();
                 match result {
                     Ok(entries) => {
-                        state.status = format!("{} elements", entries.len());
+                        state.status =
+                            if state.directory_access == DirectoryAccess::AuthorizedListing {
+                                format!(
+                                    "{} · {authorized_status}",
+                                    localized_entry_count(entries.len(), spanish)
+                                )
+                            } else {
+                                format!("{} elements", entries.len())
+                            };
                         state.folder_entries = None;
                         state.entries = entries;
                         state.selected.clear();
@@ -112,7 +132,13 @@ impl BExplorerIced {
                         state.reset_scroll_position();
                     }
                     Err(error) => {
-                        state.status = error;
+                        state.status = match error {
+                            DirectoryLoadError::AccessDenied => {
+                                state.directory_access = DirectoryAccess::Denied;
+                                denied_status.into()
+                            }
+                            DirectoryLoadError::Other(error) => error,
+                        };
                         state.entries.clear();
                         state.folder_entries = None;
                         state.selected.clear();
@@ -123,6 +149,9 @@ impl BExplorerIced {
                 }
                 state.mark_entries_changed();
                 state.has_vertical_overflow = false;
+                if matches!(load_error, Some(DirectoryLoadError::AccessDenied)) {
+                    self.sync_visible_directory_watches();
+                }
                 if pending_new_folder.is_some() {
                     self.pending_new_folder_rename = None;
                 }
@@ -199,10 +228,13 @@ impl BExplorerIced {
                 // mounted row receives its thumbnail or native icon.
                 tasks.push(self.queue_visible_images(pane));
                 tasks.push(self.start_ready_directory_refreshes());
-                if !self.pane(pane).search_text.trim().is_empty() {
+                if load_error.is_none()
+                    && self.pane(pane).directory_access == DirectoryAccess::Regular
+                    && !self.pane(pane).search_text.trim().is_empty()
+                {
                     tasks.push(self.start_recursive_search(pane));
                 }
-                if let Some(error) = load_error {
+                if let Some(DirectoryLoadError::Other(error)) = load_error {
                     tasks.push(
                         self.show_error_dialog(
                             self.localized(
@@ -943,6 +975,7 @@ impl BExplorerIced {
                     || self.shortcuts_open
                     || self.about_open
                     || self.rename_dialog.is_some()
+                    || self.bulk_rename_dialog.is_some()
                     || self.archive_dialog.is_some()
                     || self.format_dialog.is_some()
                     || self.error_dialog.is_some()
@@ -1472,34 +1505,64 @@ impl BExplorerIced {
                 Task::batch([completion_task, self.close_transfer_window_if_idle_task()])
             }
             Message::UndoLastAction => self.undo_last_action(),
-            Message::UndoFinished(action, result) => {
+            Message::UndoFinished(mut action, result) => {
                 let pane = action.pane();
-                let restored_trash_paths = match &action {
-                    UndoAction::Trash { records, .. } => Some(
-                        records
-                            .iter()
-                            .map(|record| record.original_path.clone())
-                            .collect::<Vec<_>>(),
-                    ),
-                    UndoAction::Copy { .. } | UndoAction::Move { .. } => None,
-                };
-                match result {
-                    Ok(count) => {
-                        self.pane_mut(pane).status = format!("Se deshicieron {count} elemento(s)");
-                        if let Some(paths) = restored_trash_paths {
-                            self.refresh_after_trash_change(pane, &paths)
-                        } else {
-                            let directories = action.refresh_directories();
+                let outcome =
+                    result.unwrap_or_else(|failure| crate::fs::transfer_undo::UndoOutcome {
+                        completed: 0,
+                        failure: Some(failure),
+                    });
+                let completed = outcome.completed;
+                let refresh = if completed == 0 {
+                    Task::none()
+                } else {
+                    match &action {
+                        UndoAction::Trash { records, .. } => self.refresh_after_trash_change(
+                            pane,
+                            &records
+                                .iter()
+                                .map(|record| record.original_path.clone())
+                                .collect::<Vec<_>>(),
+                        ),
+                        UndoAction::Transfer {
+                            kind: TransferKind::Copy,
+                            items,
+                            ..
+                        } => self.refresh_after_trash_change(
+                            pane,
+                            &items[..completed]
+                                .iter()
+                                .map(|item| item.target.clone())
+                                .collect::<Vec<_>>(),
+                        ),
+                        UndoAction::Transfer {
+                            kind: TransferKind::Move,
+                            items,
+                            ..
+                        } => {
+                            let directories = items[..completed]
+                                .iter()
+                                .flat_map(|item| [&item.target, &item.source])
+                                .filter_map(|path| path.parent().map(Path::to_path_buf))
+                                .collect::<Vec<_>>();
                             self.refresh_panes_for_directories(pane, &directories)
                         }
                     }
-                    Err(error) => {
-                        let error_task = self.report_error(pane, error);
-                        // Keep the single undo available if no data was changed
-                        // (for example, an original move destination is busy).
+                };
+                if let Some(error) = outcome.failure {
+                    // A later completed operation already owns the undo slot.
+                    if self.last_undo_action.is_none() {
+                        action.discard_completed_items(completed);
                         self.last_undo_action = Some(action);
-                        error_task
                     }
+                    Task::batch([self.report_error(pane, error), refresh])
+                } else {
+                    self.pane_mut(pane).status = if self.is_spanish() {
+                        format!("Se deshicieron {completed} elemento(s)")
+                    } else {
+                        format!("Undid {completed} item(s)")
+                    };
+                    refresh
                 }
             }
             Message::VirtualArchiveExtractFinished(
@@ -2475,6 +2538,9 @@ impl BExplorerIced {
             }
             Message::KeyPressed(window_id, key, physical_key, modifiers) => {
                 self.current_modifiers = modifiers;
+                if self.main_window_id == Some(window_id) && self.bulk_rename_dialog.is_some() {
+                    return self.handle_bulk_rename_key(&key, modifiers);
+                }
                 let is_enter = matches!(
                     key.as_ref(),
                     keyboard::Key::Named(keyboard::key::Named::Enter)
@@ -2747,6 +2813,7 @@ impl BExplorerIced {
                 iced::widget::operation::focus(inline_rename_input_id())
             }
             Message::RenameSelected(pane) => self.rename_selected(pane),
+            Message::BulkRename(message) => self.update_bulk_rename(message),
             Message::ConfirmRename => self.commit_pending_rename(),
             Message::RenameFinished(mut dialog, result) => {
                 self.pending_file_operations.remove(&dialog.pane);
@@ -3092,24 +3159,8 @@ impl BExplorerIced {
                 self.transfer_progress.remove(&job.id);
                 let completion_task = match result {
                     Ok(result) => {
-                        if job.conflict_policy == ConflictPolicy::KeepBoth
-                            && !result.completed_roots.is_empty()
-                        {
-                            self.last_undo_action = Some(match job.kind {
-                                TransferKind::Copy => UndoAction::Copy {
-                                    pane,
-                                    targets: result
-                                        .completed_roots
-                                        .iter()
-                                        .map(|item| item.target.clone())
-                                        .collect(),
-                                },
-                                TransferKind::Move => UndoAction::Move {
-                                    pane,
-                                    items: result.completed_roots.clone(),
-                                },
-                            });
-                        }
+                        self.last_undo_action =
+                            UndoAction::for_transfer(pane, job.kind, result.completed_roots);
                         self.pane_mut(pane).status = match job.kind {
                             TransferKind::Copy => {
                                 format!(
@@ -4861,6 +4912,10 @@ impl BExplorerIced {
                 Task::none()
             }
             Message::WindowClose => {
+                if self.bulk_rename_applying() {
+                    return Task::none();
+                }
+                self.bulk_rename_dialog = None;
                 #[cfg(target_os = "linux")]
                 if self
                     .properties_window

@@ -1,4 +1,5 @@
 use super::*;
+use crate::fs::search::{SearchEvent, SearchOptions, SearchOutput, SearchScope};
 
 impl BExplorerIced {
     pub(in crate::iced_ui) fn refresh_search(&mut self, pane: PaneId) -> Task<Message> {
@@ -16,6 +17,9 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn start_recursive_search(&mut self, pane: PaneId) -> Task<Message> {
+        if self.pane(pane).directory_access != DirectoryAccess::Regular {
+            return Task::none();
+        }
         self.cancel_recursive_search(pane);
         let query = self.pane(pane).search_text.trim().to_string();
         let root = self.tab_for_pane(pane).path.clone();
@@ -27,13 +31,34 @@ impl BExplorerIced {
             self.pane_mut(pane).status = "La búsqueda no está disponible en esta ubicación".into();
             return Task::none();
         }
+        let scope = match self.pane(pane).search_mode {
+            SearchMode::Quick => SearchScope::Names,
+            SearchMode::Complete => SearchScope::NamesAndArchives,
+            SearchMode::Contents => SearchScope::TextContents,
+        };
+        if scope == SearchScope::TextContents && explorer::is_portable_path(&root) {
+            self.clear_recursive_search(pane);
+            self.pane_mut(pane).status = self
+                .localized(
+                    "Busca por contenido en una carpeta local o montada",
+                    "Search by content in a local or mounted folder",
+                )
+                .into();
+            return Task::none();
+        }
         // A directory load started before the search must not replace its
         // result list. Keep one refresh for when the user returns to the folder.
         defer_watched_directory_for_search(&mut self.directory_refreshes, &root);
 
         let cancelled = Arc::new(AtomicBool::new(false));
-        let include_archives = self.pane(pane).search_mode == SearchMode::Complete;
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let searching = match scope {
+            SearchScope::Names => self.localized("Buscando", "Searching"),
+            SearchScope::NamesAndArchives => self.localized("Búsqueda completa", "Full search"),
+            SearchScope::TextContents => {
+                self.localized("Buscando en el texto", "Searching file text")
+            }
+        };
         {
             let state = self.pane_mut(pane);
             if state.folder_entries.is_none() {
@@ -50,40 +75,39 @@ impl BExplorerIced {
             state.recursive_search_active = true;
             state.search_progress_phase = 0.0;
             state.reset_scroll_position();
-            state.status = if include_archives {
-                format!("Búsqueda completa de \"{query}\"…")
-            } else {
-                format!("Buscando \"{query}\"…")
-            };
+            state.status = format!("{searching} · {query}…");
         }
 
         let show_hidden = self.config.show_hidden;
-        thread::spawn(move || {
-            let batch_sender = sender.clone();
-            let batch_cancelled = cancelled.clone();
-            let output = crate::fs::search::search_files_streaming(
-                crate::fs::search::SearchOptions {
-                    root,
-                    query,
-                    show_hidden,
-                    include_archives,
-                },
-                &cancelled,
-                move |entries| {
-                    !batch_cancelled.load(AtomicOrdering::Relaxed)
-                        && batch_sender
-                            .send(crate::fs::search::SearchEvent::Batch(entries))
-                            .is_ok()
-                },
-            );
-            if !cancelled.load(AtomicOrdering::Relaxed) {
-                let _ = sender.send(crate::fs::search::SearchEvent::Finished {
-                    truncated: output.truncated,
+        Task::perform(
+            async move {
+                if scope == SearchScope::TextContents {
+                    delay(Duration::from_millis(250)).await;
+                }
+                if cancelled.load(AtomicOrdering::Relaxed) {
+                    return;
+                }
+                thread::spawn(move || {
+                    let output = crate::fs::search::search_files_streaming(
+                        SearchOptions {
+                            root,
+                            query,
+                            show_hidden,
+                            scope,
+                        },
+                        &cancelled,
+                        |entries| {
+                            !cancelled.load(AtomicOrdering::Relaxed)
+                                && sender.send(SearchEvent::Batch(entries)).is_ok()
+                        },
+                    );
+                    if !cancelled.load(AtomicOrdering::Relaxed) {
+                        let _ = sender.send(SearchEvent::Finished(output));
+                    }
                 });
-            }
-        });
-
-        Task::none()
+            },
+            |()| Message::PollSearches,
+        )
     }
 
     pub(in crate::iced_ui) fn clear_recursive_search(&mut self, pane: PaneId) {
@@ -118,7 +142,6 @@ impl BExplorerIced {
     pub(in crate::iced_ui) fn poll_searches(&mut self) -> Task<Message> {
         let mut changed_panes = Vec::new();
         for pane in [PaneId::Primary, PaneId::Secondary] {
-            let complete_search = self.pane(pane).search_mode == SearchMode::Complete;
             let (events, disconnected) = {
                 let Some(receiver) = self.pane(pane).search_receiver.as_ref() else {
                     continue;
@@ -142,46 +165,32 @@ impl BExplorerIced {
                 continue;
             }
 
-            let mut finished = disconnected;
-            let mut truncated = false;
+            let mut result = None;
             let mut received_batch = false;
+            let mut entries = Vec::new();
+            for event in events {
+                match event {
+                    SearchEvent::Batch(batch) => {
+                        entries.extend(batch);
+                        received_batch = true;
+                    }
+                    SearchEvent::Finished(output) => result = Some(output),
+                }
+            }
+            let finished = disconnected || result.is_some();
+            let count = self.pane(pane).entries.len() + entries.len();
+            let status = self.search_result_status(count, result.as_ref(), finished);
             {
                 let state = self.pane_mut(pane);
-                for event in events {
-                    match event {
-                        crate::fs::search::SearchEvent::Batch(entries) => {
-                            state.entries.extend(entries);
-                            received_batch = true;
-                        }
-                        crate::fs::search::SearchEvent::Finished {
-                            truncated: event_truncated,
-                        } => {
-                            finished = true;
-                            truncated = event_truncated;
-                        }
-                    }
-                }
-
                 if received_batch {
+                    state.entries.extend(entries);
                     state.mark_entries_changed();
                 }
-
-                let count = state.entries.len();
                 if finished {
                     state.search_cancel = None;
                     state.search_receiver = None;
-                    state.status = if truncated {
-                        format!("{count} resultados (límite alcanzado)")
-                    } else {
-                        format!("{count} resultados")
-                    };
-                } else if received_batch {
-                    state.status = if complete_search {
-                        format!("Búsqueda completa: {count} resultados…")
-                    } else {
-                        format!("Búsqueda rápida: {count} resultados…")
-                    };
                 }
+                state.status = status;
             }
 
             if received_batch || finished {
@@ -195,6 +204,54 @@ impl BExplorerIced {
                 .map(|pane| self.queue_visible_images(pane))
                 .collect::<Vec<_>>(),
         )
+    }
+
+    fn search_result_status(
+        &self,
+        count: usize,
+        output: Option<&SearchOutput>,
+        finished: bool,
+    ) -> String {
+        let label = if count == 1 {
+            self.localized("resultado", "result")
+        } else {
+            self.localized("resultados", "results")
+        };
+        let mut status = format!("{count} {label}");
+        let Some(output) = output else {
+            return if finished {
+                format!(
+                    "{status} · {}",
+                    self.localized("búsqueda interrumpida", "search interrupted")
+                )
+            } else {
+                format!("{status}…")
+            };
+        };
+        if output.truncated {
+            status.push_str(self.localized(" · límite alcanzado", " · limit reached"));
+        }
+        if output.unavailable > 0 {
+            let label = self.localized("elementos sin leer", "unread items");
+            status.push_str(&format!(" · {} {label}", output.unavailable));
+        }
+        if output.oversized_files > 0 {
+            let label = self.localized(
+                "archivos de más de 1 MiB omitidos",
+                "files over 1 MiB skipped",
+            );
+            status.push_str(&format!(" · {} {label}", output.oversized_files));
+        }
+        status
+    }
+
+    pub(in crate::iced_ui) fn search_highlight_query(&self, pane: PaneId) -> &str {
+        let state = self.pane(pane);
+        if state.search_mode == SearchMode::Contents {
+            ""
+        } else {
+            &state.search_text
+        }
     }
 
     pub(in crate::iced_ui) fn filtered_entries(&self, pane: PaneId) -> Vec<usize> {

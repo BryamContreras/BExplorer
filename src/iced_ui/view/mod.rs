@@ -396,6 +396,9 @@ impl BExplorerIced {
         if self.format_dialog.is_some() {
             modal_layers.push(opaque(self.format_dialog_modal(popup_palette)));
         }
+        if self.bulk_rename_dialog.is_some() {
+            modal_layers.push(opaque(self.bulk_rename_modal(palette)));
+        }
         if self.error_dialog.is_some() {
             modal_layers.push(opaque(self.error_dialog_modal(popup_palette)));
         }

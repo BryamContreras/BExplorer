@@ -2,16 +2,29 @@
 
 ![Rust 2024](https://img.shields.io/badge/Rust-2024-orange)
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-blue)
-![Version](https://img.shields.io/badge/version-1.0.6-brightgreen)
-![Status](https://img.shields.io/badge/status-stable-brightgreen)
+![Published version](https://img.shields.io/github/v/release/BryamContreras/BExplorer)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-BExplorer is a stable desktop file explorer for Windows and Linux written in
+BExplorer is a desktop file explorer for Windows and Linux written in
 Rust with `iced`. It focuses on fast file management, split-pane workflows,
 archive handling, preview support, and a modern compact interface without
 turning into a heavy system shell replacement.
 
 Spanish documentation is available in [docs/es/README.md](docs/es/README.md).
+
+## Quick start
+
+1. Open [GitHub Releases](https://github.com/BryamContreras/BExplorer/releases/latest)
+   and choose the Windows x64 installer or an available Linux package for your
+   distribution. Use the Windows portable executable to try it without installing.
+2. Open a folder, add a tab with `Ctrl+T`, and toggle the second pane from the
+   title bar. Select several entries and press `F2` to preview a bulk rename.
+3. Select the search mode beside the search field. Full search includes names
+   inside supported archives. **Search file text** looks inside plain-text files.
+
+Bulk rename and file text search are introduced in 1.0.6.
+
+![Bulk rename preview showing original and proposed file names](docs/screenshots/bulk-rename.png)
 
 The project keeps platform-specific code isolated behind a shared facade.
 Windows and Linux are supported targets with native integrations appropriate to
@@ -96,14 +109,17 @@ installed.
   cancel, cleanup of partial files, and conflict handling.
 - Per-pane search and transfer progress in split view; closing one pane keeps
   its operations running and transfers progress ownership to the remaining pane.
-- One-level undo for completed copies, moves, and moves to trash.
+- One-level undo for completed local copies and moves that left existing
+  destinations intact, and for moves to trash. Undo revalidates transfer
+  targets and sends an unchanged copy to the native trash.
 - Transactional local replacements: the complete new file or directory is
   copied and synchronized beside the destination before the existing item is
   replaced. A failed preparation leaves the previous destination untouched.
 - Concurrent archive jobs with a dedicated progress window that is restored
   when a new compression or transfer starts.
 - Elevated Microsoft Defender remediation and exclusion actions on Windows.
-- Quick search and complete search, including search inside supported archives.
+- Quick and full name search, including names inside supported archives, and a
+  separate mode for plain-text file contents.
 - Resizable preview panel for images, text files, SVG, and PDF.
 - Double-click ISO mounting followed by navigation to the mounted image in a
   new tab, plus contextual eject for supported mounted media.
@@ -141,9 +157,18 @@ explorer:
   changes or completes;
 - copy, paste, and delete files on supported MTP devices;
 - copy and move across local drives, removable drives, and UNC shares;
-- undo the most recent completed copy, move, or move-to-trash operation;
+- undo the most recent eligible copy, move, or move-to-trash operation;
+- preview a bulk rename for items in the same folder, using literal text
+  replacement or numbered names, with an option to keep file extensions;
 - retry supported operations through UAC on Windows or Polkit on Linux when
   access is denied.
+
+If listing a local folder requires elevated permissions, choose **Authorize
+listing** in the file pane. Windows requests authorization through UAC, and
+Linux uses the desktop's Polkit authentication agent. Authorization applies to
+one listing and leaves folder permissions intact. Opening files, entering
+subfolders and running transfers are separate actions checked with their own
+permissions. Network shares use their own credentials.
 
 Conflict resolution is available for copy and move operations:
 
@@ -152,6 +177,15 @@ Conflict resolution is available for copy and move operations:
 - `Skip`: leave the destination item untouched.
 - `Keep both`: copy the new item using a numbered name such as
   `report (2).txt`.
+
+Local copies and cross-volume moves preserve access and modification times,
+Unix mode bits, Linux POSIX ACLs and `user.*` extended attributes, and Windows
+creation time, ordinary DOS attributes and supported NTFS data streams.
+Support depends on the destination filesystem. Copied entries inherit their
+destination ownership, Windows ACLs follow the destination policy, and hard
+links are copied as separate entries. An interrupted directory replacement
+can recover the original on a later launch. If both versions are present,
+recovery keeps both and records the retained path in the log.
 
 ## Symbolic Links, Properties, and Applications
 
@@ -300,9 +334,8 @@ The `iced` interface is split by responsibility under `src/iced_ui`:
 - `helpers.rs` and `helpers/` contain formatting, layout, icon, theme, and
   persistence helpers.
 
-Directory views initially build 500 entries and automatically append additional
-batches near the end of the scroll area. All matching entries remain available;
-the batching only limits how many widgets are constructed at once.
+Directory views build widgets for the visible range and nearby rows. The
+directory enumeration and sort still process the full listing.
 
 On Windows, local image and video thumbnails first query the system-wide Shell
 `IThumbnailCache` without starting new extraction work. A miss is handled in the
@@ -402,6 +435,12 @@ BExplorer keeps an opaque readable background.
   the requested operation with elevated permissions.
 - Archive extraction conflicts currently keep both files automatically with
   numbered names.
+- Use extraction for standalone XZ streams. Browsing member names requires an
+  archive format that stores them, such as ZIP or 7z.
+- Search shows up to 20,000 results and reports additional matches or
+  unavailable entries. Text search matches literal phrases without regard to
+  case in UTF-8 and BOM-marked UTF-16 files of up to 1 MiB, in local or mounted
+  directories. It skips online-only Windows files and binary formats.
 - Network discovery depends on Windows services, providers, credentials, and
   the local network. Devices may appear progressively. Windows providers for
   servers, devices, printers, and network resources contribute to one merged
@@ -429,6 +468,18 @@ Optimized build:
 ```powershell
 cargo build --release
 ```
+
+With a code-signing certificate and its private key in `Cert:\CurrentUser\My`
+and the Windows SDK installed, use its thumbprint and your certificate
+authority's RFC 3161 timestamp URL to sign the package.
+
+```powershell
+./scripts/windows/package.ps1 -SigningThumbprint $Thumbprint -TimestampServer $TimestampUrl
+```
+
+The script signs the executable and installer and verifies both signatures
+before writing their respective checksums. Ordinary packaging remains available
+without the signing parameters.
 
 The release executable is generated at:
 
@@ -724,15 +775,37 @@ cargo test --all-targets
 cargo clippy --all-targets -- -D warnings
 ```
 
+To measure listing and time to the first search batch, run the opt-in benchmark:
+
+```bash
+cargo test --locked benchmark_listing_and_search -- --ignored --nocapture
+```
+
+It creates temporary 10,000- and 100,000-entry directories and records three
+runs per directory. Set `BEXPLORER_BENCH_DIRECTORY` and `BEXPLORER_BENCH_QUERY`
+to use an existing test directory or mounted share. Set
+`BEXPLORER_BENCH_LIST_ONLY=1` to list it without walking subdirectories.
+Compare builds on the same machine and filesystem, with matching build
+profiles and cache conditions.
+
 ## Post-1.0 roadmap
 
 Planned 1.x improvements:
 
-- signed Windows installer and update flow;
+- signed Windows distribution with a trusted publisher certificate and an
+  update flow;
 - broader distribution and clean-machine compatibility coverage;
 - stronger network, MTP, and portal edge-case handling;
 - additional preview formats and further properties refinements;
 - continued separation and testing of platform layers.
+
+For a public release, require passing local regressions and packaging CI for
+the intended commit. Run desktop smoke checks on Windows, GNOME and KDE,
+including clipboard interoperability, drag and drop, keyboard operation, and
+screen-reader navigation. Use isolated fixtures for USB, MTP, SMB, and
+cross-volume transfers. Confirm the checksums and Windows signatures, then
+attach the verified assets and license notices to a draft GitHub Release for
+the matching version tag. Keep the measured coverage with the release notes.
 
 Longer-term exploration:
 

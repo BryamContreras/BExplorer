@@ -4,6 +4,33 @@ All notable user-facing changes to BExplorer are documented here.
 
 ## 1.0.6 - Unreleased
 
+- Added a permission prompt for restricted local folder listings, using UAC
+  on Windows and graphical Polkit on Linux while preserving folder permissions.
+- Updated the embedded 7-Zip engine to 26.06, including the upstream fix for
+  CVE-2026-14266 in XZ decoding. Added a regression check for XZ extraction.
+- Revalidate copied and moved destinations before Undo. An unchanged copy
+  goes to the native trash, and changed or replaced items stay in place.
+- Preserve supported file and folder metadata during local copies and
+  cross-volume moves. This covers access and modification times, Windows
+  creation time, NTFS alternate data streams, read-only, hidden, system,
+  archive and not-content-indexed flags, Unix mode bits, and Linux POSIX
+  ACLs and `user.*` extended attributes.
+- Recover interrupted directory replacements from a recorded transaction and
+  preserve changed sources or externally replaced targets during cleanup.
+- Reuse directory-entry metadata to reduce filesystem queries during name
+  searches and directory loads. Bound search batches and debounce text
+  searches to keep the interface responsive.
+- Added a search mode for text contents in local or mounted directories.
+  Search reports skipped entries and warns only when additional results
+  exceed the 20,000-entry limit.
+- Added bulk rename with a preview, literal replacement or numbered names,
+  and checks that protect existing destinations.
+- Single-item rename also rejects an occupied destination while allowing
+  changes to filename capitalization.
+- Added optional Authenticode signing and signature verification to Windows
+  packaging before checksums are generated.
+- Stage Linux package contents on a filesystem with native POSIX permissions,
+  including when the source checkout is on a Windows filesystem under WSL.
 - Show a phone icon for portable MTP devices in Windows instead of the
   generic folder returned for their virtual paths.
 - Show recent transfer speed immediately after the item count, with localized

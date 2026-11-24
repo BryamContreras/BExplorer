@@ -13,16 +13,7 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icons/appicon.png");
     println!("cargo:rerun-if-changed=assets/windows/bexplorer.rc");
     println!("cargo:rerun-if-changed=vendor/7zip-ffi/bexplorer_7zip.cpp");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/Main.cpp");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/List.cpp");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/ConsoleClose.h");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/ConsoleClose.cpp");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/PercentPrinter.h");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/PercentPrinter.cpp");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/UpdateCallbackConsole.h");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/OpenCallbackConsole.h");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/CPP/7zip/UI/Console/ExtractCallbackConsole.h");
-    println!("cargo:rerun-if-changed=vendor/7zip-src/C/MtDec.h");
+    println!("cargo:rerun-if-changed=vendor/7zip-src");
 
     // `cargo check` does not link the native archive library. This opt-in is
     // useful for validating Windows Rust code from a host without a MinGW C++
@@ -813,6 +804,7 @@ fn build_7zip_lib(compiler: &str) {
 /// one changes, guaranteeing a full recompilation.
 fn invalidate_cc_cache_if_headers_changed(out_dir: &std::path::Path, root: &std::path::Path) {
     let tracked = [
+        "vendor/7zip-src/C/7zVersion.h",
         "vendor/7zip-src/CPP/7zip/UI/Console/PercentPrinter.h",
         "vendor/7zip-src/CPP/7zip/UI/Console/ConsoleClose.h",
         "vendor/7zip-src/CPP/7zip/UI/Console/UpdateCallbackConsole.h",

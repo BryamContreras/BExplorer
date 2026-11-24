@@ -263,13 +263,15 @@ impl BExplorerIced {
         let menu_padding = self.ui_metric(6.0);
         let quick_label = self.localized("Búsqueda rápida", "Quick search");
         let complete_label = self.localized("Búsqueda completa", "Full search");
+        let content_label = self.localized("Buscar en el texto", "Search file text");
         let menu_height = adaptive_menu_list_height(
-            &[quick_label, complete_label],
+            &[quick_label, complete_label, content_label],
             self.font_size(),
             menu_width,
             item_spacing,
             menu_padding,
-        );
+        ) + item_spacing
+            + 1.0;
         let option = |index: usize, label: &'static str, icon: &'static str, mode: SearchMode| {
             let active = self.pane(pane).search_mode == mode;
             let keyboard_selected =
@@ -320,6 +322,8 @@ impl BExplorerIced {
             column![
                 option(0, quick_label, "folder", SearchMode::Quick),
                 option(1, complete_label, "folder-stack", SearchMode::Complete),
+                context_separator(palette),
+                option(2, content_label, "file", SearchMode::Contents),
             ]
             .spacing(item_spacing)
             .padding(menu_padding),

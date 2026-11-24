@@ -11,6 +11,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("BExplorer {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(exit_code) = fs::elevated_browse::try_run_elevated_helper_from_args() {
+        std::process::exit(exit_code);
+    }
     utils::log::init_log_dir();
 
     if let Some(exit_code) = fs::archive::try_run_archive_helper_from_args() {
@@ -36,6 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if app::operation_host::try_activate_existing(initial_path.as_deref()) {
         return Ok(());
     }
+    fs::transfer_queue::start_replacement_recovery();
     iced_ui::run(initial_path)?;
     Ok(())
 }

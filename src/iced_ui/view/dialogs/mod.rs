@@ -3,6 +3,7 @@ use super::*;
 mod about;
 mod appearance;
 mod archive_jobs;
+mod bulk_rename;
 mod confirmations;
 mod defender;
 mod duplicate_cleanup;

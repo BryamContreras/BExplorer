@@ -1,5 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -12,24 +13,34 @@ const SEARCH_BATCH_SIZE: usize = 256;
 const SEARCH_BATCH_INTERVAL: Duration = Duration::from_millis(120);
 const SEARCH_YIELD_INTERVAL: usize = 128;
 const SEARCH_COOPERATIVE_PAUSE: Duration = Duration::from_millis(1);
+const MAX_TEXT_SEARCH_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SearchScope {
+    Names,
+    NamesAndArchives,
+    TextContents,
+}
 
 #[derive(Clone, Debug)]
 pub struct SearchOptions {
     pub root: PathBuf,
     pub query: String,
     pub show_hidden: bool,
-    pub include_archives: bool,
+    pub scope: SearchScope,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SearchOutput {
     pub truncated: bool,
+    pub unavailable: usize,
+    pub oversized_files: usize,
 }
 
 #[derive(Clone, Debug)]
 pub enum SearchEvent {
     Batch(Vec<FileEntry>),
-    Finished { truncated: bool },
+    Finished(SearchOutput),
 }
 
 pub fn search_files_streaming<F>(
@@ -42,17 +53,23 @@ where
 {
     let matcher = NameMatcher::new(&options.query);
     if matcher.is_empty() {
-        return SearchOutput { truncated: false };
+        return SearchOutput::default();
     }
 
+    let mut output = SearchOutput::default();
     if explorer::is_portable_path(&options.root) {
+        if options.scope == SearchScope::TextContents {
+            output.unavailable = 1;
+            return output;
+        }
         return search_portable_files(options, &matcher, cancelled, on_batch);
     }
 
+    let mut content =
+        (options.scope == SearchScope::TextContents).then(|| TextSearch::new(&options.query));
     let mut batch = Vec::new();
     let mut pending = VecDeque::from([options.root]);
     let mut matched_count = 0;
-    let mut truncated = false;
     let mut last_batch = Instant::now();
     let mut scanned_items = 0usize;
     let mut visited = HashSet::new();
@@ -64,6 +81,7 @@ where
         // Junctions can appear as directories on Windows. Track physical
         // directory identity so they cannot create a recursive search cycle.
         let Ok(identity) = crate::fs::transfer_queue::path_identity(&folder) else {
+            output.unavailable += 1;
             continue;
         };
         if !visited.insert(identity) {
@@ -71,6 +89,7 @@ where
         }
 
         let Ok(read_dir) = fs::read_dir(&folder) else {
+            output.unavailable += 1;
             continue;
         };
 
@@ -84,12 +103,14 @@ where
             }
 
             let Ok(item) = item else {
+                output.unavailable += 1;
                 continue;
             };
 
             let path = item.path();
             let name = item.file_name().to_string_lossy().to_string();
             let Ok(file_type) = item.file_type() else {
+                output.unavailable += 1;
                 continue;
             };
             let kind = if file_type.is_symlink() {
@@ -101,12 +122,17 @@ where
             } else {
                 EntryKind::Other
             };
-            let matches = matcher.matches(&name);
-            let needs_metadata = matches || (file_type.is_dir() && !options.show_hidden);
-            let metadata = if needs_metadata {
-                fs::symlink_metadata(&path).ok()
-            } else {
-                None
+            let name_matches = content.is_none() && matcher.matches(&name);
+            let search_content = content.is_some() && file_type.is_file();
+            let needs_metadata =
+                name_matches || search_content || (file_type.is_dir() && !options.show_hidden);
+            let metadata = match needs_metadata.then(|| item.metadata()) {
+                Some(Ok(metadata)) => Some(metadata),
+                Some(Err(_)) => {
+                    output.unavailable += 1;
+                    continue;
+                }
+                None => None,
             };
             let hidden = metadata
                 .as_ref()
@@ -120,10 +146,19 @@ where
                 pending.push_back(path.clone());
             }
 
-            if matches {
-                let Some(metadata) = metadata.or_else(|| fs::symlink_metadata(&path).ok()) else {
-                    continue;
-                };
+            let mut matches = name_matches;
+            if let (Some(content), Some(metadata)) = (&mut content, &metadata)
+                && search_content
+            {
+                match content.check(&path, metadata) {
+                    Ok(TextMatch::Matched) => matches = true,
+                    Ok(TextMatch::Oversized) => output.oversized_files += 1,
+                    Ok(TextMatch::NoMatch) => {}
+                    Err(_) => output.unavailable += 1,
+                }
+            }
+
+            if matches && let Some(metadata) = metadata {
                 let category = crate::fs::explorer::classify_file_category(&path);
                 let entry = FileEntry {
                     name,
@@ -148,7 +183,7 @@ where
                     entry,
                     &mut batch,
                     &mut matched_count,
-                    &mut truncated,
+                    &mut output.truncated,
                     &mut last_batch,
                     &mut on_batch,
                 ) {
@@ -157,7 +192,7 @@ where
                 }
             }
 
-            if options.include_archives
+            if options.scope == SearchScope::NamesAndArchives
                 && file_type.is_file()
                 && crate::fs::archive_listing::has_browsable_archive_extension(&path)
                 && !search_archive_entries(
@@ -167,7 +202,7 @@ where
                         cancelled,
                         batch: &mut batch,
                         matched_count: &mut matched_count,
-                        truncated: &mut truncated,
+                        output: &mut output,
                         last_batch: &mut last_batch,
                         on_batch: &mut on_batch,
                     },
@@ -181,7 +216,7 @@ where
 
     flush_search_batch(&mut batch, &mut last_batch, &mut on_batch);
 
-    SearchOutput { truncated }
+    output
 }
 
 struct ArchiveSearchContext<'a, F> {
@@ -189,7 +224,7 @@ struct ArchiveSearchContext<'a, F> {
     cancelled: &'a AtomicBool,
     batch: &'a mut Vec<FileEntry>,
     matched_count: &'a mut usize,
-    truncated: &'a mut bool,
+    output: &'a mut SearchOutput,
     last_batch: &'a mut Instant,
     on_batch: &'a mut F,
 }
@@ -207,6 +242,7 @@ where
             if context.cancelled.load(Ordering::Relaxed) {
                 return false;
             }
+            context.output.unavailable += 1;
             crate::utils::log::error(format!(
                 "Archive search listing failed for {}: {error}",
                 archive_path.display()
@@ -267,13 +303,10 @@ where
             result,
             context.batch,
             context.matched_count,
-            context.truncated,
+            &mut context.output.truncated,
             context.last_batch,
             context.on_batch,
         ) {
-            return false;
-        }
-        if *context.truncated {
             return false;
         }
     }
@@ -310,14 +343,13 @@ fn push_search_entry<F>(
 where
     F: FnMut(Vec<FileEntry>) -> bool,
 {
-    *matched_count += 1;
-    batch.push(entry);
-
-    if *matched_count >= MAX_SEARCH_RESULTS {
+    if *matched_count == MAX_SEARCH_RESULTS {
         *truncated = true;
         flush_search_batch(batch, last_batch, on_batch);
         return false;
     }
+    *matched_count += 1;
+    batch.push(entry);
     if batch.len() >= SEARCH_BATCH_SIZE || last_batch.elapsed() >= SEARCH_BATCH_INTERVAL {
         return flush_search_batch(batch, last_batch, on_batch);
     }
@@ -336,16 +368,21 @@ where
     let mut batch = Vec::new();
     let mut pending = VecDeque::from([options.root]);
     let mut matched_count = 0;
-    let mut truncated = false;
+    let mut output = SearchOutput::default();
     let mut last_batch = Instant::now();
     let mut scanned_items = 0usize;
+    let mut visited = HashSet::new();
 
     while let Some(folder) = pending.pop_front() {
         if cancelled.load(Ordering::Relaxed) {
             break;
         }
 
+        if !visited.insert(folder.clone()) {
+            continue;
+        }
         let Ok(children) = explorer::list_entries(Some(&folder), options.show_hidden) else {
+            output.unavailable += 1;
             continue;
         };
 
@@ -366,29 +403,99 @@ where
                 pending.push_back(entry.path.clone());
             }
 
-            if matcher.matches(&entry.name) {
-                matched_count += 1;
-                batch.push(entry);
-                if matched_count >= MAX_SEARCH_RESULTS {
-                    truncated = true;
-                    flush_search_batch(&mut batch, &mut last_batch, &mut on_batch);
-                    pending.clear();
-                    break;
-                }
-                if (batch.len() >= SEARCH_BATCH_SIZE
-                    || last_batch.elapsed() >= SEARCH_BATCH_INTERVAL)
-                    && !flush_search_batch(&mut batch, &mut last_batch, &mut on_batch)
-                {
-                    pending.clear();
-                    break;
-                }
+            if matcher.matches(&entry.name)
+                && !push_search_entry(
+                    entry,
+                    &mut batch,
+                    &mut matched_count,
+                    &mut output.truncated,
+                    &mut last_batch,
+                    &mut on_batch,
+                )
+            {
+                pending.clear();
+                break;
             }
         }
     }
 
     flush_search_batch(&mut batch, &mut last_batch, &mut on_batch);
 
-    SearchOutput { truncated }
+    output
+}
+
+struct TextSearch {
+    query: String,
+    buffer: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextMatch {
+    Matched,
+    NoMatch,
+    Oversized,
+}
+
+impl TextSearch {
+    fn new(query: &str) -> Self {
+        Self {
+            query: query.trim().to_lowercase(),
+            buffer: Vec::new(),
+        }
+    }
+
+    fn check(&mut self, path: &Path, metadata: &fs::Metadata) -> io::Result<TextMatch> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+
+            const OFFLINE: u32 = 0x1000;
+            const RECALL_ON_DATA_ACCESS: u32 = 0x0040_0000;
+            if metadata.file_attributes() & (OFFLINE | RECALL_ON_DATA_ACCESS) != 0 {
+                return Err(io::Error::other(
+                    "Cloud file content is not available locally",
+                ));
+            }
+        }
+        if metadata.len() > MAX_TEXT_SEARCH_BYTES {
+            return Ok(TextMatch::Oversized);
+        }
+        self.buffer.clear();
+        fs::File::open(path)?
+            .take(MAX_TEXT_SEARCH_BYTES + 1)
+            .read_to_end(&mut self.buffer)?;
+        if self.buffer.len() as u64 > MAX_TEXT_SEARCH_BYTES {
+            return Ok(TextMatch::Oversized);
+        }
+
+        let matches = if let Some(bytes) = self.buffer.strip_prefix(&[0xff, 0xfe]) {
+            self.matches_utf16(bytes, u16::from_le_bytes)
+        } else if let Some(bytes) = self.buffer.strip_prefix(&[0xfe, 0xff]) {
+            self.matches_utf16(bytes, u16::from_be_bytes)
+        } else {
+            let bytes = self
+                .buffer
+                .strip_prefix(&[0xef, 0xbb, 0xbf])
+                .unwrap_or(&self.buffer);
+            std::str::from_utf8(bytes).is_ok_and(|text| self.matches_text(text))
+        };
+        Ok(if matches {
+            TextMatch::Matched
+        } else {
+            TextMatch::NoMatch
+        })
+    }
+
+    fn matches_utf16(&self, bytes: &[u8], decode: fn([u8; 2]) -> u16) -> bool {
+        let (units, remainder) = bytes.as_chunks::<2>();
+        remainder.is_empty()
+            && String::from_utf16(&units.iter().copied().map(decode).collect::<Vec<_>>())
+                .is_ok_and(|text| self.matches_text(&text))
+    }
+
+    fn matches_text(&self, text: &str) -> bool {
+        !text.contains('\0') && text.to_lowercase().contains(&self.query)
+    }
 }
 
 fn flush_search_batch<F>(
@@ -520,7 +627,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::{NameMatcher, SearchOptions, search_files_streaming};
+    use super::{NameMatcher, SearchOptions, SearchScope, search_files_streaming};
 
     #[test]
     fn local_result_limit_stops_production_at_the_last_batch() {
@@ -551,14 +658,21 @@ mod tests {
                 created: None,
                 is_hidden: false,
             };
-            if !super::push_search_entry(
+            let more = super::push_search_entry(
                 entry,
                 &mut batch,
                 &mut matched,
                 &mut truncated,
                 &mut last_batch,
                 &mut accept,
-            ) {
+            );
+            if index + 1 == super::MAX_SEARCH_RESULTS {
+                assert!(
+                    !truncated,
+                    "an exact result count is not a truncated search"
+                );
+            }
+            if !more {
                 break;
             }
         }
@@ -618,7 +732,7 @@ mod tests {
                 root: root.clone(),
                 query: "inside_target.txt".into(),
                 show_hidden: true,
-                include_archives: false,
+                scope: SearchScope::Names,
             },
             &cancelled,
             |entries| {
@@ -634,7 +748,7 @@ mod tests {
                 root: root.clone(),
                 query: "inside_target.txt".into(),
                 show_hidden: true,
-                include_archives: true,
+                scope: SearchScope::NamesAndArchives,
             },
             &cancelled,
             |entries| {
@@ -648,5 +762,144 @@ mod tests {
         }));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn content_search_matches_text_but_not_filenames_or_binary_data() {
+        let root = temp_test_dir("text");
+        std::fs::write(root.join("notes"), "La versión SIGUIENTE").unwrap();
+        let mut utf16 = vec![0xff, 0xfe];
+        utf16.extend(
+            "La versión siguiente"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes),
+        );
+        std::fs::write(root.join("wide.log"), utf16).unwrap();
+        std::fs::write(root.join("versión siguiente.txt"), "different content").unwrap();
+        std::fs::write(root.join("binary"), "\0versión siguiente").unwrap();
+        std::fs::write(root.join(".hidden"), "versión siguiente").unwrap();
+        std::fs::File::create(root.join("oversized.txt"))
+            .unwrap()
+            .set_len(super::MAX_TEXT_SEARCH_BYTES + 1)
+            .unwrap();
+
+        let mut names = Vec::new();
+        let output = search_files_streaming(
+            SearchOptions {
+                root: root.clone(),
+                query: "VERSIÓN siguiente".into(),
+                show_hidden: false,
+                scope: SearchScope::TextContents,
+            },
+            &AtomicBool::new(false),
+            |entries| {
+                names.extend(entries.into_iter().map(|entry| entry.name));
+                true
+            },
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        names.sort();
+        assert_eq!(names, ["notes", "wide.log"]);
+        assert_eq!(output.oversized_files, 1);
+        assert_eq!(output.unavailable, 0);
+        assert!(!output.truncated);
+    }
+
+    #[test]
+    fn a_missing_search_root_is_reported_as_unavailable() {
+        let root = temp_test_dir("missing");
+        let output = search_files_streaming(
+            SearchOptions {
+                root: root.join("missing"),
+                query: "match".into(),
+                show_hidden: false,
+                scope: SearchScope::Names,
+            },
+            &AtomicBool::new(false),
+            |_| panic!("a missing folder cannot produce a search result"),
+        );
+        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(output.unavailable, 1);
+    }
+
+    #[test]
+    #[ignore = "creates 10,000 and 100,000 local fixtures, or reads BEXPLORER_BENCH_DIRECTORY"]
+    fn benchmark_listing_and_search() {
+        use std::path::{Path, PathBuf};
+        use std::time::Instant;
+
+        fn measure(root: &Path, query: Option<&str>, expected_entries: Option<usize>) {
+            for run in 1..=3 {
+                let started = Instant::now();
+                let entries = crate::fs::explorer::list_entries(Some(root), false).unwrap();
+                let listing_ms = started.elapsed().as_millis();
+                let count = entries.len();
+                if let Some(expected_entries) = expected_entries {
+                    assert_eq!(count, expected_entries);
+                }
+                drop(entries);
+
+                let Some(query) = query else {
+                    println!("{root:?}\trun={run}\tentries={count}\tlisting_ms={listing_ms}");
+                    continue;
+                };
+
+                let started = Instant::now();
+                let mut first_batch_ms = None;
+                let mut matches = 0;
+                let output = search_files_streaming(
+                    SearchOptions {
+                        root: root.to_path_buf(),
+                        query: query.into(),
+                        show_hidden: false,
+                        scope: SearchScope::Names,
+                    },
+                    &AtomicBool::new(false),
+                    |entries| {
+                        first_batch_ms.get_or_insert_with(|| started.elapsed().as_millis());
+                        matches += entries.len();
+                        true
+                    },
+                );
+                let search_ms = started.elapsed().as_millis();
+                if let Some(expected_entries) = expected_entries {
+                    assert_eq!(matches, expected_entries / 100);
+                    assert_eq!(output, super::SearchOutput::default());
+                }
+                println!(
+                    "{root:?}\trun={run}\tentries={count}\tlisting_ms={listing_ms}\tfirst_batch_ms={}\tsearch_ms={search_ms}\tmatches={matches}\tunavailable={}",
+                    first_batch_ms.map_or_else(|| "-".into(), |ms| ms.to_string()),
+                    output.unavailable,
+                );
+            }
+        }
+
+        if let Some(root) = std::env::var_os("BEXPLORER_BENCH_DIRECTORY") {
+            let query = std::env::var("BEXPLORER_BENCH_QUERY").unwrap_or_else(|_| "*".into());
+            let list_only = std::env::var_os("BEXPLORER_BENCH_LIST_ONLY").is_some();
+            measure(
+                Path::new(&root),
+                (!list_only).then_some(query.as_str()),
+                None,
+            );
+            return;
+        }
+
+        struct Fixture(PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let fixture = Fixture(temp_test_dir("benchmark"));
+        for count in [10_000, 100_000] {
+            let folder = fixture.0.join(count.to_string());
+            std::fs::create_dir(&folder).unwrap();
+            for index in 0..count {
+                let label = if index % 100 == 0 { "match" } else { "entry" };
+                std::fs::File::create(folder.join(format!("{label}-{index:06}.txt"))).unwrap();
+            }
+            measure(&folder, Some("match-"), Some(count));
+        }
     }
 }

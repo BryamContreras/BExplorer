@@ -9,8 +9,14 @@ license texts.
 
 ## 7-Zip
 
-BExplorer includes an embedded 7-Zip engine used for archive browsing,
+BExplorer includes the 7-Zip 26.06 engine used for archive browsing,
 compression, extraction, and password-protected archive workflows.
+
+The upstream source archive is `7z2606-src.tar.xz` from the
+[7-Zip 26.06 release](https://github.com/ip7z/7zip/releases/tag/26.06).
+Its SHA-256 is `a4e374c8f864f51df48c2cfd0e1413ec3b2ea030deae852d6a655402ebb61ac4`.
+BExplorer maintains local console patches for native arguments, output,
+progress, and cancellation, plus small native build compatibility changes.
 
 Local source path:
 

@@ -8,7 +8,7 @@ pub(super) use persistence::{schedule_network_cache, schedule_storage_cache};
 pub(super) struct LoadResult {
     pub(super) pane: PaneId,
     pub(super) request_id: u64,
-    pub(super) entries: Result<Vec<FileEntry>, String>,
+    pub(super) entries: Result<Vec<FileEntry>, DirectoryLoadError>,
 }
 
 pub(super) async fn load_entries(
@@ -23,7 +23,20 @@ pub(super) async fn load_entries(
         cfg!(target_os = "windows") && path.as_deref().is_some_and(explorer::is_portable_path);
     let worker_path = path.clone();
     let operation = run_directory_operation(path.as_deref(), isolated_provider, move || {
-        explorer::list_entries_cancellable(worker_path.as_deref(), show_hidden, &cancel)
+        Ok(
+            explorer::list_entries_cancellable(worker_path.as_deref(), show_hidden, &cancel)
+                .map_err(|error| match error {
+                    BExplorerError::Io(ref io_error)
+                        if io_error.kind() == std::io::ErrorKind::PermissionDenied
+                            && worker_path
+                                .as_deref()
+                                .is_some_and(crate::fs::elevated_browse::can_elevate_directory) =>
+                    {
+                        DirectoryLoadError::AccessDenied
+                    }
+                    error => DirectoryLoadError::Other(error.to_string()),
+                }),
+        )
     });
     let entries = if portable {
         with_file_operation_timeout(
@@ -37,7 +50,9 @@ pub(super) async fn load_entries(
     LoadResult {
         pane,
         request_id,
-        entries,
+        entries: entries
+            .map_err(DirectoryLoadError::Other)
+            .and_then(|result| result),
     }
 }
 

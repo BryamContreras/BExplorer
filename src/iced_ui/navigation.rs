@@ -102,7 +102,14 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn start_load(&mut self, pane: PaneId) -> Task<Message> {
-        self.pane_mut(pane).directory_load = None;
+        let state = self.pane_mut(pane);
+        state.directory_load = None;
+        if state.directory_access != DirectoryAccess::Regular {
+            state.directory_access = DirectoryAccess::Regular;
+            state.entries.clear();
+            state.selected.clear();
+            state.mark_entries_changed();
+        }
         let visible = [PaneId::Primary, PaneId::Secondary]
             .into_iter()
             .filter(|other| *other == PaneId::Primary || self.split.is_some())
@@ -303,6 +310,9 @@ impl BExplorerIced {
                 if pane == PaneId::Secondary && self.split.is_none() {
                     continue;
                 }
+                if self.pane(pane).directory_access != DirectoryAccess::Regular {
+                    continue;
+                }
                 let Some(path) = self.tab_for_pane(pane).path.as_ref() else {
                     continue;
                 };
@@ -349,6 +359,7 @@ impl BExplorerIced {
         let visible = [PaneId::Primary, PaneId::Secondary]
             .into_iter()
             .filter(|pane| *pane == PaneId::Primary || self.split.is_some())
+            .filter(|pane| self.pane(*pane).directory_access == DirectoryAccess::Regular)
             .filter_map(|pane| self.tab_for_pane(pane).path.clone())
             .collect::<HashSet<_>>();
         self.directory_refreshes.retain(&visible);
@@ -361,6 +372,7 @@ impl BExplorerIced {
                 .any(|pane| {
                     (pane == PaneId::Primary || self.split.is_some())
                         && self.tab_for_pane(pane).path.as_ref() == Some(&directory)
+                        && self.pane(pane).directory_access == DirectoryAccess::Regular
                         && (self.pane(pane).loading || self.pane(pane).recursive_search_active)
                 })
             {
@@ -370,7 +382,9 @@ impl BExplorerIced {
                 if pane == PaneId::Secondary && self.split.is_none() {
                     continue;
                 }
-                if self.tab_for_pane(pane).path.as_ref() != Some(&directory) {
+                if self.tab_for_pane(pane).path.as_ref() != Some(&directory)
+                    || self.pane(pane).directory_access != DirectoryAccess::Regular
+                {
                     continue;
                 }
                 let state = self.pane_mut(pane);
@@ -526,6 +540,9 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn queue_visible_images(&mut self, pane: PaneId) -> Task<Message> {
+        if self.pane(pane).directory_access != DirectoryAccess::Regular {
+            return Task::none();
+        }
         if self.images_suspended {
             return Task::none();
         }
@@ -709,6 +726,9 @@ impl BExplorerIced {
     }
 
     pub(in crate::iced_ui) fn queue_selected_preview(&mut self, pane: PaneId) -> Task<Message> {
+        if self.pane(pane).directory_access != DirectoryAccess::Regular {
+            return Task::none();
+        }
         if self.images_suspended {
             return Task::none();
         }
@@ -1612,10 +1632,10 @@ impl BExplorerIced {
         if explorer::is_virtual_path(&path) || explorer::is_unc_path(&path) {
             return Ok(Some(path));
         }
-        if !path.is_dir() {
-            return Err(format!("No existe una carpeta en {}", path.display()));
+        match std::fs::metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => Ok(Some(path.canonicalize().unwrap_or(path))),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(Some(path)),
+            _ => Err(format!("No existe una carpeta en {}", path.display())),
         }
-
-        Ok(Some(path.canonicalize().unwrap_or(path)))
     }
 }

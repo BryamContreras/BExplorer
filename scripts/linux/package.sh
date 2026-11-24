@@ -38,10 +38,7 @@ esac
 
 VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT_DIR/Cargo.toml" | head -n 1)
 [ -n "$VERSION" ] || { printf 'Could not read the BExplorer version from Cargo.toml\n' >&2; exit 1; }
-APPDIR="$ROOT_DIR/dist/bexplorer-linux-$TARGET"
 BINARY="$ROOT_DIR/dist/bexplorer-$VERSION-linux-$TARGET"
-DEBROOT="$ROOT_DIR/dist/bexplorer-deb"
-RPMBUILD="$ROOT_DIR/dist/rpmbuild"
 
 sh "$ROOT_DIR/scripts/linux/sync-icons.sh" --check
 
@@ -61,7 +58,18 @@ DEB="$ROOT_DIR/dist/bexplorer_${VERSION}_${DEB_ARCH:-unsupported}.deb"
 
 cargo build --locked --manifest-path "$ROOT_DIR/Cargo.toml" --release --target "$TARGET"
 
-rm -rf "$APPDIR" "$DEBROOT" "$RPMBUILD"
+# Build package trees on a native Linux filesystem that can hold package
+# permissions, including when the checkout lives on a Windows drive in WSL.
+WORKDIR=$(mktemp -d /tmp/bexplorer-package.XXXXXXXX)
+trap 'rm -rf -- "$WORKDIR"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+APPDIR="$WORKDIR/app"
+DEBROOT="$WORKDIR/deb"
+RPMBUILD="$WORKDIR/rpmbuild"
+ABIROOT="$WORKDIR/abi"
+
 mkdir -p \
   "$APPDIR/usr/bin" \
   "$APPDIR/usr/share/applications" \
@@ -232,8 +240,6 @@ command -v dpkg-shlibdeps >/dev/null 2>&1 || {
   printf 'dpkg-dev (dpkg-shlibdeps) is required to determine Debian ABI dependencies\n' >&2
   exit 1
 }
-ABIROOT=$(mktemp -d "$ROOT_DIR/dist/.bexplorer-abi.XXXXXX")
-trap 'rm -rf "$ABIROOT"' EXIT HUP INT TERM
 mkdir -p "$ABIROOT/debian"
 cat > "$ABIROOT/debian/control" <<EOF
 Source: bexplorer
@@ -251,8 +257,6 @@ ELF_DEPENDENCIES=$(cd "$ABIROOT" && dpkg-shlibdeps -O -e "$APPDIR/usr/bin/bexplo
   printf 'Could not determine ELF runtime dependencies\n' >&2
   exit 1
 }
-rm -rf "$ABIROOT"
-trap - EXIT HUP INT TERM
 printf 'Detected ELF runtime dependencies: %s\n' "$ELF_DEPENDENCIES"
 
 cat > "$DEBROOT/DEBIAN/control" <<EOF

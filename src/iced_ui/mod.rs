@@ -46,6 +46,8 @@ use crate::utils::errors::BExplorerError;
 use crate::utils::paths;
 
 mod advanced;
+mod bulk_rename;
+mod directory_access;
 mod directory_refresh;
 mod duplicate_cleanup;
 mod file_actions;
@@ -858,6 +860,7 @@ struct BExplorerIced {
     storage_analysis: Option<StorageAnalysisState>,
     storage_analysis_window_id: Option<window::Id>,
     rename_dialog: Option<RenameState>,
+    bulk_rename_dialog: Option<bulk_rename::BulkRenameDialog>,
     archive_dialog: Option<ArchiveDialogState>,
     format_dialog: Option<FormatDialogState>,
     error_dialog: Option<ErrorDialogState>,
@@ -1060,28 +1063,31 @@ fn popup_backdrop_region_for_screenshot(
             width: scaled_ui_metric(196.0, font_size).min(window_width),
             height: (78.0 + density * 5.0).min((window_height - TITLE_HEIGHT).max(0.0)),
         },
-        PopupBackdropTarget::SearchModeMenu(pane) => Rectangle {
-            x: if matches!(pane, PaneId::Secondary) {
-                window_width * 0.5
-            } else {
-                0.0
-            },
-            y: (window_height
-                - scaled_ui_metric(36.0, font_size)
-                - scaled_ui_metric(6.0, font_size)
-                - (79.0 + density * 5.0))
-                .max(0.0),
-            width: scaled_ui_metric(
-                if window_width < 700.0 {
-                    210.0_f32
+        PopupBackdropTarget::SearchModeMenu(pane) => {
+            let height = 109.0 + density * 7.0 + scaled_ui_metric(3.0, font_size);
+            Rectangle {
+                x: if matches!(pane, PaneId::Secondary) {
+                    window_width * 0.5
                 } else {
-                    260.0_f32
+                    0.0
                 },
-                font_size,
-            )
-            .min(window_width),
-            height: (79.0 + density * 5.0).min(window_height),
-        },
+                y: (window_height
+                    - scaled_ui_metric(36.0, font_size)
+                    - scaled_ui_metric(6.0, font_size)
+                    - height)
+                    .max(0.0),
+                width: scaled_ui_metric(
+                    if window_width < 700.0 {
+                        210.0_f32
+                    } else {
+                        260.0_f32
+                    },
+                    font_size,
+                )
+                .min(window_width),
+                height: height.min(window_height),
+            }
+        }
         PopupBackdropTarget::ViewMenu(_) => Rectangle {
             x: (window_width
                 - scaled_ui_metric(218.0, font_size)
@@ -1236,6 +1242,7 @@ impl BExplorerIced {
                 let labels = [
                     self.localized("Búsqueda rápida", "Quick search"),
                     self.localized("Búsqueda completa", "Full search"),
+                    self.localized("Buscar en el texto", "Search file text"),
                 ];
                 let height = adaptive_menu_list_height(
                     &labels,
@@ -1243,7 +1250,8 @@ impl BExplorerIced {
                     width,
                     item_spacing,
                     menu_padding,
-                );
+                ) + item_spacing
+                    + 1.0;
                 (
                     *pane,
                     self.ui_metric(14.0),
@@ -1491,6 +1499,7 @@ impl BExplorerIced {
             storage_analysis: None,
             storage_analysis_window_id: None,
             rename_dialog: None,
+            bulk_rename_dialog: None,
             archive_dialog: None,
             format_dialog: None,
             error_dialog: None,
@@ -2212,6 +2221,11 @@ impl BExplorerIced {
 
     fn subscription(&self) -> Subscription<Message> {
         let input_events = event::listen_with(input_event_message);
+        let bulk_rename_escape = if self.bulk_rename_dialog.is_some() {
+            event::listen_with(bulk_rename::captured_escape_event)
+        } else {
+            Subscription::none()
+        };
 
         let pointer_events = if self.pointer_tracking_active() {
             event::listen_with(|event, _status, _window| match event {
@@ -2344,6 +2358,7 @@ impl BExplorerIced {
             window::close_requests().map(Message::WindowCloseRequested),
             window::close_events().map(Message::WindowClosed),
             input_events,
+            bulk_rename_escape,
             pointer_events,
             duplicate_column_resize_events,
             storage_category_column_resize_events,

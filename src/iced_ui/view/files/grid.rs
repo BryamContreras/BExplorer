@@ -280,7 +280,7 @@ impl BExplorerIced {
             } else {
                 container(
                     highlighted_search_text(
-                        self.pane(pane).search_text.as_str(),
+                        self.search_highlight_query(pane),
                         &two_line_ellipsize_to_width(&display_name, text_width, font_size),
                         color,
                     )
@@ -378,7 +378,7 @@ impl BExplorerIced {
                 )
             } else {
                 container(centered_highlighted_search_text(
-                    self.pane(pane).search_text.as_str(),
+                    self.search_highlight_query(pane),
                     &two_line_ellipsize_to_width(&display_name, label_width, font_size),
                     color,
                     font_size,

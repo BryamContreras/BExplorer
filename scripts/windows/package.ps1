@@ -1,7 +1,10 @@
 param(
     [ValidatePattern("^[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)+$")]
     [string]$Target = "x86_64-pc-windows-msvc",
-    [switch]$SkipInstaller
+    [switch]$SkipInstaller,
+    [ValidatePattern('^[a-fA-F0-9]{40}$')]
+    [string]$SigningThumbprint,
+    [uri]$TimestampServer
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +55,52 @@ function Find-InnoSetupCompiler {
     ) | Where-Object { $_ }
 
     return $Candidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
+
+function Find-SignTool {
+    $Command = Get-Command signtool.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($Command) {
+        return $Command.Source
+    }
+
+    $SdkBin = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+    Get-ChildItem -LiteralPath $SdkBin -Directory -ErrorAction SilentlyContinue |
+        Where-Object Name -Match '^\d+(\.\d+){3}$' |
+        Sort-Object { [version]$_.Name } -Descending |
+        ForEach-Object { Join-Path $_.FullName 'x64\signtool.exe' } |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+        Select-Object -First 1
+}
+
+function Set-PackageSignature {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not $SigningThumbprint) {
+        return
+    }
+
+    & $SignTool sign /fd SHA256 /sha1 $SigningThumbprint /tr $TimestampServer.AbsoluteUri /td SHA256 $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "SignTool could not sign $Path (exit $LASTEXITCODE)"
+    }
+    & $SignTool verify /pa /tw $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw "SignTool could not verify $Path (exit $LASTEXITCODE)"
+    }
+}
+
+if ($SigningThumbprint -or $TimestampServer) {
+    if (-not $SigningThumbprint -or -not $TimestampServer -or -not $TimestampServer.IsAbsoluteUri -or $TimestampServer.Scheme -notin @('http', 'https')) {
+        throw 'Signing requires both -SigningThumbprint and an absolute HTTP(S) -TimestampServer URL.'
+    }
+    $Certificate = Get-Item -LiteralPath "Cert:\CurrentUser\My\$SigningThumbprint" -ErrorAction SilentlyContinue
+    if (-not $Certificate -or -not $Certificate.HasPrivateKey) {
+        throw 'The signing certificate with its private key was not found in Cert:\CurrentUser\My.'
+    }
+    $SignTool = Find-SignTool
+    if (-not $SignTool) {
+        throw 'signtool.exe was not found. Install the Windows SDK or add SignTool to PATH.'
+    }
 }
 
 if (-not $SkipInstaller -and $Target -ne "x86_64-pc-windows-msvc") {
@@ -172,12 +221,14 @@ $LicenseFiles = @(
     @{ Source = "vendor/7zip-src/DOC/copying.txt"; StagedName = "copying-7Zip.txt" },
     @{ Source = "vendor/7zip-src/DOC/unRarLicense.txt"; StagedName = "unRarLicense.txt" }
 )
-Copy-Item -LiteralPath $Binary -Destination (Join-Path $StageDir "BExplorer.exe")
+$StagedBinary = Join-Path $StageDir 'BExplorer.exe'
+Copy-Item -LiteralPath $Binary -Destination $StagedBinary
+Set-PackageSignature -Path $StagedBinary
 Copy-Item -LiteralPath (Join-Path $RootDir "README.md") -Destination $StageDir
 foreach ($License in $LicenseFiles) {
     Copy-Item -LiteralPath (Join-Path $RootDir $License.Source) -Destination (Join-Path $StageDir $License.StagedName)
 }
-Copy-Item -LiteralPath $Binary -Destination $Portable
+Copy-Item -LiteralPath $StagedBinary -Destination $Portable
 Write-Host "Created $Portable"
 Write-Checksum $Portable
 Write-LicenseBundle
@@ -201,5 +252,6 @@ if (-not (Test-Path -LiteralPath $Installer)) {
     throw "Inno Setup completed but the installer was not found at $Installer"
 }
 
+Set-PackageSignature -Path $Installer
 Write-Host "Created $Installer"
 Write-Checksum $Installer

@@ -869,7 +869,7 @@ impl BExplorerIced {
                     .push(context_separator(palette))
                     .push(context_menu_row(
                         "rename",
-                        self.localized("Renombrar", "Rename"),
+                        self.context_rename_label(menu_state.pane, menu_state.target),
                         None,
                         ContextCommand::Rename,
                         palette,

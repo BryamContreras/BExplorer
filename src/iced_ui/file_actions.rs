@@ -576,23 +576,8 @@ impl BExplorerIced {
                         });
                     }
                     if let Some(active) = active {
-                        if active.job.conflict_policy == ConflictPolicy::KeepBoth
-                            && !completed_roots.is_empty()
-                        {
-                            self.last_undo_action = Some(match kind {
-                                TransferKind::Copy => UndoAction::Copy {
-                                    pane: active.pane,
-                                    targets: completed_roots
-                                        .iter()
-                                        .map(|item| item.target.clone())
-                                        .collect(),
-                                },
-                                TransferKind::Move => UndoAction::Move {
-                                    pane: active.pane,
-                                    items: completed_roots,
-                                },
-                            });
-                        }
+                        self.last_undo_action =
+                            UndoAction::for_transfer(active.pane, kind, completed_roots);
                         self.pane_mut(active.pane).status = match kind {
                             TransferKind::Copy => format!("Copied {completed_files} item(s)"),
                             TransferKind::Move => format!("Moved {completed_files} item(s)"),
@@ -865,24 +850,28 @@ impl BExplorerIced {
     }
 
     pub(super) fn undo_last_action(&mut self) -> Task<Message> {
+        use crate::fs::transfer_undo::{UndoOutcome, undo_transfer};
+
         let Some(action) = self.last_undo_action.take() else {
-            self.pane_mut(self.focused_pane()).status = "No hay una acción para deshacer".into();
+            self.pane_mut(self.focused_pane()).status = self
+                .localized(
+                    "No hay una acción para deshacer",
+                    "There is no action to undo",
+                )
+                .into();
             return Task::none();
         };
         let pane = action.pane();
-        self.pane_mut(pane).status = "Deshaciendo la última acción...".into();
+        self.pane_mut(pane).status = self
+            .localized("Deshaciendo la última acción…", "Undoing the last action…")
+            .into();
         let worker_action = action.clone();
         Task::perform(
             run_blocking_file_operation(move || match worker_action {
-                UndoAction::Copy { targets, .. } => operations::delete_permanently(&targets),
-                UndoAction::Move { items, .. } => {
-                    let paths = items
-                        .iter()
-                        .map(|item| (item.target.clone(), item.source.clone()))
-                        .collect::<Vec<_>>();
-                    operations::move_paths_back(&paths)
+                UndoAction::Transfer { kind, items, .. } => undo_transfer(kind, &items),
+                UndoAction::Trash { records, .. } => {
+                    operations::restore_from_trash(&records).map(UndoOutcome::complete)
                 }
-                UndoAction::Trash { records, .. } => operations::restore_from_trash(&records),
             }),
             move |result| Message::UndoFinished(action, result),
         )

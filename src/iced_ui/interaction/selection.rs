@@ -430,8 +430,7 @@ impl BExplorerIced {
             return Task::none();
         }
         if selected.len() > 1 {
-            self.pane_mut(pane).status = "Select one item to rename".into();
-            return Task::none();
+            return self.open_bulk_rename(pane, selected);
         }
         let path = &selected[0];
         let Some(index) = self
@@ -478,6 +477,7 @@ impl BExplorerIced {
             || self.shortcuts_open
             || self.about_open
             || self.rename_dialog.is_some()
+            || self.bulk_rename_dialog.is_some()
             || self.archive_dialog.is_some()
             || self.format_dialog.is_some()
             || self.error_dialog.is_some()

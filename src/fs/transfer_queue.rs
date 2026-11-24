@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use std::{
     ffi::OsStr,
     ffi::OsString,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, BufWriter},
     net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream},
     sync::mpsc::Receiver,
     thread,
@@ -27,7 +27,13 @@ mod large_copy_tests;
 mod local;
 #[cfg(test)]
 mod local_tests;
-pub(crate) use local::{FileIdentity, opened_file_identity, path_identity};
+mod metadata;
+mod replacement;
+mod undo_move;
+#[cfg(windows)]
+pub(crate) use local::open_metadata_handle;
+pub(crate) use local::{FileIdentity, ensure_supported, opened_file_identity, path_identity};
+pub(crate) use undo_move::{rename_without_replace, revert_completed_move};
 
 const COPY_BUFFER_SIZE: usize = 1024 * 1024;
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(80);
@@ -103,6 +109,8 @@ pub struct TransferProgress {
 pub struct TransferCompletedRoot {
     pub source: PathBuf,
     pub target: PathBuf,
+    #[serde(default)]
+    pub undo_target: Option<crate::fs::transfer_undo::TransferUndoTarget>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -157,6 +165,17 @@ pub enum TransferMessage {
     },
 }
 
+struct CreatedTarget {
+    path: PathBuf,
+    identity: FileIdentity,
+}
+
+impl CreatedTarget {
+    fn still_owned(&self) -> bool {
+        path_identity(&self.path).is_ok_and(|identity| identity == self.identity)
+    }
+}
+
 struct TransferRuntime {
     copied_bytes: u64,
     files_done: usize,
@@ -165,7 +184,7 @@ struct TransferRuntime {
     started: Instant,
     last_emit: Instant,
     last_emitted_bytes: u64,
-    created_targets: Vec<PathBuf>,
+    created_targets: Vec<CreatedTarget>,
     tracked_targets: HashSet<PathBuf>,
     reserved_targets: Vec<PathBuf>,
     completed_roots: Vec<TransferCompletedRoot>,
@@ -197,9 +216,17 @@ impl TransferRuntime {
     }
 
     fn track_created(&mut self, path: &Path) {
-        let path = path.to_path_buf();
-        if self.tracked_targets.insert(path.clone()) {
-            self.created_targets.push(path);
+        if let Ok(identity) = path_identity(path) {
+            self.track_created_identity(path, identity);
+        }
+    }
+
+    fn track_created_identity(&mut self, path: &Path, identity: FileIdentity) {
+        if self.tracked_targets.insert(path.to_path_buf()) {
+            self.created_targets.push(CreatedTarget {
+                path: path.to_path_buf(),
+                identity,
+            });
         }
     }
 
@@ -207,17 +234,37 @@ impl TransferRuntime {
         self.reserved_targets.push(path.to_path_buf());
     }
 
-    fn track_completed_root(&mut self, source: &Path, target: &Path) {
+    fn track_completed_root(
+        &mut self,
+        job: &TransferJob,
+        source: &Path,
+        target: &Path,
+        replaced: bool,
+        control: &TransferControl,
+    ) {
         self.protect_destination(target);
+        let undo_target = if replaced {
+            None
+        } else {
+            crate::fs::transfer_undo::TransferUndoTarget::capture_with_check(target, || {
+                check_cancelled(control)
+            })
+            .and_then(|snapshot| match job.kind {
+                TransferKind::Copy => Ok(snapshot),
+                TransferKind::Move => snapshot.with_original_parent(source),
+            })
+            .ok()
+        };
         self.completed_roots.push(TransferCompletedRoot {
             source: source.to_path_buf(),
             target: target.to_path_buf(),
+            undo_target,
         });
     }
 
     fn protect_destination(&mut self, target: &Path) {
         self.created_targets
-            .retain(|path| !path.starts_with(target));
+            .retain(|entry| !entry.path.starts_with(target));
         self.tracked_targets
             .retain(|path| !path.starts_with(target));
     }
@@ -231,6 +278,9 @@ pub fn run_transfer(job: TransferJob, tx: Sender<TransferMessage>, control: Tran
         job.kind,
         job.sources.len()
     ));
+    if !explorer::is_virtual_path(&job.destination) {
+        replacement::recover(Some(&job.destination));
+    }
     match run_transfer_inner(&job, &tx, &control) {
         Ok(outcome) => {
             #[cfg(not(test))]
@@ -260,6 +310,15 @@ pub fn run_transfer(job: TransferJob, tx: Sender<TransferMessage>, control: Tran
                 permission_denied: transfer_error_is_permission_denied(&error),
             });
         }
+    }
+}
+
+pub(crate) fn start_replacement_recovery() {
+    if let Err(error) = std::thread::Builder::new()
+        .name("bexplorer-transfer-recovery".into())
+        .spawn(|| replacement::recover(None))
+    {
+        crate::utils::log::error(format!("Could not start transfer recovery: {error}"));
     }
 }
 
@@ -442,7 +501,7 @@ fn elevated_transfer_paths() -> (PathBuf, PathBuf) {
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn elevated_progress_token() -> Result<String> {
+pub(super) fn elevated_progress_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|error| {
         BExplorerError::Operation(format!("Could not secure progress IPC: {error}"))
@@ -566,8 +625,9 @@ fn send_elevated_progress(
     job_id: u64,
     progress_rx: Receiver<TransferMessage>,
 ) -> Result<()> {
-    let mut stream = TcpStream::connect_timeout(&endpoint, ELEVATED_PROGRESS_CONNECT_TIMEOUT)?;
+    let stream = TcpStream::connect_timeout(&endpoint, ELEVATED_PROGRESS_CONNECT_TIMEOUT)?;
     let _ = stream.set_nodelay(true);
+    let mut stream = BufWriter::new(stream);
     let handshake = ElevatedProgressHandshake { job_id, token };
     serde_json::to_writer(&mut stream, &handshake)?;
     stream.write_all(b"\n")?;
@@ -665,7 +725,7 @@ fn run_transfer_inner(
                     move_path(job, source, &target, tx, control, &mut runtime)?
                 }
             }
-            runtime.track_completed_root(source, &target);
+            runtime.track_completed_root(job, source, &target, replacing, control);
         }
         Ok(TransferOutcome {
             completed_files: runtime.files_done,
@@ -674,7 +734,7 @@ fn run_transfer_inner(
     })();
 
     if let Err(error) = &result {
-        cleanup_failed_transfer(&runtime.created_targets, error, control);
+        cleanup_failed_transfer(&runtime.created_targets, error);
     }
     release_reserved_targets(&runtime.reserved_targets);
 
@@ -728,7 +788,7 @@ fn run_portable_transfer(
 
     release_reserved_targets(&runtime.reserved_targets);
     if let Err(error) = &result {
-        cleanup_failed_transfer(&runtime.created_targets, error, control);
+        cleanup_failed_transfer(&runtime.created_targets, error);
     }
     result.map(|completed_files| TransferOutcome {
         completed_files,
@@ -809,14 +869,14 @@ fn run_portable_to_local_transfer(
                         Ok(export) => export,
                         Err(error) => {
                             if runtime.tracked_targets.contains(&staging) {
-                                cleanup_failed_staging(&staging, &error);
+                                cleanup_failed_staging(runtime, &staging, &error);
                             }
                             return Err(error);
                         }
                     };
                 sync_copied_path(&staging)?;
                 if let Err(error) = commit_staged_path(&staging, &target) {
-                    let _ = remove_source(&staging);
+                    cleanup_failed_staging(runtime, &staging, &error);
                     return Err(error);
                 }
             } else {
@@ -874,7 +934,7 @@ fn run_portable_to_local_transfer(
             (TransferKind::Copy, false) => copy_path(job, source, &target, tx, control, runtime)?,
             (TransferKind::Move, false) => move_path(job, source, &target, tx, control, runtime)?,
         }
-        runtime.track_completed_root(source, &target);
+        runtime.track_completed_root(job, source, &target, replacing, control);
     }
 
     Ok(runtime.files_done)
@@ -921,9 +981,7 @@ fn move_path(
     check_cancelled(control)?;
     wait_if_paused(job, current_name(source), runtime, tx, control)?;
 
-    if !(job.conflict_policy == ConflictPolicy::Replace && target.exists())
-        && fs::rename(source, target).is_ok()
-    {
+    if rename_without_replace(source, target).is_ok() {
         let (bytes, files) = runtime.source_totals.get(source).copied().unwrap_or((0, 0));
         runtime.copied_bytes = runtime.copied_bytes.saturating_add(bytes);
         runtime.files_done = runtime.files_done.saturating_add(files);
@@ -938,11 +996,10 @@ fn move_path(
     }
 
     copy_path(job, source, target, tx, control, runtime)?;
-    // A cross-filesystem move must make the completed destination durable
-    // before deleting the only remaining source. Ordinary copies deliberately
-    // rely on the operating system's writeback and safe-eject path instead.
-    sync_copied_path(target)?;
+    // The copy synchronized file data and metadata while its handles were
+    // open. Make the new directory entry durable before removing the source.
     runtime.protect_destination(target);
+    replacement::sync_parent(target)?;
     local::remove_copied_source(source, &runtime.copied_sources, control)?;
     Ok(())
 }
@@ -961,58 +1018,29 @@ fn replace_path_staged(
     let staging = unused_transfer_sibling(target, "staging");
     let result = (|| {
         copy_path(job, source, &staging, tx, control, runtime)?;
-        sync_copied_path(&staging)?;
         commit_staged_path(&staging, target)
     })();
-    if let Err(error) = &result {
-        cleanup_failed_staging(&staging, error);
+    if let Err(error) = &result
+        && runtime.tracked_targets.contains(&staging)
+    {
+        cleanup_failed_staging(runtime, &staging, error);
     }
     result
 }
 
 fn commit_staged_path(staging: &Path, target: &Path) -> Result<()> {
-    let staging_metadata = fs::symlink_metadata(staging)?;
-    let target_metadata = fs::symlink_metadata(target)?;
-    if staging_metadata.is_file() && target_metadata.is_file() {
-        crate::utils::atomic_file::replace_file(staging, target)?;
-        crate::utils::atomic_file::sync_parent(target);
-        return Ok(());
-    }
-
-    let backup = unused_transfer_sibling(target, "backup");
-    fs::rename(target, &backup)?;
-    if let Err(commit_error) = fs::rename(staging, target) {
-        if let Err(rollback_error) = fs::rename(&backup, target) {
-            return Err(BExplorerError::Operation(format!(
-                "Could not install the completed replacement ({commit_error}); the original remains at {} because restoring it also failed: {rollback_error}",
-                backup.display()
-            )));
-        }
-        return Err(commit_error.into());
-    }
-    crate::utils::atomic_file::sync_parent(target);
-    if let Err(error) = remove_source(&backup) {
-        crate::utils::log::error(format!(
-            "Replacement completed but its backup could not be removed at {}: {error}",
-            backup.display()
-        ));
-    }
-    Ok(())
+    replacement::commit(staging, target)
 }
 
 fn unused_transfer_sibling(target: &Path, purpose: &str) -> PathBuf {
     let parent = target.parent().unwrap_or_else(|| Path::new(""));
-    let name = target
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("item");
     loop {
         let sequence = TRANSFER_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(
-            ".{name}.bexplorer-{purpose}-{}-{sequence}",
+            ".bexplorer-{purpose}-{}-{sequence}",
             std::process::id()
         ));
-        if !candidate.exists() {
+        if fs::symlink_metadata(&candidate).is_err() {
             return candidate;
         }
     }
@@ -1048,7 +1076,15 @@ fn copy_path(
     wait_if_paused(job, current_name(source), runtime, tx, control)?;
 
     let metadata = fs::symlink_metadata(source)?;
-    let snapshot = local::SourceSnapshot::capture(source)?;
+    let snapshot = local::SourceSnapshot::capture_with_metadata(source, &metadata)?;
+    let durable = job.kind == TransferKind::Move || job.conflict_policy == ConflictPolicy::Replace;
+    #[cfg(windows)]
+    let copy_streams = |runtime: &mut TransferRuntime| {
+        metadata::copy_streams(source, target, durable, job.kind, || {
+            check_cancelled(control)?;
+            wait_if_paused(job, current_name(source), runtime, tx, control)
+        })
+    };
     if metadata.file_type().is_symlink() {
         local::copy_link(source, target)?;
         runtime.track_created(target);
@@ -1066,7 +1102,7 @@ fn copy_path(
         return Ok(());
     }
     if metadata.is_dir() {
-        fs::create_dir(target)?;
+        metadata::create_directory(target)?;
         runtime.track_created(target);
         if job.kind == TransferKind::Move {
             runtime.copied_sources.push(snapshot);
@@ -1082,6 +1118,9 @@ fn copy_path(
                 runtime,
             )?;
         }
+        #[cfg(windows)]
+        copy_streams(runtime)?;
+        metadata::finish_directory(source, target, &metadata, durable)?;
         return Ok(());
     }
 
@@ -1096,11 +1135,10 @@ fn copy_path(
             source.display()
         )));
     }
-    let mut output = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(target)?;
-    runtime.track_created(target);
+    let mut output = metadata::create_file(target)?;
+    if let Ok(identity) = opened_file_identity(&output) {
+        runtime.track_created_identity(target, identity);
+    }
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     let current_name = current_name(source).to_string();
     emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
@@ -1122,24 +1160,27 @@ fn copy_path(
         runtime.copied_bytes = runtime.copied_bytes.saturating_add(read as u64);
         emit_progress_if_due(job, &current_name, TransferState::Copying, runtime, tx);
     }
-    // Publish the final partial byte interval before closing this file. Normal
-    // copies do not force a physical disk flush per file: safe eject performs
-    // that synchronization, while atomic replacements and cross-device moves
-    // call `sync_copied_path` before discarding the original.
+    // Publish the final partial byte interval before closing this file.
     if runtime.copied_bytes != runtime.last_emitted_bytes {
         emit_progress_checkpoint(job, &current_name, TransferState::Copying, runtime, tx);
     }
     #[cfg(test)]
     large_copy_tests::trace_io("flushing destination", runtime.copied_bytes);
     output.flush()?;
+    #[cfg(windows)]
+    copy_streams(runtime)?;
     if file_bytes != snapshot.size() || !snapshot.unchanged() {
         return Err(BExplorerError::Operation(format!(
             "The source changed while copying: {}",
             source.display()
         )));
     }
-    if let Some(modified) = snapshot.modified() {
-        output.set_times(fs::FileTimes::new().set_modified(modified))?;
+    metadata::finish_file(&input, &output, target, &metadata, durable)?;
+    if !snapshot.unchanged() {
+        return Err(BExplorerError::Operation(format!(
+            "The source changed while copying: {}",
+            source.display()
+        )));
     }
     if job.kind == TransferKind::Move {
         runtime.copied_sources.push(snapshot);
@@ -1290,8 +1331,15 @@ fn remove_source(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cleanup_created_targets(paths: &[PathBuf]) {
-    for path in paths.iter().rev() {
+fn cleanup_created_targets<'a>(
+    targets: impl DoubleEndedIterator<Item = &'a CreatedTarget> + Clone,
+) {
+    #[cfg(unix)]
+    for target in targets.clone().filter(|target| target.still_owned()) {
+        metadata::allow_directory_cleanup(&target.path, target.identity);
+    }
+    for target in targets.rev().filter(|target| target.still_owned()) {
+        let path = &target.path;
         let result = match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() => local::remove_link(path),
             Ok(metadata) if metadata.is_dir() => fs::remove_dir(path),
@@ -1307,15 +1355,20 @@ fn cleanup_created_targets(paths: &[PathBuf]) {
     }
 }
 
-fn cleanup_failed_staging(path: &Path, error: &BExplorerError) {
+fn cleanup_failed_staging(runtime: &TransferRuntime, path: &Path, error: &BExplorerError) {
     if !error.operation_may_continue() {
-        let _ = remove_source(path);
+        cleanup_created_targets(
+            runtime
+                .created_targets
+                .iter()
+                .filter(|entry| entry.path.starts_with(path)),
+        );
     }
 }
 
-fn cleanup_failed_transfer(paths: &[PathBuf], error: &BExplorerError, control: &TransferControl) {
-    if control.cancel.load(Ordering::Relaxed) && !error.operation_may_continue() {
-        cleanup_created_targets(paths);
+fn cleanup_failed_transfer(targets: &[CreatedTarget], error: &BExplorerError) {
+    if !error.operation_may_continue() {
+        cleanup_created_targets(targets.iter());
     }
 }
 
@@ -1570,6 +1623,7 @@ mod tests {
             completed_roots: vec![TransferCompletedRoot {
                 source: PathBuf::from("source.txt"),
                 target: PathBuf::from("destination.txt"),
+                undo_target: None,
             }],
         };
         let restored: ElevatedTransferResult =

@@ -249,8 +249,14 @@ impl BExplorerIced {
                 Space::new().height(0).into()
             };
 
-        let table = self.file_table(pane, palette);
-        let file_content: Element<'_, Message> = if self.preview_panel_visible(pane) {
+        let directory_access = self.pane(pane).directory_access;
+        let can_search = directory_access == DirectoryAccess::Regular;
+        let table = if directory_access == DirectoryAccess::Denied {
+            self.restricted_directory_panel(pane, palette)
+        } else {
+            self.file_table(pane, palette)
+        };
+        let file_content: Element<'_, Message> = if can_search && self.preview_panel_visible(pane) {
             row![
                 container(table)
                     .width(Length::Fill)
@@ -271,36 +277,46 @@ impl BExplorerIced {
         let search_mode_icon = match self.pane(pane).search_mode {
             SearchMode::Quick => "folder",
             SearchMode::Complete => "folder-stack",
+            SearchMode::Contents => "file",
         };
-        let search_input = text_input(
-            self.localized("Filtrar", "Filter"),
-            &self.pane(pane).search_text,
-        )
-        .id(search_input_id(pane))
-        .on_input(move |value| Message::SearchChanged(pane, value))
-        .size(self.font_size())
-        .padding(
-            Padding::new(6.0)
-                .left(self.ui_metric(9.0))
-                .right(self.ui_metric(38.0)),
-        )
-        .width(Length::Fill)
-        .style(move |_, status| {
-            let border_color = if matches!(status, iced::widget::text_input::Status::Focused { .. })
-            {
-                palette.accent
-            } else {
-                palette.strong_border
-            };
-            iced::widget::text_input::Style {
-                background: chrome_glass_background(palette, palette.input_bg).into(),
-                border: border::rounded(7).color(border_color).width(1),
-                icon: palette.muted_text,
-                placeholder: palette.muted_text,
-                value: palette.text,
-                selection: translucent_color(palette.accent, 0.58),
-            }
-        });
+        let search_placeholder = if !can_search {
+            self.localized("Búsqueda no disponible", "Search unavailable")
+        } else if self.pane(pane).search_mode == SearchMode::Contents {
+            self.localized("Buscar en el texto", "Search file text")
+        } else {
+            self.localized("Filtrar", "Filter")
+        };
+        let search_value = if can_search {
+            self.pane(pane).search_text.as_str()
+        } else {
+            ""
+        };
+        let search_input = text_input(search_placeholder, search_value)
+            .id(search_input_id(pane))
+            .on_input_maybe(can_search.then_some(move |value| Message::SearchChanged(pane, value)))
+            .size(self.font_size())
+            .padding(
+                Padding::new(6.0)
+                    .left(self.ui_metric(9.0))
+                    .right(self.ui_metric(38.0)),
+            )
+            .width(Length::Fill)
+            .style(move |_, status| {
+                let border_color =
+                    if matches!(status, iced::widget::text_input::Status::Focused { .. }) {
+                        palette.accent
+                    } else {
+                        palette.strong_border
+                    };
+                iced::widget::text_input::Style {
+                    background: chrome_glass_background(palette, palette.input_bg).into(),
+                    border: border::rounded(7).color(border_color).width(1),
+                    icon: palette.muted_text,
+                    placeholder: palette.muted_text,
+                    value: palette.text,
+                    selection: translucent_color(palette.accent, 0.58),
+                }
+            });
         let search_mode_button = Button::new(
             container(inline_icon(
                 search_mode_icon,
@@ -318,7 +334,7 @@ impl BExplorerIced {
         .width(self.ui_metric(28.0))
         .height(self.ui_metric(26.0))
         .padding(0)
-        .on_press(Message::ToggleSearchModeMenu(pane))
+        .on_press_maybe(can_search.then_some(Message::ToggleSearchModeMenu(pane)))
         .style(move |_, status| {
             selected_button_style(palette, self.search_mode_menu_open == Some(pane), status)
         });
@@ -492,6 +508,56 @@ impl BExplorerIced {
             .width(Length::Fill)
             .height(1)
             .style(move |_| container::Style::default().background(color))
+            .into()
+    }
+
+    fn restricted_directory_panel(&self, pane: PaneId, palette: Palette) -> Element<'_, Message> {
+        let state = self.pane(pane);
+        let system_prompt = if cfg!(target_os = "linux") {
+            self.localized(
+                "Autentícate con Polkit para ver el listado de esta carpeta.",
+                "Authenticate with Polkit to view this folder's listing.",
+            )
+        } else {
+            self.localized(
+                "Confirma en el Control de cuentas de usuario para ver el listado de esta carpeta.",
+                "Confirm in User Account Control to view this folder's listing.",
+            )
+        };
+        let label = if state.loading {
+            self.localized("Esperando autorización…", "Waiting for authorization…")
+        } else {
+            self.localized("Autorizar listado", "Authorize listing")
+        };
+        let panel = column![
+            text(self.localized("Acceso restringido", "Restricted access"))
+                .size(self.font_size() + 2.0)
+                .color(palette.text),
+            text(system_prompt)
+                .size(self.font_size())
+                .color(palette.muted_text)
+                .width(Length::Fill),
+            Button::new(text(label).size(self.font_size()))
+                .padding([7, 14])
+                .on_press_maybe(
+                    (!state.loading)
+                        .then_some(Message::AuthorizeDirectoryListing(pane, state.request_id)),
+                )
+                .style(move |_, status| dialog_button_style(palette, true, status)),
+        ]
+        .spacing(self.ui_metric(12.0));
+        let card = container(panel)
+            .width(Length::Fill)
+            .max_width(self.ui_metric(420.0))
+            .padding(self.ui_metric(16.0))
+            .style(move |_| {
+                container::Style::default()
+                    .background(palette.menu_bg)
+                    .border(border::rounded(7).color(palette.border).width(1))
+            });
+        container(card)
+            .center(Length::Fill)
+            .padding(self.ui_metric(12.0))
             .into()
     }
 

@@ -1,8 +1,10 @@
 pub mod archive;
 pub mod archive_listing;
+pub mod bulk_rename;
 pub mod compare;
 pub mod defender;
 pub mod duplicates;
+pub(crate) mod elevated_browse;
 pub mod explorer;
 pub mod hash;
 pub mod operations;
@@ -12,5 +14,6 @@ pub mod properties;
 pub mod search;
 pub mod storage_analysis;
 pub mod transfer_queue;
+pub(crate) mod transfer_undo;
 pub mod trash;
 pub mod watcher;

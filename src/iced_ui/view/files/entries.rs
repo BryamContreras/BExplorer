@@ -405,7 +405,7 @@ impl BExplorerIced {
             );
             row![
                 self.detail_file_entry_icon(entry, palette, selected, detail_icon_size),
-                highlighted_search_text(self.pane(pane).search_text.as_str(), &name, text_color,)
+                highlighted_search_text(self.search_highlight_query(pane), &name, text_color,)
                     .size(table_font_size)
                     .width(Length::Fill)
                     .wrapping(iced::widget::text::Wrapping::None),

@@ -160,6 +160,7 @@ impl BExplorerIced {
             KeyboardMenu::Search(pane) => match selection.index {
                 0 => Message::SetSearchMode(pane, SearchMode::Quick),
                 1 => Message::SetSearchMode(pane, SearchMode::Complete),
+                2 => Message::SetSearchMode(pane, SearchMode::Contents),
                 _ => return Task::none(),
             },
             KeyboardMenu::New(pane) => match selection.index {
@@ -225,6 +226,8 @@ impl BExplorerIced {
             KeyboardMenu::Search(_) => vec![
                 self.localized("Búsqueda rápida", "Quick search").into(),
                 self.localized("Búsqueda completa", "Full search").into(),
+                self.localized("Buscar en el texto", "Search file text")
+                    .into(),
             ],
             KeyboardMenu::New(_) => vec![
                 self.localized("Nueva carpeta", "New folder").into(),
@@ -526,7 +529,8 @@ impl BExplorerIced {
             }
             if !drive_entry {
                 items.push((
-                    self.localized("Renombrar", "Rename").into(),
+                    self.context_rename_label(menu_state.pane, menu_state.target)
+                        .into(),
                     ContextCommand::Rename,
                 ));
                 items.push((

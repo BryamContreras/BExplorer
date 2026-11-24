@@ -127,14 +127,21 @@ enum ScrollbarAxis {
 
 #[derive(Clone, Debug)]
 enum Message {
-    Loaded(PaneId, u64, Result<Vec<FileEntry>, String>),
+    Loaded(PaneId, u64, Result<Vec<FileEntry>, DirectoryLoadError>),
+    AuthorizeDirectoryListing(PaneId, u64),
+    AuthorizedDirectoryLoaded(PaneId, u64, PathBuf, Result<Option<Vec<FileEntry>>, String>),
     NetworkDiscoveryEntries(PaneId, u64, Vec<FileEntry>),
     NetworkDiscoveryAddresses(PaneId, u64, Vec<String>),
     NetworkDiscoveryPoll(PaneId, u64),
     SidebarStorageLoaded(Result<Vec<FileEntry>, String>),
     TrashIconStatusLoaded(u64, Result<bool, String>),
     DirectoryChanged(crate::fs::watcher::DirectoryChange),
-    WatchedDirectoryLoaded(PathBuf, u64, Vec<(PaneId, u64)>, Result<Vec<FileEntry>, String>),
+    WatchedDirectoryLoaded(
+        PathBuf,
+        u64,
+        Vec<(PaneId, u64)>,
+        Result<Vec<FileEntry>, String>,
+    ),
     StorageDevicesChanged,
     RefreshStorageAfterDeviceChange,
     CloseTab(PaneId, usize),
@@ -236,7 +243,10 @@ enum Message {
         Result<trash_fs::TrashMutationOutcome, String>,
     ),
     UndoLastAction,
-    UndoFinished(UndoAction, Result<usize, String>),
+    UndoFinished(
+        UndoAction,
+        Result<crate::fs::transfer_undo::UndoOutcome, String>,
+    ),
     VirtualArchiveExtractFinished(PaneId, PaneId, PathBuf, Result<usize, String>),
     SearchChanged(PaneId, String),
     ToggleSearchModeMenu(PaneId),
@@ -320,6 +330,7 @@ enum Message {
     RenameClipboard(RenameClipboardShortcut),
     RenameClipboardPaste(Option<String>),
     RenameSelected(PaneId),
+    BulkRename(bulk_rename::BulkRenameMessage),
     ConfirmRename,
     RenameFinished(RenameState, Result<PathBuf, String>),
     CancelRename,
@@ -928,6 +939,7 @@ struct KeyboardMenuSelection {
 enum SearchMode {
     Quick,
     Complete,
+    Contents,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1159,12 +1171,9 @@ impl FileClipboardState {
 
 #[derive(Clone, Debug)]
 enum UndoAction {
-    Copy {
+    Transfer {
         pane: PaneId,
-        targets: Vec<PathBuf>,
-    },
-    Move {
-        pane: PaneId,
+        kind: TransferKind,
         items: Vec<TransferCompletedRoot>,
     },
     Trash {
@@ -1174,40 +1183,25 @@ enum UndoAction {
 }
 
 impl UndoAction {
+    fn for_transfer(
+        pane: PaneId,
+        kind: TransferKind,
+        items: Vec<TransferCompletedRoot>,
+    ) -> Option<Self> {
+        (!items.is_empty() && items.iter().all(|item| item.undo_target.is_some()))
+            .then_some(Self::Transfer { pane, kind, items })
+    }
+
     fn pane(&self) -> PaneId {
         match self {
-            Self::Copy { pane, .. } | Self::Move { pane, .. } | Self::Trash { pane, .. } => *pane,
+            Self::Transfer { pane, .. } | Self::Trash { pane, .. } => *pane,
         }
     }
 
-    fn refresh_directories(&self) -> Vec<PathBuf> {
-        let mut directories = Vec::new();
-        let mut push_parent = |path: &Path| {
-            if let Some(parent) = path.parent().map(Path::to_path_buf)
-                && !directories.contains(&parent)
-            {
-                directories.push(parent);
-            }
-        };
-        match self {
-            Self::Copy { targets, .. } => {
-                for target in targets {
-                    push_parent(target);
-                }
-            }
-            Self::Move { items, .. } => {
-                for item in items {
-                    push_parent(&item.target);
-                    push_parent(&item.source);
-                }
-            }
-            Self::Trash { records, .. } => {
-                for record in records {
-                    push_parent(&record.original_path);
-                }
-            }
+    fn discard_completed_items(&mut self, completed: usize) {
+        if let Self::Transfer { items, .. } = self {
+            items.drain(..completed);
         }
-        directories
     }
 }
 
@@ -1305,21 +1299,32 @@ struct PdfPreviewState {
 impl Drop for PdfPreviewState {
     fn drop(&mut self) {
         self.cancel.store(true, AtomicOrdering::Relaxed);
-        if let Some(abort) = &self.abort { abort.abort(); }
+        if let Some(abort) = &self.abort {
+            abort.abort();
+        }
     }
 }
 
 impl PdfPreviewState {
     fn page_window(&self) -> std::ops::Range<usize> {
         let start = self.current_page.saturating_sub(1);
-        start..self.page_count.unwrap_or(1).min(self.current_page.saturating_add(self.visible_pages.clamp(3, 16) + 1))
+        start
+            ..self.page_count.unwrap_or(1).min(
+                self.current_page
+                    .saturating_add(self.visible_pages.clamp(3, 16) + 1),
+            )
     }
 
     fn next_page_to_load(&mut self) -> Option<usize> {
-        if self.loading { return None; }
+        if self.loading {
+            return None;
+        }
         let range = self.page_window();
         self.pages.retain(|page| range.contains(&page.index));
-        let next = range.into_iter().find(|index| !self.failed_pages.contains(index) && !self.pages.iter().any(|page| page.index == *index));
+        let next = range.into_iter().find(|index| {
+            !self.failed_pages.contains(index)
+                && !self.pages.iter().any(|page| page.index == *index)
+        });
         self.loading = next.is_some();
         next
     }
@@ -1332,9 +1337,18 @@ mod pdf_preview_tests {
     #[test]
     fn scrolling_large_documents_keeps_only_nearby_pages_and_does_not_retry_failures() {
         let mut state = PdfPreviewState {
-            path: "document.pdf".into(), source_stamp: (None, None), page_count: Some(10_000),
-            pages: vec![PdfPreviewPage { index: 0, handle: iced_image::Handle::from_rgba(1, 1, vec![0; 4]) }],
-            current_page: 5_000, visible_pages: 3, loading: false, document: None, aspect_ratio: 0.707,
+            path: "document.pdf".into(),
+            source_stamp: (None, None),
+            page_count: Some(10_000),
+            pages: vec![PdfPreviewPage {
+                index: 0,
+                handle: iced_image::Handle::from_rgba(1, 1, vec![0; 4]),
+            }],
+            current_page: 5_000,
+            visible_pages: 3,
+            loading: false,
+            document: None,
+            aspect_ratio: 0.707,
             failed_pages: HashSet::new(),
             cancel: Arc::new(AtomicBool::new(false)),
             abort: None,
@@ -1345,7 +1359,11 @@ mod pdf_preview_tests {
         assert_eq!(state.next_page_to_load(), None, "one request at a time");
         state.loading = false;
         state.failed_pages.extend(state.page_window());
-        assert_eq!(state.next_page_to_load(), None, "failed pages must not spin");
+        assert_eq!(
+            state.next_page_to_load(),
+            None,
+            "failed pages must not spin"
+        );
         state.current_page = 9999;
         assert_eq!(state.page_window(), 9998..10000);
         let cancel = Arc::clone(&state.cancel);
@@ -1353,21 +1371,35 @@ mod pdf_preview_tests {
         state.abort = Some(abort);
         drop(state);
         assert!(cancel.load(AtomicOrdering::Relaxed));
-        assert!(iced::futures::executor::block_on(iced::futures::future::Abortable::new(
-            iced::futures::future::pending::<()>(), registration
-        )).is_err());
+        assert!(
+            iced::futures::executor::block_on(iced::futures::future::Abortable::new(
+                iced::futures::future::pending::<()>(),
+                registration
+            ))
+            .is_err()
+        );
     }
 
     #[test]
     fn leaving_a_text_preview_aborts_its_pending_read() {
         let cancel = Arc::new(AtomicBool::new(false));
         let (abort, registration) = iced::futures::future::AbortHandle::new_pair();
-        let preview = TextPreviewState { path: "document.txt".into(), source_stamp: (None, None), content: text_editor::Content::with_text("…"), cancel: Arc::clone(&cancel), abort };
+        let preview = TextPreviewState {
+            path: "document.txt".into(),
+            source_stamp: (None, None),
+            content: text_editor::Content::with_text("…"),
+            cancel: Arc::clone(&cancel),
+            abort,
+        };
         drop(preview);
         assert!(cancel.load(AtomicOrdering::Relaxed));
-        assert!(iced::futures::executor::block_on(iced::futures::future::Abortable::new(
-            iced::futures::future::pending::<()>(), registration
-        )).is_err());
+        assert!(
+            iced::futures::executor::block_on(iced::futures::future::Abortable::new(
+                iced::futures::future::pending::<()>(),
+                registration
+            ))
+            .is_err()
+        );
     }
 }
 
@@ -1585,6 +1617,20 @@ impl TransferDisplayState {
     }
 }
 
+#[derive(Clone, Debug)]
+enum DirectoryLoadError {
+    AccessDenied,
+    Other(String),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum DirectoryAccess {
+    #[default]
+    Regular,
+    Denied,
+    AuthorizedListing,
+}
+
 #[derive(Debug)]
 struct PaneState {
     entries: Vec<FileEntry>,
@@ -1615,6 +1661,7 @@ struct PaneState {
     network_discovery_pending: usize,
     network_refresh: Option<network_refresh::NetworkRefresh>,
     directory_load: Option<DirectoryLoadToken>,
+    directory_access: DirectoryAccess,
     network_discovery_cancel: Arc<AtomicBool>,
     search_cancel: Option<Arc<AtomicBool>>,
     search_receiver: Option<Receiver<crate::fs::search::SearchEvent>>,
@@ -1662,6 +1709,7 @@ impl Default for PaneState {
             network_discovery_pending: 0,
             network_refresh: None,
             directory_load: None,
+            directory_access: DirectoryAccess::Regular,
             network_discovery_cancel: Arc::new(AtomicBool::new(false)),
             search_cancel: None,
             search_receiver: None,

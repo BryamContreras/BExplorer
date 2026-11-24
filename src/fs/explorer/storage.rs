@@ -72,7 +72,7 @@ fn storage_devices(_show_hidden_system_drives: bool) -> Vec<StorageDevice> {
 
 #[cfg(all(unix, not(target_os = "macos")))]
 fn storage_devices(show_hidden_system_drives: bool) -> Vec<StorageDevice> {
-    let mountinfo = fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
+    let mountinfo = fs::read("/proc/self/mountinfo").unwrap_or_default();
     let mounts = linux_mounts_from_mountinfo(&mountinfo);
     let mut devices = Vec::new();
     let mut seen = BTreeSet::new();
@@ -106,57 +106,118 @@ fn storage_devices(_show_hidden_system_drives: bool) -> Vec<StorageDevice> {
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn linux_mounts_from_mountinfo(text: &str) -> Vec<LinuxMount> {
-    text.lines()
+fn linux_mounts_from_mountinfo(text: impl AsRef<[u8]>) -> Vec<LinuxMount> {
+    text.as_ref()
+        .split(|byte| *byte == b'\n')
         .filter_map(parse_linux_mountinfo_line)
         .collect()
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn parse_linux_mountinfo_line(line: &str) -> Option<LinuxMount> {
-    let (before, after) = line.split_once(" - ")?;
-    let before_fields = before.split_whitespace().collect::<Vec<_>>();
-    let after_fields = after.split_whitespace().collect::<Vec<_>>();
+fn parse_linux_mountinfo_line(line: &[u8]) -> Option<LinuxMount> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let separator = line.windows(3).position(|window| window == b" - ")?;
+    let before_fields = line[..separator]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
+    let after_fields = line[separator + 3..]
+        .split(|byte| *byte == b' ')
+        .collect::<Vec<_>>();
     if before_fields.len() < 5 || after_fields.len() < 2 {
         return None;
     }
 
     Some(LinuxMount {
-        major_minor: before_fields[2].to_string(),
-        mount_point: PathBuf::from(decode_linux_mount_field(before_fields[4])),
-        fs_type: decode_linux_mount_field(after_fields[0]),
-        source: decode_linux_mount_field(after_fields[1]),
+        major_minor: String::from_utf8_lossy(before_fields[2]).into_owned(),
+        mount_point: PathBuf::from(std::ffi::OsString::from_vec(decode_linux_mount_field(
+            before_fields[4],
+        ))),
+        fs_type: String::from_utf8_lossy(&decode_linux_mount_field(after_fields[0])).into_owned(),
+        source: String::from_utf8_lossy(&decode_linux_mount_field(after_fields[1])).into_owned(),
     })
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
-fn decode_linux_mount_field(value: &str) -> String {
-    let mut output = String::with_capacity(value.len());
-    let bytes = value.as_bytes();
+fn decode_linux_mount_field(bytes: &[u8]) -> Vec<u8> {
+    let mut output = Vec::with_capacity(bytes.len());
     let mut index = 0;
 
     while index < bytes.len() {
         if bytes[index] == b'\\' && index + 3 < bytes.len() {
             let digits = &bytes[index + 1..index + 4];
-            if digits.iter().all(|byte| matches!(byte, b'0'..=b'7')) {
+            if digits[0] <= b'3' && digits.iter().all(|byte| matches!(byte, b'0'..=b'7')) {
                 let value = (digits[0] - b'0') * 64 + (digits[1] - b'0') * 8 + digits[2] - b'0';
-                output.push(value as char);
+                output.push(value);
                 index += 4;
                 continue;
             }
         }
-        output.push(bytes[index] as char);
+        output.push(bytes[index]);
         index += 1;
     }
 
     output
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn linux_elevated_browse_mount_is_local(path: &Path) -> bool {
+    fs::read("/proc/self/mountinfo")
+        .is_ok_and(|mountinfo| linux_elevated_browse_mount_is_local_from(path, &mountinfo))
+}
+
+#[cfg(target_os = "linux")]
+fn linux_elevated_browse_mount_is_local_from(path: &Path, mountinfo: &[u8]) -> bool {
+    linux_mounts_from_mountinfo(mountinfo)
+        .into_iter()
+        .filter(|mount| path.starts_with(&mount.mount_point))
+        .max_by_key(|mount| mount.mount_point.components().count())
+        .is_some_and(|mount| {
+            let fs_type = mount.fs_type.to_ascii_lowercase();
+            !(linux_fs_type_is_network(&fs_type)
+                || matches!(fs_type.as_str(), "autofs" | "fuse")
+                || fs_type.starts_with("fuse.")
+                || fs_type == "fuseblk" && !mount.source.starts_with("/dev/"))
+        })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+#[test]
+fn elevated_browse_mount_checks_skip_network_and_userspace_providers() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let mountinfo = b"1 0 8:1 / / rw - ext4 /dev/sda1 rw\n\
+        2 1 0:1 / /srv/smb\\040share rw - cifs //server/share rw\n\
+        3 1 0:2 / /srv/nfs rw - nfs4 server:/share rw\n\
+        4 1 0:3 / /run/user/1000/gvfs rw - fuse.gvfsd-fuse gvfsd-fuse rw\n\
+        5 1 0:4 / /mnt/\xff rw - fuse.sshfs remote:/ rw\n\
+        6 5 8:2 / /mnt/\xff/local rw - ext4 /dev/sda2 rw\n\
+        7 1 8:3 / /media/disk rw - fuseblk /dev/sda3 rw\n";
+    for remote in [
+        Path::new("/srv/smb share/file"),
+        Path::new("/srv/nfs/folder"),
+        Path::new("/run/user/1000/gvfs/smb-share:server=x"),
+        Path::new(OsStr::from_bytes(b"/mnt/\xff/remote-folder")),
+    ] {
+        assert!(
+            !linux_elevated_browse_mount_is_local_from(remote, mountinfo),
+            "{remote:?}"
+        );
+    }
+    for local in [
+        Path::new("/home/user/private"),
+        Path::new("/media/disk/folder"),
+        Path::new(OsStr::from_bytes(b"/mnt/\xff/local/subfolder")),
+    ] {
+        assert!(
+            linux_elevated_browse_mount_is_local_from(local, mountinfo),
+            "{local:?}"
+        );
+    }
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
-fn linux_mount_is_storage_candidate(
-    mount: &LinuxMount,
-    show_hidden_system_drives: bool,
-) -> bool {
+fn linux_mount_is_storage_candidate(mount: &LinuxMount, show_hidden_system_drives: bool) -> bool {
     let partition_type = linux_udev_partition_type(&mount.major_minor);
     linux_mount_is_storage_candidate_with_partition_type(
         mount,
@@ -187,9 +248,7 @@ fn linux_mount_is_storage_candidate_with_partition_type(
     if linux_fs_type_is_virtual(&fs_type) {
         return false;
     }
-    if !show_hidden_system_drives
-        && partition_type.is_some_and(linux_partition_type_is_firmware)
-    {
+    if !show_hidden_system_drives && partition_type.is_some_and(linux_partition_type_is_firmware) {
         return false;
     }
 
@@ -233,10 +292,8 @@ fn linux_udev_property(major_minor: &str, property: &str) -> Option<String> {
         return None;
     }
 
-    let data = fs::read_to_string(
-        Path::new("/run/udev/data").join(format!("b{major_minor}")),
-    )
-    .ok()?;
+    let data =
+        fs::read_to_string(Path::new("/run/udev/data").join(format!("b{major_minor}"))).ok()?;
     let prefix = format!("E:{property}=");
     data.lines().find_map(|line| {
         line.strip_prefix(&prefix)
@@ -429,9 +486,8 @@ fn linux_mount_display_name(mount: &LinuxMount, drive_kind: DriveKind) -> String
         .as_deref()
         .and_then(clean_linux_device_name)
         .or_else(|| {
-            linux_udev_property(&mount.major_minor, "ID_MODEL").and_then(|value| {
-                clean_linux_device_name(&value.replace('_', " "))
-            })
+            linux_udev_property(&mount.major_minor, "ID_MODEL")
+                .and_then(|value| clean_linux_device_name(&value.replace('_', " ")))
         });
 
     linux_storage_display_name(
@@ -506,12 +562,9 @@ fn linux_name_looks_like_volume_identifier(value: &str) -> bool {
         .bytes()
         .filter(|byte| *byte != b'-')
         .collect::<Vec<_>>();
-    let recognized_length = matches!(compact.len(), 8 | 16 | 32)
-        || (compact.len() == 32 && value.len() == 36);
-    recognized_length
-        && compact
-            .iter()
-            .all(|byte| byte.is_ascii_hexdigit())
+    let recognized_length =
+        matches!(compact.len(), 8 | 16 | 32) || (compact.len() == 32 && value.len() == 36);
+    recognized_length && compact.iter().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]

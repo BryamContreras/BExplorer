@@ -1051,7 +1051,13 @@ impl BExplorerIced {
             ContextCommand::Extract(mode) => {
                 self.start_context_extract(menu.pane, menu.target, mode)
             }
-            ContextCommand::Rename => self.context_begin_rename(menu.pane, menu.target),
+            ContextCommand::Rename => {
+                if self.context_has_bulk_rename_selection(menu.pane, menu.target) {
+                    self.open_bulk_rename(menu.pane, self.context_paths(menu.pane, menu.target))
+                } else {
+                    self.context_begin_rename(menu.pane, menu.target)
+                }
+            }
             ContextCommand::Delete => self.context_delete(menu.pane, menu.target, false),
             ContextCommand::DeletePermanent => self.context_delete(menu.pane, menu.target, true),
             ContextCommand::MountDiskImage => {

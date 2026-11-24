@@ -16,7 +16,7 @@ use crate::utils::errors::Result;
 
 mod network_discovery;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum EntryKind {
     Drive,
     Folder,
@@ -571,7 +571,7 @@ pub fn list_entries_cancellable(
         && !is_unc_path(path)
         && !crate::fs::archive_listing::is_archive_navigation_path(path)
     {
-        return list_directory_cancellable(path, show_hidden, Some(cancel));
+        return list_directory_cancellable(path, show_hidden, Some(cancel), false);
     }
     let result = list_entries(path, show_hidden);
     if cancel.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1456,17 +1456,31 @@ fn portable_device_entry(device: &PortableDevice) -> FileEntry {
 }
 
 fn list_directory(path: &Path, show_hidden: bool) -> Result<Vec<FileEntry>> {
-    list_directory_cancellable(path, show_hidden, None)
+    list_directory_cancellable(path, show_hidden, None, false)
+}
+
+#[cfg(any(windows, target_os = "linux"))]
+pub(super) fn list_directory_for_elevation(
+    path: &Path,
+    show_hidden: bool,
+) -> Result<Vec<FileEntry>> {
+    list_directory_cancellable(path, show_hidden, None, true)
 }
 
 fn list_directory_cancellable(
     path: &Path,
     show_hidden: bool,
     cancel: Option<&AtomicBool>,
+    elevated: bool,
 ) -> Result<Vec<FileEntry>> {
     let mut entries = Vec::new();
+    let items = fs::read_dir(path)?;
+    #[cfg(target_os = "linux")]
+    // Reading the names and searching the directory use separate permission
+    // bits. Without search access, per-entry stat would silently omit names.
+    fs::metadata(path.join("."))?;
 
-    for item in fs::read_dir(path)? {
+    for item in items {
         if cancel.is_some_and(|cancel| cancel.load(std::sync::atomic::Ordering::Relaxed)) {
             return Ok(Vec::new());
         }
@@ -1476,8 +1490,10 @@ fn list_directory_cancellable(
 
         let path = item.path();
         let name = item.file_name().to_string_lossy().to_string();
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            crate::utils::log::error(format!("Could not read metadata: {}", path.display()));
+        let Ok(metadata) = item.metadata() else {
+            if !elevated {
+                crate::utils::log::error(format!("Could not read metadata: {}", path.display()));
+            }
             continue;
         };
         let is_hidden = is_hidden_entry(&metadata, &name);
@@ -1487,8 +1503,9 @@ fn list_directory_cancellable(
         }
 
         let file_type = metadata.file_type();
-        let target_metadata = file_type
-            .is_symlink()
+        // An elevated enumeration can report a link in the selected folder,
+        // but resolving its target may access a different or remote path.
+        let target_metadata = (file_type.is_symlink() && !elevated)
             .then(|| fs::metadata(&path).ok())
             .flatten();
         let kind = if file_type.is_symlink() {
